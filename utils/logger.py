@@ -284,6 +284,17 @@ class MinifierLogger:
         json_str = self._safe_json_dumps(validation_data, "validation")
         log_level = self.logger.info if validation_passed else self.logger.warning
         self._safe_log(log_level, f"Validation result: {json_str}")
+    
+    def log_token_metrics(self, metrics_data: Dict[str, Any]):
+        """Log token-related metrics and events."""
+        log_data = {
+            "timestamp": datetime.utcnow().isoformat(),
+            "session_id": self.session_id,
+            **metrics_data
+        }
+        
+        json_str = self._safe_json_dumps(log_data, "token_metrics")
+        self._safe_log(self.logger.info, f"Token metrics: {json_str}")
 
 
 # Global logger instance

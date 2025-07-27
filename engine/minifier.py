@@ -3,6 +3,7 @@ import sys
 import operator
 import warnings
 import logging
+import time
 from typing import Union, Dict, Set, Any, Tuple, Optional, List, Callable
 
 # Python version compatibility check
@@ -20,8 +21,14 @@ try:
 except ImportError:
     HAS_ASTOR = False
 
-# Set up logger for the minifier
-logger = logging.getLogger(__name__)
+# Import enhanced logger from utils
+try:
+    from utils.logger import get_logger
+except ImportError:
+    # Fallback to basic logger if utils.logger is not available
+    import logging
+    def get_logger():
+        return logging.getLogger(__name__)
 
 # Compression depth levels
 class CompressionDepth:
@@ -71,7 +78,8 @@ def minify_code(
             if depth < CompressionDepth.BASIC or depth > CompressionDepth.AGGRESSIVE:
                 raise ValueError(f"compression_depth must be 1-4, got {depth}")
         
-        logger.debug(f"Minifying with compression depth: {depth}")
+        logger = get_logger()
+        logger._safe_log(logger.logger.debug, f"Minifying with compression depth: {depth}")
         
         # Parse the code into an AST
         tree = ast.parse(code_str)
@@ -95,7 +103,7 @@ def minify_code(
                     "ast.unparse() requires Python 3.9+. For Python 3.8, install 'astor': pip install astor"
                 )
         except Exception as e:
-            logger.error(f"Failed to unparse AST: {e}")
+            logger._safe_log(logger.logger.error, f"Failed to unparse AST: {e}")
             raise ValueError(f"AST unparsing failed: {e}") from e
         
         # Handle empty modules
@@ -138,11 +146,13 @@ def estimate_tokens(
     Returns:
         Estimated token count
     """
+    logger = get_logger()
+    
     if method == "api" and api_counter:
         try:
             return api_counter(code)
         except Exception as e:
-            logger.warning(f"API token counting failed: {e}, falling back to simple method")
+            logger._safe_log(logger.logger.warning, f"API token counting failed: {e}, falling back to simple method")
             method = "simple"
     
     # Model-specific calibration factors
@@ -274,6 +284,10 @@ class MinifyTransformer(ast.NodeTransformer):
         self.used_names: Set[str] = set()
         self.scope_stack: List[Set[str]] = []  # Track variable names in each scope
         self.module_names: Set[str] = set()  # Track imported module names
+        
+        # Get logger instance
+        self.logger = get_logger()
+        
         self.builtin_names = {
             'abs', 'all', 'any', 'ascii', 'bin', 'bool', 'bytearray', 'bytes',
             'callable', 'chr', 'classmethod', 'compile', 'complex', 'delattr',
@@ -658,11 +672,11 @@ class MinifyTransformer(ast.NodeTransformer):
                 result = op_func(left_val, right_val)
                 # Only fold if result is a simple type
                 if isinstance(result, (int, float, str, bool, complex)):
-                    logger.debug(f"Folding binary operation: {left_val} {type(node.op).__name__} {right_val} = {result}")
+                    self.logger._safe_log(self.logger.logger.debug, f"Folding binary operation: {left_val} {type(node.op).__name__} {right_val} = {result}")
                     return self._create_constant(result)
             except (ZeroDivisionError, OverflowError, ValueError, TypeError):
                 # Don't fold operations that would raise exceptions
-                logger.debug(f"Skipping unsafe binary operation: {left_val} {type(node.op).__name__} {right_val}")
+                self.logger._safe_log(self.logger.logger.debug, f"Skipping unsafe binary operation: {left_val} {type(node.op).__name__} {right_val}")
                 pass
         
         return node
@@ -685,10 +699,10 @@ class MinifyTransformer(ast.NodeTransformer):
                 op_func = self.SAFE_UNARYOPS[type(node.op)]
                 result = op_func(operand_val)
                 if isinstance(result, (int, float, str, bool, complex)):
-                    logger.debug(f"Folding unary operation: {type(node.op).__name__} {operand_val} = {result}")
+                    self.logger._safe_log(self.logger.logger.debug, f"Folding unary operation: {type(node.op).__name__} {operand_val} = {result}")
                     return self._create_constant(result)
             except (OverflowError, ValueError, TypeError):
-                logger.debug(f"Skipping unsafe unary operation: {type(node.op).__name__} {operand_val}")
+                self.logger._safe_log(self.logger.logger.debug, f"Skipping unsafe unary operation: {type(node.op).__name__} {operand_val}")
                 pass
         
         # Optimize double negation: --x -> x (at CONSTANTS level and above)
@@ -696,7 +710,7 @@ class MinifyTransformer(ast.NodeTransformer):
             isinstance(node.op, ast.USub) and 
             isinstance(node.operand, ast.UnaryOp) and
             isinstance(node.operand.op, ast.USub)):
-            logger.debug("Optimizing double negation")
+            self.logger._safe_log(self.logger.logger.debug, "Optimizing double negation")
             return node.operand.operand
         
         return node
@@ -723,10 +737,10 @@ class MinifyTransformer(ast.NodeTransformer):
                 try:
                     op_func = self.SAFE_COMPAREOPS[type(node.ops[0])]
                     result = op_func(left_val, right_val)
-                    logger.debug(f"Folding comparison: {left_val} {type(node.ops[0]).__name__} {right_val} = {result}")
+                    self.logger._safe_log(self.logger.logger.debug, f"Folding comparison: {left_val} {type(node.ops[0]).__name__} {right_val} = {result}")
                     return self._create_constant(result)
                 except (TypeError, ValueError):
-                    logger.debug(f"Skipping unsafe comparison: {left_val} {type(node.ops[0]).__name__} {right_val}")
+                    self.logger._safe_log(self.logger.logger.debug, f"Skipping unsafe comparison: {left_val} {type(node.ops[0]).__name__} {right_val}")
                     pass
         
         return node
@@ -797,11 +811,11 @@ class MinifyTransformer(ast.NodeTransformer):
         if test_val is not None:
             if test_val:
                 # Condition is always True - replace with body statements
-                logger.debug("Optimizing if True: statement")
+                self.logger._safe_log(self.logger.logger.debug, "Optimizing if True: statement")
                 return self._create_replacement_marker(node.body)
             else:
                 # Condition is always False - replace with orelse
-                logger.debug("Optimizing if False: statement")
+                self.logger._safe_log(self.logger.logger.debug, "Optimizing if False: statement")
                 if node.orelse:
                     return self._create_replacement_marker(node.orelse)
                 else:

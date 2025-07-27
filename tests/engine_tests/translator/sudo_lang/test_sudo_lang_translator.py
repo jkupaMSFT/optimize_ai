@@ -12,7 +12,7 @@ import os
 # Add the project root to the Python path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
 
-from engine.translator import python_to_sudolang, ast_to_sudolang, render_assign_target
+from engine.translators.sudo_lang_translator import python_to_sudolang, ast_to_sudolang, render_assign_target
 import ast
 
 

@@ -8,17 +8,18 @@ from pathlib import Path
 from datetime import datetime
 
 # Add project paths
-project_root = Path(__file__).parent
-sys.path.insert(0, str(project_root / "engine"))
+project_root = Path(__file__).parent.parent.parent  # Go up to optimize_ai root
+sys.path.insert(0, str(project_root))
 
-from minifier import (
+from engine.minifier import (
     minify_basic, minify_aggressive, minify_with_stats, 
-    minify_depth, CompressionDepth, estimate_tokens
+    minify_depth, CompressionDepth
 )
+from utils.logger import estimate_tokens
 
 def load_samples():
     """Load samples directly from the samples.py file."""
-    samples_file = project_root / "tests" / "samples.py"
+    samples_file = project_root / "samples" / "samples.py"
     
     # Execute the samples file to get the variables
     namespace = {}
@@ -65,17 +66,36 @@ def minify_all_samples(output_file="minified_samples.txt"):
             
             for depth in range(1, 5):
                 minified = minify_depth(sample_code, depth)
+                
+                # Enhanced token counting with tiktoken
+                original_tokens_tiktoken = estimate_tokens(sample_code, method="tiktoken", model_type="gpt-4")
+                original_tokens_simple = estimate_tokens(sample_code, method="simple", model_type="gpt-4")
+                minified_tokens_tiktoken = estimate_tokens(minified, method="tiktoken", model_type="gpt-4")
+                minified_tokens_simple = estimate_tokens(minified, method="simple", model_type="gpt-4")
+                
                 stats = {
                     "original_size": len(sample_code),
                     "minified_size": len(minified),
                     "size_reduction": len(sample_code) - len(minified),
                     "size_reduction_percent": ((len(sample_code) - len(minified)) / len(sample_code)) * 100,
-                    "original_tokens": estimate_tokens(sample_code),
-                    "minified_tokens": estimate_tokens(minified),
+                    "original_tokens_tiktoken": original_tokens_tiktoken,
+                    "original_tokens_simple": original_tokens_simple,
+                    "minified_tokens_tiktoken": minified_tokens_tiktoken,
+                    "minified_tokens_simple": minified_tokens_simple,
                     "compression_depth": depth
                 }
-                stats["token_reduction"] = stats["original_tokens"] - stats["minified_tokens"]
-                stats["token_reduction_percent"] = (stats["token_reduction"] / stats["original_tokens"]) * 100 if stats["original_tokens"] > 0 else 0
+                
+                # Calculate reductions using tiktoken (primary) and simple (comparison)
+                stats["token_reduction_tiktoken"] = original_tokens_tiktoken - minified_tokens_tiktoken
+                stats["token_reduction_percent_tiktoken"] = (stats["token_reduction_tiktoken"] / original_tokens_tiktoken) * 100 if original_tokens_tiktoken > 0 else 0
+                stats["token_reduction_simple"] = original_tokens_simple - minified_tokens_simple
+                stats["token_reduction_percent_simple"] = (stats["token_reduction_simple"] / original_tokens_simple) * 100 if original_tokens_simple > 0 else 0
+                
+                # Legacy fields for backward compatibility (using tiktoken)
+                stats["original_tokens"] = original_tokens_tiktoken
+                stats["minified_tokens"] = minified_tokens_tiktoken
+                stats["token_reduction"] = stats["token_reduction_tiktoken"]
+                stats["token_reduction_percent"] = stats["token_reduction_percent_tiktoken"]
                 
                 depth_results[depth] = {
                     'minified': minified,
@@ -101,9 +121,10 @@ def minify_all_samples(output_file="minified_samples.txt"):
     # Write results to file
     with open(output_file, 'w', encoding='utf-8') as f:
         f.write("="*80 + "\n")
-        f.write("PYTHON CODE MINIFIER RESULTS\n")
+        f.write("PYTHON CODE MINIFIER RESULTS WITH TIKTOKEN INTEGRATION\n")
         f.write(f"Generated on: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
         f.write(f"Total samples processed: {len(results)}\n")
+        f.write("Token counting: tiktoken (precise) + simple (comparison)\n")
         f.write("="*80 + "\n\n")
         
         for result in results:
@@ -133,9 +154,10 @@ def minify_all_samples(output_file="minified_samples.txt"):
                 stats = depth_data['stats']
                 f.write(f"Depth {depth} Stats:\n")
                 f.write(f"  Size reduction: {stats['size_reduction_percent']:.1f}%\n")
-                f.write(f"  Token reduction: {stats['token_reduction_percent']:.1f}%\n")
-                f.write(f"  Original: {stats['original_size']} chars, {stats['original_tokens']} tokens\n")
-                f.write(f"  Minified: {stats['minified_size']} chars, {stats['minified_tokens']} tokens\n\n")
+                f.write(f"  Token reduction (tiktoken): {stats['token_reduction_percent_tiktoken']:.1f}%\n")
+                f.write(f"  Token reduction (simple): {stats['token_reduction_percent_simple']:.1f}%\n")
+                f.write(f"  Original: {stats['original_size']} chars, {stats['original_tokens_tiktoken']} tokens (tiktoken), {stats['original_tokens_simple']} tokens (simple)\n")
+                f.write(f"  Minified: {stats['minified_size']} chars, {stats['minified_tokens_tiktoken']} tokens (tiktoken), {stats['minified_tokens_simple']} tokens (simple)\n\n")
             
             f.write("="*80 + "\n\n")
     

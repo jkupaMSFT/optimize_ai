@@ -21,7 +21,7 @@ def run_tests():
     
     # Discover and run tests
     loader = unittest.TestLoader()
-    start_dir = str(Path(__file__).parent / "engine_tests")
+    start_dir = str(Path(__file__).parent / "engine_tests" / "minifier")
     suite = loader.discover(start_dir, pattern="test_*.py")
     
     # Run tests

@@ -8,15 +8,15 @@ from pathlib import Path
 from datetime import datetime
 
 # Add project paths
-project_root = Path(__file__).parent.parent.parent  # Go up 3 levels: samples/translator/ -> samples/ -> optimize_ai/
+project_root = Path(__file__).parent.parent.parent.parent  # Go up 4 levels to optimize_ai/
 sys.path.insert(0, str(project_root))
 
-from engine.translator import python_to_sudolang
-from engine.minifier import estimate_tokens
+from engine.translators.sudo_lang_translator import python_to_sudolang
+from utils.logger import estimate_tokens
 
 def load_samples():
     """Load samples directly from the samples.py file."""
-    samples_file = project_root / "tests" / "samples.py"
+    samples_file = project_root / "samples" / "samples.py"
     
     # Execute the samples file to get the variables
     namespace = {}
@@ -65,11 +65,16 @@ def translate_all_samples(output_file="translated_samples.txt"):
             size_change = translated_size - original_size
             size_change_percent = (size_change / original_size * 100) if original_size > 0 else 0
             
-            # Token estimation
-            original_tokens = estimate_tokens(sample_code)
-            translated_tokens = estimate_tokens(translated_code)
-            token_change = translated_tokens - original_tokens
-            token_change_percent = (token_change / original_tokens * 100) if original_tokens > 0 else 0
+            # Enhanced token estimation with tiktoken
+            original_tokens_tiktoken = estimate_tokens(sample_code, method="tiktoken", model_type="gpt-4")
+            original_tokens_simple = estimate_tokens(sample_code, method="simple", model_type="gpt-4")
+            translated_tokens_tiktoken = estimate_tokens(translated_code, method="tiktoken", model_type="gpt-4")
+            translated_tokens_simple = estimate_tokens(translated_code, method="simple", model_type="gpt-4")
+            
+            token_change_tiktoken = translated_tokens_tiktoken - original_tokens_tiktoken
+            token_change_percent_tiktoken = (token_change_tiktoken / original_tokens_tiktoken * 100) if original_tokens_tiktoken > 0 else 0
+            token_change_simple = translated_tokens_simple - original_tokens_simple
+            token_change_percent_simple = (token_change_simple / original_tokens_simple * 100) if original_tokens_simple > 0 else 0
             
             # Store results
             results.append({
@@ -81,11 +86,20 @@ def translate_all_samples(output_file="translated_samples.txt"):
                     "translated_size": translated_size,
                     "size_change": size_change,
                     "size_change_percent": size_change_percent,
-                    "original_tokens": original_tokens,
-                    "translated_tokens": translated_tokens,
-                    "token_change": token_change,
-                    "token_change_percent": token_change_percent,
-                    "compression_ratio": translated_size / original_size if original_size > 0 else 1.0
+                    "original_tokens_tiktoken": original_tokens_tiktoken,
+                    "original_tokens_simple": original_tokens_simple,
+                    "translated_tokens_tiktoken": translated_tokens_tiktoken,
+                    "translated_tokens_simple": translated_tokens_simple,
+                    "token_change_tiktoken": token_change_tiktoken,
+                    "token_change_percent_tiktoken": token_change_percent_tiktoken,
+                    "token_change_simple": token_change_simple,
+                    "token_change_percent_simple": token_change_percent_simple,
+                    "compression_ratio": translated_size / original_size if original_size > 0 else 1.0,
+                    # Legacy fields for backward compatibility
+                    "original_tokens": original_tokens_tiktoken,
+                    "translated_tokens": translated_tokens_tiktoken,
+                    "token_change": token_change_tiktoken,
+                    "token_change_percent": token_change_percent_tiktoken
                 }
             })
             
@@ -100,9 +114,10 @@ def translate_all_samples(output_file="translated_samples.txt"):
     # Write results to file
     with open(output_path, 'w', encoding='utf-8') as f:
         f.write("="*80 + "\n")
-        f.write("PYTHON TO SUDOLANG TRANSLATION RESULTS\n")
+        f.write("PYTHON TO SUDOLANG TRANSLATION RESULTS WITH TIKTOKEN\n")
         f.write(f"Generated on: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
         f.write(f"Total samples processed: {len(results)}\n")
+        f.write("Token counting: tiktoken (precise) + simple (comparison)\n")
         f.write("="*80 + "\n\n")
         
         for result in results:
@@ -127,10 +142,15 @@ def translate_all_samples(output_file="translated_samples.txt"):
             # Statistics
             stats = result['stats']
             f.write("TRANSLATION STATISTICS:\n")
+            f.write("Tiktoken (Precise) Method:\n")
             f.write(f"  Size change: {stats['size_change']:+d} chars ({stats['size_change_percent']:+.1f}%)\n")
-            f.write(f"  Token change: {stats['token_change']:+d} tokens ({stats['token_change_percent']:+.1f}%)\n")
-            f.write(f"  Original: {stats['original_size']} chars, {stats['original_tokens']} tokens\n")
-            f.write(f"  Translated: {stats['translated_size']} chars, {stats['translated_tokens']} tokens\n")
+            f.write(f"  Token change: {stats['token_change_tiktoken']:+d} tokens ({stats['token_change_percent_tiktoken']:+.1f}%)\n")
+            f.write(f"  Original: {stats['original_size']} chars, {stats['original_tokens_tiktoken']} tokens\n")
+            f.write(f"  Translated: {stats['translated_size']} chars, {stats['translated_tokens_tiktoken']} tokens\n\n")
+            f.write("Simple Estimation Method:\n")
+            f.write(f"  Token change: {stats['token_change_simple']:+d} tokens ({stats['token_change_percent_simple']:+.1f}%)\n")
+            f.write(f"  Original: {stats['original_tokens_simple']} tokens\n")
+            f.write(f"  Translated: {stats['translated_tokens_simple']} tokens\n")
             f.write(f"  Compression ratio: {stats['compression_ratio']:.3f}x\n\n")
             
             f.write("="*80 + "\n\n")

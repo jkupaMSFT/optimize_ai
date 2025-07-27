@@ -11,6 +11,18 @@ from typing import Union, Dict, Set, Any, Tuple, Optional, List, Callable
 from pathlib import Path
 import traceback
 
+# Import tiktoken for precise token counting
+try:
+    import tiktoken
+    HAS_TIKTOKEN = True
+except ImportError:
+    HAS_TIKTOKEN = False
+    warnings.warn(
+        "tiktoken not available. Install with: pip install tiktoken for precise token counting.",
+        UserWarning,
+        stacklevel=2
+    )
+
 # Python version compatibility check
 if sys.version_info < (3, 8):
     warnings.warn(
@@ -296,6 +308,125 @@ class MinifierLogger:
         json_str = self._safe_json_dumps(log_data, "token_metrics")
         self._safe_log(self.logger.info, f"Token metrics: {json_str}")
 
+    def log_otpm_metrics(self, operation_id: str, input_length: int, 
+                        selected_compression_type: str, remaining_pct: float, 
+                        otpm_status: str, estimated_tokens: Optional[int] = None,
+                        actual_tokens: Optional[int] = None, model_type: str = "gpt-4"):
+        """
+        Log OTPM (Output Token Per Minute) related metrics for rate limit management.
+        
+        Args:
+            operation_id: Unique identifier for the operation
+            input_length: Length of input code in characters
+            selected_compression_type: Type of compression applied ('minimal', 'standard', 'aggressive', 'emergency')
+            remaining_pct: Percentage of remaining tokens in current rate limit window
+            otpm_status: Current OTPM status ('safe', 'warning', 'critical', 'summarized')
+            estimated_tokens: Estimated token count using tiktoken
+            actual_tokens: Actual token count from API response (if available)
+            model_type: Model type for token counting calibration
+        """
+        otpm_data = {
+            "event": "otpm_metrics",
+            "operation_id": operation_id,
+            "timestamp": datetime.utcnow().isoformat(),
+            "input_length": input_length,
+            "selected_compression_type": selected_compression_type,
+            "remaining_pct": round(remaining_pct, 2),
+            "otpm_status": otpm_status,
+            "model_type": model_type
+        }
+        
+        if estimated_tokens is not None:
+            otpm_data["estimated_tokens"] = estimated_tokens
+        
+        if actual_tokens is not None:
+            otpm_data["actual_tokens"] = actual_tokens
+            if estimated_tokens is not None:
+                accuracy = (1 - abs(estimated_tokens - actual_tokens) / actual_tokens) * 100
+                otpm_data["estimation_accuracy_pct"] = round(accuracy, 2)
+        
+        json_str = self._safe_json_dumps(otpm_data, "otpm_metrics")
+        
+        # Use appropriate log level based on OTPM status
+        if otpm_status in ['critical', 'summarized']:
+            self._safe_log(self.logger.warning, f"OTPM metrics: {json_str}")
+        elif otpm_status == 'warning':
+            self._safe_log(self.logger.info, f"OTPM metrics: {json_str}")
+        else:
+            self._safe_log(self.logger.debug, f"OTPM metrics: {json_str}")
+
+    def log_compression_adaptation(self, operation_id: str, original_compression: str,
+                                 new_compression: str, trigger_reason: str,
+                                 rate_limit_info: Optional[Dict] = None):
+        """
+        Log when compression strategy is adapted due to rate limit conditions.
+        
+        Args:
+            operation_id: Unique identifier for the operation
+            original_compression: Originally planned compression type
+            new_compression: Adapted compression type
+            trigger_reason: Reason for adaptation ('rate_limit', 'otpm_threshold', 'emergency')
+            rate_limit_info: Additional rate limit information
+        """
+        adaptation_data = {
+            "event": "compression_adaptation",
+            "operation_id": operation_id,
+            "timestamp": datetime.utcnow().isoformat(),
+            "original_compression": original_compression,
+            "new_compression": new_compression,
+            "trigger_reason": trigger_reason
+        }
+        
+        if rate_limit_info:
+            adaptation_data["rate_limit_info"] = rate_limit_info
+        
+        json_str = self._safe_json_dumps(adaptation_data, "compression_adaptation")
+        self._safe_log(self.logger.info, f"Compression adaptation: {json_str}")
+
+    def log_tiktoken_estimation(self, code: str, model_name: str = "cl100k_base", 
+                              operation_id: Optional[str] = None) -> int:
+        """
+        Use tiktoken to get precise token count and log the result.
+        
+        Args:
+            code: Code to count tokens for
+            model_name: Tiktoken model name (cl100k_base for GPT-4, p50k_base for GPT-3.5)
+            operation_id: Optional operation ID for tracking
+            
+        Returns:
+            Precise token count
+        """
+        if not HAS_TIKTOKEN:
+            # Fallback to estimation
+            estimated = len(code) // 4
+            self.log_token_estimation(code, "fallback_estimation", estimated, "unknown")
+            return estimated
+        
+        try:
+            encoding = tiktoken.get_encoding(model_name)
+            token_count = len(encoding.encode(code))
+            
+            tiktoken_data = {
+                "event": "tiktoken_estimation",
+                "operation_id": operation_id,
+                "timestamp": datetime.utcnow().isoformat(),
+                "model_name": model_name,
+                "code_length": len(code),
+                "precise_token_count": token_count,
+                "tokens_per_char": round(token_count / len(code), 4) if len(code) > 0 else 0
+            }
+            
+            json_str = self._safe_json_dumps(tiktoken_data, "tiktoken_estimation")
+            self._safe_log(self.logger.debug, f"Tiktoken estimation: {json_str}")
+            
+            return token_count
+            
+        except Exception as e:
+            self._safe_log(self.logger.error, f"Tiktoken estimation failed: {e}")
+            # Fallback to simple estimation
+            estimated = len(code) // 4
+            return estimated
+
 
 # Global logger instance
 _global_logger: Optional[MinifierLogger] = None
@@ -497,14 +628,37 @@ def minify_code(
 
 def estimate_tokens(
     code: str, 
-    method: str = "simple",
+    method: str = "tiktoken",
     api_counter: Optional[Callable[[str], int]] = None,
-    model_type: str = "gpt"
+    model_type: str = "gpt-4",
+    operation_id: Optional[str] = None
 ) -> int:
     """
     Estimate the number of tokens in code for LLM usage estimation.
+    Now defaults to tiktoken for precise counting.
+    
+    Args:
+        code: Code to count tokens for
+        method: Counting method ('tiktoken', 'simple', 'words', 'chars', 'precise', 'api')
+        api_counter: Optional API-based counter function
+        model_type: Model type for calibration
+        operation_id: Optional operation ID for tracking
     """
     logger = get_logger()
+    
+    # Try tiktoken first if available and method is tiktoken
+    if method == "tiktoken" and HAS_TIKTOKEN:
+        # Map model types to tiktoken encodings
+        encoding_map = {
+            "gpt-4": "cl100k_base",
+            "gpt-4-turbo": "cl100k_base", 
+            "gpt-3.5-turbo": "cl100k_base",
+            "gpt-3": "p50k_base",
+            "claude": "cl100k_base",  # Use GPT-4 encoding as fallback
+        }
+        
+        encoding_name = encoding_map.get(model_type, "cl100k_base")
+        return logger.log_tiktoken_estimation(code, encoding_name, operation_id)
     
     if method == "api" and api_counter:
         try:
@@ -515,17 +669,21 @@ def estimate_tokens(
             logger._safe_log(logger.logger.warning, f"API token counting failed: {e}, falling back to simple method")
             method = "simple"
     
+    # Fallback methods when tiktoken is not available or different method requested
     # Model-specific calibration factors
     calibration = {
-        "gpt": {"simple": 4.0, "words": 1.3, "chars": 3.5},
+        "gpt-4": {"simple": 3.8, "words": 1.25, "chars": 3.2},
+        "gpt-3.5-turbo": {"simple": 4.0, "words": 1.3, "chars": 3.5},
         "claude": {"simple": 4.2, "words": 1.4, "chars": 3.8},
         "generic": {"simple": 4.0, "words": 1.3, "chars": 3.5}
     }
     
     factors = calibration.get(model_type, calibration["generic"])
     
-    if method == "simple":
+    if method == "simple" or (method == "tiktoken" and not HAS_TIKTOKEN):
         result = int(len(code) / factors["simple"])
+        if method == "tiktoken" and not HAS_TIKTOKEN:
+            logger._safe_log(logger.logger.warning, "tiktoken not available, using simple estimation")
     elif method == "words":
         import re
         words = len(re.findall(r'\S+', code))
@@ -544,7 +702,7 @@ def estimate_tokens(
         
         result = int(base_tokens + operator_tokens + punct_tokens)
     else:
-        raise ValueError(f"Unknown estimation method: {method}. Use 'simple', 'words', 'chars', 'precise', or 'api'")
+        raise ValueError(f"Unknown estimation method: {method}. Use 'tiktoken', 'simple', 'words', 'chars', 'precise', or 'api'")
     
     logger.log_token_estimation(code, method, result, model_type)
     return result
@@ -579,6 +737,127 @@ def minify_with_stats(code_str: str, aggressive: bool = False) -> Tuple[str, Dic
     }
     
     return minified, stats
+
+
+def minify_with_otpm_tracking(
+    code_str: str, 
+    operation_id: str,
+    compression_type: str = "standard",
+    remaining_pct: float = 100.0,
+    model_type: str = "gpt-4",
+    aggressive: bool = False
+) -> Tuple[str, Dict[str, Any]]:
+    """
+    Minify code with full OTPM tracking and adaptive compression.
+    
+    Args:
+        code_str: Code to minify
+        operation_id: Unique operation identifier
+        compression_type: Type of compression ('minimal', 'standard', 'aggressive', 'emergency')
+        remaining_pct: Percentage of remaining tokens in rate limit window
+        model_type: Model type for token counting
+        aggressive: Legacy parameter for backward compatibility
+    """
+    logger = get_logger()
+    start_time = time.time()
+    
+    # Determine OTPM status based on remaining percentage
+    if remaining_pct > 80:
+        otmp_status = "safe"
+    elif remaining_pct > 50:
+        otmp_status = "warning" 
+    elif remaining_pct > 20:
+        otmp_status = "critical"
+    else:
+        otmp_status = "summarized"
+        compression_type = "emergency"  # Force emergency compression
+    
+    # Get precise token counts
+    original_tokens = estimate_tokens(code_str, method="tiktoken", model_type=model_type, operation_id=operation_id)
+    
+    # Log initial OTPM metrics
+    logger.log_otpm_metrics(
+        operation_id=operation_id,
+        input_length=len(code_str),
+        selected_compression_type=compression_type,
+        remaining_pct=remaining_pct,
+        otpm_status=otmp_status,
+        estimated_tokens=original_tokens,
+        model_type=model_type
+    )
+    
+    # Apply appropriate compression based on type
+    if compression_type == "emergency":
+        # Ultra-aggressive compression for emergency situations
+        minified = minify_code(code_str, compression_depth=4, aggressive=True)
+    elif compression_type == "aggressive":
+        minified = minify_code(code_str, compression_depth=4, aggressive=True)
+    elif compression_type == "standard":
+        minified = minify_code(code_str, compression_depth=3, aggressive=False)
+    elif compression_type == "minimal":
+        minified = minify_code(code_str, compression_depth=2, aggressive=False)
+    else:
+        # Default fallback
+        minified = minify_code(code_str, aggressive=aggressive)
+    
+    # Get minified token count
+    minified_tokens = estimate_tokens(minified, method="tiktoken", model_type=model_type, operation_id=operation_id)
+    
+    # Calculate comprehensive stats
+    processing_time = time.time() - start_time
+    stats = {
+        "operation_id": operation_id,
+        "original_size": len(code_str),
+        "minified_size": len(minified),
+        "size_reduction": len(code_str) - len(minified),
+        "size_reduction_percent": ((len(code_str) - len(minified)) / len(code_str)) * 100 if len(code_str) > 0 else 0,
+        "original_tokens": original_tokens,
+        "minified_tokens": minified_tokens,
+        "token_reduction": original_tokens - minified_tokens,
+        "token_reduction_percent": ((original_tokens - minified_tokens) / original_tokens) * 100 if original_tokens > 0 else 0,
+        "compression_type": compression_type,
+        "otpm_status": otmp_status,
+        "remaining_pct": remaining_pct,
+        "processing_time": processing_time,
+        "model_type": model_type
+    }
+    
+    # Log final OTPM metrics with results
+    logger.log_otpm_metrics(
+        operation_id=operation_id,
+        input_length=len(code_str),
+        selected_compression_type=compression_type,
+        remaining_pct=remaining_pct,
+        otpm_status=otmp_status,
+        estimated_tokens=minified_tokens,
+        model_type=model_type
+    )
+    
+    return minified, stats
+
+
+def get_compression_recommendation(remaining_pct: float, code_length: int) -> str:
+    """
+    Recommend compression type based on remaining OTPM percentage and code complexity.
+    
+    Args:
+        remaining_pct: Percentage of remaining tokens in rate limit window
+        code_length: Length of input code
+        
+    Returns:
+        Recommended compression type ('minimal', 'standard', 'aggressive', 'emergency')
+    """
+    # Consider code length as a factor
+    is_large_code = code_length > 5000
+    
+    if remaining_pct > 80:
+        return "minimal"
+    elif remaining_pct > 60:
+        return "standard" if not is_large_code else "aggressive"
+    elif remaining_pct > 30:
+        return "aggressive"
+    else:
+        return "emergency"
 
 
 class MinifyTransformer(ast.NodeTransformer):

@@ -111,6 +111,32 @@ def python_to_sudolang(code: str) -> str:
         
         return result
         
+    except SyntaxError as e:
+        processing_time = time.time() - start_time
+        
+        logger.log_error(
+            error=e,
+            operation_id=operation_id,
+            code_context=code[:200] + "..." if len(code) > 200 else code,
+            stage="parsing"
+        )
+        
+        # Attempt graceful fallback for broken code - useful for debugging scenarios
+        fallback_result = _fallback_translate_broken_code(code, e)
+        
+        logger._safe_log(
+            logger.logger.warning,
+            f"Syntax error in code, using fallback translation: {str(e)}",
+            {
+                "operation_id": operation_id,
+                "processing_time": processing_time,
+                "error_type": type(e).__name__,
+                "fallback_used": True
+            }
+        )
+        
+        return fallback_result
+        
     except Exception as e:
         processing_time = time.time() - start_time
         
@@ -131,7 +157,122 @@ def python_to_sudolang(code: str) -> str:
             }
         )
         
-        return "Invalid Python code."
+        # Even for non-syntax errors, attempt some fallback
+        return f"# TRANSLATION ERROR: {type(e).__name__}\n# Original code with syntax issues:\n" + _format_code_as_comments(code)
+
+def _format_code_as_comments(code: str) -> str:
+    """Format code as comments for fallback scenarios."""
+    lines = code.split('\n')
+    return '\n'.join(f"# {line}" if line.strip() else "#" for line in lines)
+
+def _fallback_translate_broken_code(code: str, syntax_error: SyntaxError) -> str:
+    """
+    Attempt to translate broken Python code by processing line-by-line
+    and providing helpful information about syntax errors.
+    """
+    logger = get_translator_logger()
+    
+    try:
+        lines = code.split('\n')
+        error_line = getattr(syntax_error, 'lineno', None)
+        error_col = getattr(syntax_error, 'offset', None)
+        error_msg = str(syntax_error).replace('(<unknown>, line ', '(line ')
+        
+        result_lines = []
+        
+        # Add error information header
+        result_lines.append(f"# SYNTAX ERROR: {error_msg}")
+        if error_line:
+            result_lines.append(f"# Error detected at line {error_line}" + (f", column {error_col}" if error_col else ""))
+        result_lines.append("# Attempting partial translation of valid code sections...")
+        result_lines.append("")
+        
+        # Try to process code in smaller chunks
+        for i, line in enumerate(lines, 1):
+            line = line.rstrip()
+            if not line.strip():
+                result_lines.append("")
+                continue
+                
+            # Mark the error line
+            if error_line and i == error_line:
+                result_lines.append(f"# >>> SYNTAX ERROR ON THIS LINE <<<")
+                result_lines.append(f"# {line}")
+                if error_col and error_col > 0:
+                    result_lines.append(f"# {' ' * (error_col - 1)}^-- Error here")
+                continue
+            
+            # Try to parse individual statements when possible
+            try:
+                # Attempt to parse just this line as a statement
+                if line.strip() and not line.strip().startswith('#'):
+                    # Try basic transformation of common patterns
+                    translated_line = _basic_line_translation(line)
+                    result_lines.append(translated_line)
+                else:
+                    result_lines.append(f"# {line}")
+            except:
+                # If individual line also fails, just comment it
+                result_lines.append(f"# UNPARSEABLE: {line}")
+        
+        return '\n'.join(result_lines)
+        
+    except Exception as fallback_error:
+        logger._safe_log(
+            logger.logger.error,
+            f"Fallback translation also failed: {fallback_error}",
+            {"original_syntax_error": str(syntax_error)}
+        )
+        # Final fallback - just format as comments with error info
+        return f"# SYNTAX ERROR: {syntax_error}\n# Unable to parse - original code below:\n" + _format_code_as_comments(code)
+
+def _basic_line_translation(line: str) -> str:
+    """
+    Basic line-by-line translation for common Python patterns.
+    Used when full AST parsing fails.
+    """
+    line = line.strip()
+    
+    # Function definitions
+    if line.startswith('def '):
+        return f"function {line[4:].replace(':', ' {')}..."
+    
+    # Class definitions  
+    if line.startswith('class '):
+        return f"concept {line[6:].replace(':', ' {')}..."
+    
+    # If statements
+    if line.startswith('if '):
+        return f"if {line[3:].replace(':', ' {')}..."
+    
+    # For loops
+    if line.startswith('for '):
+        return f"for each {line[4:].replace(':', ' {')}..."
+    
+    # While loops
+    if line.startswith('while '):
+        return f"while {line[6:].replace(':', ' {')}..."
+    
+    # Return statements
+    if line.startswith('return '):
+        return f"return {line[7:]}"
+    
+    # Import statements
+    if line.startswith('import ') or line.startswith('from '):
+        return line  # Keep imports as-is
+    
+    # Comments
+    if line.startswith('#'):
+        return line
+    
+    # Try to handle assignments
+    if '=' in line and not any(op in line for op in ['==', '!=', '<=', '>=']):
+        parts = line.split('=', 1)
+        if len(parts) == 2:
+            return f"{parts[0].strip()} = {parts[1].strip()}"
+    
+    # Default: return as pseudocode comment
+    return f"execute: {line}"
 
 def render_assign_target(t: ast.expr) -> str:
    if isinstance(t, ast.Name):

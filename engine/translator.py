@@ -10,12 +10,18 @@ except ImportError:
     HAS_LOGGER = False
     # Fallback logger class
     class MinifierLogger:
+        def __init__(self):
+            self.logger = self  # Self-reference for compatibility
+            
         def log_minification_start(self, **kwargs): return "fallback-op-id"
         def log_minification_complete(self, **kwargs): pass
         def log_ast_transformation(self, **kwargs): pass
         def log_optimization(self, **kwargs): pass
         def log_error(self, **kwargs): pass
         def _safe_log(self, func, msg, extra=None): pass
+        def info(self, msg, extra=None): pass
+        def error(self, msg, extra=None): pass
+        def warning(self, msg, extra=None): pass
 
 # Initialize logger for the translator module
 _translator_logger = None

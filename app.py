@@ -3,6 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field, validator
 from typing import Optional, Dict, Any
 import time
+import ast
 from datetime import datetime
 import uvicorn
 
@@ -37,6 +38,9 @@ from engine.minifier import minify_depth
 
 # Import our logging setup
 from utils.logger import setup_minifier_logging, get_logger
+
+# Import adapter for tier-based compression
+from engine.adapter import adapt_compression
 
 # Initialize FastAPI app
 app = FastAPI(
@@ -306,13 +310,9 @@ async def minify_python_code(request: MinifyRequest, http_request: Request):
             "validation_enabled": request.validate_output
         })
         
-        # Perform minification
-        minified_code = minify_code(
-            code_str=request.code,
-            aggressive=request.aggressive,
-            validate=request.validate_output,
-            compression_depth=request.compression_depth
-        )
+        # Use adaptive compression with tier selection
+        headers = dict(http_request.headers)
+        minified_code = adapt_compression(headers, request.code)
         
         # Calculate metrics
         original_size = len(request.code)
@@ -428,18 +428,22 @@ async def minify_with_detailed_stats(request: MinifyRequest, http_request: Reque
     request_id = http_request.headers.get("x-request-id", "unknown")
     
     try:
-        # Perform minification with detailed stats
-        minified_code, stats = minify_with_stats(
-            code_str=request.code,
-            aggressive=request.aggressive or (request.compression_depth and request.compression_depth >= CompressionDepth.VARIABLES)
-        )
+        # Use adaptive compression with tier selection
+        headers = dict(http_request.headers)
+        minified_code = adapt_compression(headers, request.code)
         
         # Simple token estimation: len(minified) // 4
         estimated_tokens = len(minified_code) // 4
         
-        # Add token estimation to stats
-        stats["estimated_tokens"] = estimated_tokens
-        stats["token_estimation_method"] = "len_divided_by_4"
+        # Create basic stats structure for consistency
+        stats = {
+            "original_size": len(request.code),
+            "minified_size": len(minified_code),
+            "processing_time_ms": (time.time() - start_time) * 1000,
+            "estimated_tokens": estimated_tokens,
+            "token_estimation_method": "len_divided_by_4",
+            "compression_method": "adaptive_tier_selection"
+        }
         
         # Log successful minification with stats
         fastapi_logger.log_token_metrics({
@@ -616,8 +620,9 @@ async def translate_to_sudolang(request: TranslateRequest, http_request: Request
             "original_code_length": len(request.code)
         })
         
-        # Perform translation
-        translated_code = python_to_sudolang(request.code)
+        # Use adaptive compression with tier selection
+        headers = dict(http_request.headers)
+        translated_code = adapt_compression(headers, request.code, is_translate=True)
         
         # Calculate metrics
         original_size = len(request.code)
@@ -625,7 +630,6 @@ async def translate_to_sudolang(request: TranslateRequest, http_request: Request
         processing_time_ms = (time.time() - start_time) * 1000
         
         # Count AST nodes for complexity metrics
-        import ast
         try:
             tree = ast.parse(request.code)
             ast_nodes_processed = len([node for node in ast.walk(tree)])
@@ -717,8 +721,17 @@ async def translate_to_sudolang_with_stats(request: TranslateRequest, http_reque
     request_id = http_request.headers.get("x-request-id", "unknown")
     
     try:
-        # Perform translation with detailed stats
-        translated_code, stats = sudo_translate_with_stats(request.code)
+        # Use adaptive compression with tier selection
+        headers = dict(http_request.headers)
+        translated_code = adapt_compression(headers, request.code, is_translate=True)
+        
+        # Create basic stats structure for consistency
+        stats = {
+            "original_size": len(request.code),
+            "translated_size": len(translated_code),
+            "processing_time_ms": (time.time() - start_time) * 1000,
+            "compression_method": "adaptive_tier_selection"
+        }
         
         # Log successful translation with stats
         fastapi_logger.log_token_metrics({
@@ -783,12 +796,9 @@ async def translate_to_synthlang(request: TranslateRequest, http_request: Reques
             "indent_size": request.indent_size
         })
         
-        # Perform translation
-        translated_code = enhanced_python_to_synthlang(
-            code=request.code,
-            compact=request.compact,
-            indent_size=request.indent_size
-        )
+        # Use adaptive compression with tier selection
+        headers = dict(http_request.headers)
+        translated_code = adapt_compression(headers, request.code, is_translate=True)
         
         # Calculate metrics
         original_size = len(request.code)
@@ -798,7 +808,6 @@ async def translate_to_synthlang(request: TranslateRequest, http_request: Reques
         processing_time_ms = (time.time() - start_time) * 1000
         
         # Count AST nodes for complexity metrics
-        import ast
         try:
             tree = ast.parse(request.code)
             ast_nodes_processed = len([node for node in ast.walk(tree)])
@@ -894,52 +903,33 @@ async def translate_to_synthlang_with_stats(request: TranslateRequest, http_requ
     request_id = http_request.headers.get("x-request-id", "unknown")
     
     try:
-        # Perform translation with both methods for comparison
-        enhanced_result = enhanced_python_to_synthlang(
-            code=request.code,
-            compact=request.compact,
-            indent_size=request.indent_size
-        )
-        
-        node_map_result = python_to_synthlang_node_map(
-            code=request.code,
-            indent_size=request.indent_size
-        )
+        # Use adaptive compression with tier selection
+        headers = dict(http_request.headers)
+        translated_code = adapt_compression(headers, request.code, is_translate=True)
         
         # Calculate metrics
         original_size = len(request.code)
-        enhanced_size = len(enhanced_result)
-        node_map_size = len(node_map_result)
+        translated_size = len(translated_code)
         processing_time_ms = (time.time() - start_time) * 1000
         
         # Count AST nodes
-        import ast
         try:
             tree = ast.parse(request.code)
             ast_nodes_processed = len([node for node in ast.walk(tree)])
         except:
             ast_nodes_processed = 0
         
-        # Use enhanced result as primary output
-        translated_code = enhanced_result
-        translated_size = enhanced_size
+        # Use translated result as primary output
         size_change = translated_size - original_size
         size_change_percent = (size_change / original_size * 100) if original_size > 0 else 0
         
-        # Create comprehensive stats
+        # Create comprehensive stats for adaptive compression
         stats = {
-            "enhanced_method": {
-                "size": enhanced_size,
-                "size_change_percent": round((enhanced_size - original_size) / original_size * 100, 2) if original_size > 0 else 0
+            "adaptive_compression": {
+                "size": translated_size,
+                "size_change_percent": round(size_change_percent, 2)
             },
-            "node_map_method": {
-                "size": node_map_size,
-                "size_change_percent": round((node_map_size - original_size) / original_size * 100, 2) if original_size > 0 else 0
-            },
-            "comparison": {
-                "size_difference": abs(enhanced_size - node_map_size),
-                "preferred_method": "enhanced" if enhanced_size <= node_map_size else "node_map"
-            }
+            "method": "adaptive_tier_selection"
         }
         
         # Log successful translation with stats
@@ -947,8 +937,7 @@ async def translate_to_synthlang_with_stats(request: TranslateRequest, http_requ
             "event": "synthlang_translation_with_stats_success",
             "request_id": request_id,
             "original_size": original_size,
-            "enhanced_size": enhanced_size,
-            "node_map_size": node_map_size,
+            "translated_size": translated_size,
             "processing_time_ms": processing_time_ms,
             "ast_nodes_processed": ast_nodes_processed,
             "compact_mode": request.compact
@@ -962,7 +951,7 @@ async def translate_to_synthlang_with_stats(request: TranslateRequest, http_requ
             ast_nodes_processed=ast_nodes_processed,
             compact_mode=request.compact,
             size_reduction_percent=round(size_change_percent, 2),
-            translation_method="enhanced_python_to_synthlang"
+            translation_method="adaptive_compression"
         )
         
     except Exception as e:

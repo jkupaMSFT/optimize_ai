@@ -1,5 +1,5 @@
 from enum import Enum
-from typing import Tuple, Callable, Optional
+from typing import Tuple, Callable, Optional, List
 
 # Type aliases for injected functions
 MinifyFn = Callable[[str, bool], str]
@@ -11,6 +11,7 @@ class CompressionType(Enum):
     BASIC = (0, 500)
     AGGRESSIVE = (500, 2000)
     TRANSLATE = (2000, 10000)
+    STANDARD = (1000, 5000)  # Alternative tier for waterfall processing
     SUMMARIZE = (10000, float("inf"))
     
     def __init__(self, min_len: int, max_len: float):
@@ -53,6 +54,11 @@ def compress_content(
             return minify_code_func(content, aggressive=False)
         return content
     
+    if compression_type == CompressionType.STANDARD:
+        if minify_code_func:
+            return minify_code_func(content, aggressive=False)
+        return content
+    
     if compression_type == CompressionType.AGGRESSIVE:
         if minify_code_func:
             return minify_code_func(content, aggressive=True)
@@ -89,7 +95,7 @@ def process_code(
 
 
 # Utility functions for threshold introspection
-def get_all_thresholds() -> list[Tuple[str, int, float]]:
+def get_all_thresholds() -> List[Tuple[str, int, float]]:
     """Get all compression thresholds for documentation/debugging."""
     return [(ct.name, ct.min_len, ct.max_len) for ct in CompressionType]
 

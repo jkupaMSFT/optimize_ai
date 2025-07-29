@@ -21,8 +21,8 @@ try:
     from ..engine.mapping.source_map_production import EnhancedMappedNode, ProductionSourceMap
 except ImportError:
     # For standalone execution
-    from engine.mapping.source_map import MappedNode as BasicMappedNode, SourceMap as BasicSourceMap
-    from engine.mapping.source_map_production import EnhancedMappedNode, ProductionSourceMap
+    from input_optimizer.engine.mapping.source_map import MappedNode as BasicMappedNode, SourceMap as BasicSourceMap
+    from input_optimizer.engine.mapping.source_map_production import EnhancedMappedNode, ProductionSourceMap
 
 logger = logging.getLogger(__name__)
 

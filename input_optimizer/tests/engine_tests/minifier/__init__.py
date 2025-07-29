@@ -1,0 +1,1 @@
+# Minifier tests package

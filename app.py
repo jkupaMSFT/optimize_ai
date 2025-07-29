@@ -8,39 +8,41 @@ from datetime import datetime
 import uvicorn
 
 # Import our enhanced minifier with logging
-from engine.minifier import (
+from input_optimizer.engine.minifier import (
     minify_code, 
     minify_with_stats, 
-    estimate_tokens,
-    CompressionDepth
+    CompressionDepth,
+    minify_depth
 )
 
 # Import enhanced logger functions
 from utils.logger import (
     minify_with_otpm_tracking,
     get_compression_recommendation,
-    get_logger
+    get_logger,
+    setup_minifier_logging,
+    estimate_tokens
 )
 
 # Import translators
-from engine.translators.sudo_lang_translator import (
+from input_optimizer.engine.translators.sudo_lang_translator import (
     python_to_sudolang,
     translate_with_stats as sudo_translate_with_stats
 )
-from engine.translators.synth_lang_translator import (
+from input_optimizer.engine.translators.synth_lang_translator import (
     enhanced_python_to_synthlang,
     python_to_synthlang_node_map,
     python_to_synthlang
 )
 
-# Import minifier for chaining
-from engine.minifier import minify_depth
-
-# Import our logging setup
-from utils.logger import setup_minifier_logging, get_logger
+# Import semantic compression engine
+from input_optimizer.engine.semantic_compression_engine import (
+    SemanticAwareCompressionEngine,
+    create_compression_engine
+)
 
 # Import adapter for tier-based compression
-from engine.adapter import adapt_compression
+from input_optimizer.engine.adapter import adapt_compression
 
 # Initialize FastAPI app
 app = FastAPI(
@@ -266,8 +268,54 @@ class ChainedPipelineResponse(BaseModel):
     processing_time_ms: float = Field(..., description="Total processing time in milliseconds")
     methods_analyzed: int = Field(..., description="Number of transformation methods analyzed")
 
+# Semantic Compression Models
+class SemanticCompressionRequest(BaseModel):
+    code: str = Field(..., description="Python source code to compress", min_length=1, max_length=1000000)
+    similarity_threshold: Optional[float] = Field(0.7, description="Minimum similarity score to maintain", ge=0.0, le=1.0)
+    preserve_semantics: Optional[bool] = Field(True, description="Enable semantic preservation mode")
+    
+    @validator('code')
+    def validate_code_not_empty(cls, v):
+        if not v.strip():
+            raise ValueError('code cannot be empty or whitespace only')
+        return v
+
+class SemanticCompressionResponse(BaseModel):
+    original_code: str = Field(..., description="Original Python code")
+    compressed_code: str = Field(..., description="Compressed Python code")
+    original_tokens: int = Field(..., description="Original token count")
+    compressed_tokens: int = Field(..., description="Compressed token count")
+    tokens_saved: int = Field(..., description="Number of tokens saved")
+    compression_ratio: float = Field(..., description="Compression ratio (0.0 to 1.0)")
+    compression_percentage: float = Field(..., description="Compression percentage")
+    similarity_score: float = Field(..., description="Semantic similarity score (0.0 to 1.0)")
+    meets_threshold: bool = Field(..., description="Whether similarity meets threshold")
+    stage_breakdown: Dict[str, Dict[str, Any]] = Field(..., description="Breakdown by compression stage")
+    processing_time_ms: float = Field(..., description="Processing time in milliseconds")
+
+class CompressionComparisonRequest(BaseModel):
+    code: str = Field(..., description="Python source code to analyze", min_length=1, max_length=1000000)
+    include_maximum: Optional[bool] = Field(True, description="Include maximum compression analysis")
+    similarity_threshold: Optional[float] = Field(0.7, description="Similarity threshold for semantic compression")
+    
+    @validator('code')
+    def validate_code_not_empty(cls, v):
+        if not v.strip():
+            raise ValueError('code cannot be empty or whitespace only')
+        return v
+
+class CompressionComparisonResponse(BaseModel):
+    original: Dict[str, Any] = Field(..., description="Original code analysis")
+    semantic_compression: Dict[str, Any] = Field(..., description="Semantic compression results")
+    maximum_compression: Optional[Dict[str, Any]] = Field(None, description="Maximum compression results")
+    recommendation: Dict[str, str] = Field(..., description="Recommended compression method with reason")
+    analysis: Dict[str, Any] = Field(..., description="Code characteristics analysis")
+
 # Global state for tracking uptime
 app.start_time = time.time()
+
+# Initialize compression engines
+semantic_engine = create_compression_engine(similarity_threshold=0.7)
 
 @app.get("/health", response_model=HealthResponse, tags=["Health"])
 async def health_check():
@@ -1408,6 +1456,280 @@ async def general_exception_handler(request: Request, exc: Exception):
             request_id=request_id
         ).dict()
     )
+
+@app.post("/compress/semantic", response_model=SemanticCompressionResponse, tags=["Semantic Compression"])
+async def compress_semantic(request: SemanticCompressionRequest):
+    """
+    Apply semantic-aware compression that balances token efficiency with similarity preservation.
+    
+    This endpoint uses intelligent compression strategies including:
+    - AST-aware identifier compression
+    - Smart docstring optimization
+    - Context-aware token reduction
+    - Semantic notation substitution
+    
+    Returns detailed analysis with stage-by-stage breakdown.
+    """
+    start_time = time.time()
+    request_id = str(int(time.time() * 1000))
+    
+    try:
+        fastapi_logger.log_token_metrics({
+            "event": "semantic_compression_request",
+            "request_id": request_id,
+            "similarity_threshold": request.similarity_threshold,
+            "code_length": len(request.code)
+        })
+        
+        # Set similarity threshold
+        semantic_engine.similarity_threshold = request.similarity_threshold
+        
+        # Perform compression
+        result = semantic_engine.compress(request.code, request.preserve_semantics)
+        
+        processing_time_ms = (time.time() - start_time) * 1000
+        
+        # Format stage breakdown for response
+        stage_breakdown = {}
+        for stage_name, stage_data in result.get('stage_results', {}).items():
+            stage_breakdown[stage_name] = {
+                'tokens_saved': stage_data.get('tokens_saved', 0),
+                'compression_ratio': stage_data.get('compression_ratio', 0),
+                'description': f"Stage: {stage_name.replace('_', ' ').title()}"
+            }
+        
+        fastapi_logger.log_token_metrics({
+            "event": "semantic_compression_completed",
+            "request_id": request_id,
+            "compression_percentage": result['compression_percentage'],
+            "similarity_score": result['similarity_score'],
+            "tokens_saved": result['tokens_saved'],
+            "processing_time_ms": processing_time_ms
+        })
+        
+        return SemanticCompressionResponse(
+            original_code=result['original_code'],
+            compressed_code=result['compressed_code'],
+            original_tokens=result['original_tokens'],
+            compressed_tokens=result['compressed_tokens'],
+            tokens_saved=result['tokens_saved'],
+            compression_ratio=result['compression_ratio'],
+            compression_percentage=result['compression_percentage'],
+            similarity_score=result['similarity_score'],
+            meets_threshold=result['meets_threshold'],
+            stage_breakdown=stage_breakdown,
+            processing_time_ms=processing_time_ms
+        )
+        
+    except ValueError as e:
+        fastapi_logger.log_token_metrics({
+            "event": "semantic_compression_validation_error",
+            "request_id": request_id,
+            "error_type": "ValueError",
+            "error_message": str(e)
+        })
+        raise HTTPException(
+            status_code=400,
+            detail=ErrorResponse(
+                error="ValidationError",
+                message=str(e),
+                timestamp=datetime.utcnow().isoformat(),
+                request_id=request_id
+            ).dict()
+        )
+    except Exception as e:
+        fastapi_logger.log_token_metrics({
+            "event": "semantic_compression_error",
+            "request_id": request_id,
+            "error_type": type(e).__name__,
+            "error_message": str(e)
+        })
+        raise HTTPException(
+            status_code=500,
+            detail=ErrorResponse(
+                error="CompressionError",
+                message="Failed to perform semantic compression",
+                timestamp=datetime.utcnow().isoformat(),
+                request_id=request_id
+            ).dict()
+        )
+
+@app.post("/compress/compare", response_model=CompressionComparisonResponse, tags=["Semantic Compression"])
+async def compare_compression_methods(request: CompressionComparisonRequest):
+    """
+    Compare different compression methods and provide recommendations.
+    
+    Analyzes code with both semantic-aware and maximum compression approaches,
+    then recommends the best method based on compression ratio and similarity preservation.
+    """
+    start_time = time.time()
+    request_id = str(int(time.time() * 1000))
+    
+    try:
+        fastapi_logger.log_token_metrics({
+            "event": "compression_comparison_request", 
+            "request_id": request_id,
+            "similarity_threshold": request.similarity_threshold,
+            "include_maximum": request.include_maximum
+        })
+
+        # Analyze code characteristics
+        analysis = _analyze_code_characteristics(request.code)        # Run semantic compression
+        semantic_engine.similarity_threshold = request.similarity_threshold
+        semantic_result = semantic_engine.compress(request.code)
+        
+        # Prepare results
+        original_tokens = estimate_tokens(request.code)
+        
+        comparison_result = {
+            'original': {
+                'code': request.code,
+                'tokens': original_tokens,
+                'size': len(request.code)
+            },
+            'semantic_compression': {
+                'code': semantic_result['compressed_code'],
+                'tokens': semantic_result['compressed_tokens'],
+                'size': len(semantic_result['compressed_code']),
+                'compression_ratio': semantic_result['compression_ratio'],
+                'compression_percentage': semantic_result['compression_percentage'],
+                'similarity_score': semantic_result['similarity_score'],
+                'tokens_saved': semantic_result['tokens_saved'],
+                'meets_threshold': semantic_result['meets_threshold']
+            }
+        }
+        
+        # Add maximum compression if requested
+        maximum_result = None
+        if request.include_maximum:
+            try:
+                # Import maximum compression pipeline if available
+                from input_optimizer.samples.chaining.maximum_compression_pipeline import maximum_compression_pipeline
+                max_result = maximum_compression_pipeline(request.code)
+                maximum_result = {
+                    'code': max_result['final']['code'],
+                    'tokens': max_result['final']['tokens'],
+                    'size': max_result['final']['size'],
+                    'compression_ratio': max_result['pipeline_stats']['total_reduction'] / 100,
+                    'compression_percentage': max_result['pipeline_stats']['total_reduction'],
+                    'similarity_score': 0.25,  # Estimated low similarity for maximum compression
+                    'tokens_saved': max_result['original']['tokens'] - max_result['final']['tokens']
+                }
+            except ImportError:
+                fastapi_logger.log_token_metrics({
+                    "event": "maximum_compression_unavailable",
+                    "request_id": request_id
+                })
+
+        # Determine recommendation
+        recommendation = _get_compression_recommendation(
+            comparison_result['semantic_compression'],
+            maximum_result,
+            request.similarity_threshold,
+            analysis
+        )
+        
+        processing_time_ms = (time.time() - start_time) * 1000
+
+        fastapi_logger.log_token_metrics({
+            "event": "compression_comparison_completed",
+            "request_id": request_id,
+            "processing_time_ms": processing_time_ms
+        })
+
+        return CompressionComparisonResponse(
+            original=comparison_result['original'],
+            semantic_compression=comparison_result['semantic_compression'],
+            maximum_compression=maximum_result,
+            recommendation=recommendation,
+            analysis=analysis
+        )
+        
+    except Exception as e:
+        fastapi_logger.log_token_metrics({
+            "event": "compression_comparison_error",
+            "request_id": request_id,
+            "error_type": type(e).__name__,
+            "error_message": str(e)
+        })
+        raise HTTPException(
+            status_code=500,
+            detail=ErrorResponse(
+                error="ComparisonError",
+                message="Failed to compare compression methods",
+                timestamp=datetime.utcnow().isoformat(),
+                request_id=request_id
+            ).dict()
+        )
+
+def _analyze_code_characteristics(code: str) -> Dict[str, Any]:
+    """Analyze code to determine optimal compression strategy"""
+    lines = code.split('\n')
+    total_lines = len(lines)
+    
+    docstring_lines = 0
+    comment_lines = 0
+    code_lines = 0
+    
+    for line in lines:
+        stripped = line.strip()
+        if '"""' in stripped or "'''" in stripped:
+            docstring_lines += 1
+        elif stripped.startswith('#'):
+            comment_lines += 1
+        elif stripped:
+            code_lines += 1
+    
+    # Calculate complexity indicators
+    complexity_indicators = [
+        'class ', 'def ', 'async ', 'await', 'try:', 'except', 'finally:',
+        'with ', 'lambda', 'yield', 'import', 'from '
+    ]
+    
+    complexity_score = sum(code.count(indicator) for indicator in complexity_indicators) / max(len(code), 1)
+    
+    return {
+        'total_lines': total_lines,
+        'code_lines': code_lines,
+        'comment_lines': comment_lines,
+        'docstring_lines': docstring_lines,
+        'comment_ratio': comment_lines / max(total_lines, 1),
+        'docstring_ratio': docstring_lines / max(total_lines, 1),
+        'has_docstrings': docstring_lines > 0,
+        'complexity_score': complexity_score,
+        'estimated_tokens': estimate_tokens(code)
+    }
+
+def _get_compression_recommendation(semantic_result: Dict, maximum_result: Optional[Dict], 
+                                  similarity_threshold: float, analysis: Dict) -> Dict[str, str]:
+    """Generate compression method recommendation"""
+    
+    # If semantic compression meets threshold and provides good compression
+    if semantic_result['meets_threshold'] and semantic_result['compression_percentage'] >= 15:
+        return {
+            'method': 'semantic_compression',
+            'reason': f"High similarity ({semantic_result['similarity_score']:.2f}) with good compression ({semantic_result['compression_percentage']:.1f}%)"
+        }
+    
+    # If maximum compression is available and significantly better
+    if maximum_result and maximum_result['compression_percentage'] > semantic_result['compression_percentage'] * 1.5:
+        return {
+            'method': 'maximum_compression',
+            'reason': f"Significantly better compression ({maximum_result['compression_percentage']:.1f}% vs {semantic_result['compression_percentage']:.1f}%)"
+        }
+    
+    # For simple code with high documentation, semantic works well
+    if analysis['has_docstrings'] and analysis['complexity_score'] < 0.3:
+        return {
+            'method': 'semantic_compression',
+            'reason': f"Well-documented simple code benefits from semantic preservation"
+        }
+    
+    # Default to semantic for safety
+    return {
+        'method': 'semantic_compression',
+        'reason': f"Balanced approach with {semantic_result['similarity_score']:.2f} similarity and {semantic_result['compression_percentage']:.1f}% compression"
+    }
 
 # Startup event
 @app.on_event("startup")

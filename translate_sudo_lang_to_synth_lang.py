@@ -11,8 +11,8 @@ from datetime import datetime
 project_root = Path(__file__).parent
 sys.path.insert(0, str(project_root))
 
-from engine.translators.synth_lang_translator import python_to_synthlang
-from engine.minifier import estimate_tokens
+from input_optimizer.engine.translators.synth_lang_translator import python_to_synthlang
+from input_optimizer.engine.minifier import estimate_tokens
 
 def load_sudo_lang_translator_code():
     """Load the entire sudo_lang_translator.py file as a code sample."""

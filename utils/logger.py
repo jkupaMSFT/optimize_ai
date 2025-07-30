@@ -483,6 +483,28 @@ def get_logger() -> MinifierLogger:
     return _global_logger
 
 
+def get_simple_logger(name: str) -> logging.Logger:
+    """
+    Get a simple standard Python logger for basic logging needs.
+    
+    Args:
+        name: Name of the logger
+        
+    Returns:
+        Standard logging.Logger instance configured for file logging
+    """
+    Path("logs").mkdir(exist_ok=True)
+    logger = logging.getLogger(name)
+    if not logger.handlers:  # avoid duplicate handlers in tests
+        logger.setLevel(logging.INFO)
+        fh = logging.FileHandler("logs/cai.log")
+        fh.setFormatter(
+            logging.Formatter("%(asctime)s  %(levelname)s  %(name)s  %(message)s")
+        )
+        logger.addHandler(fh)
+    return logger
+
+
 # Compression depth levels
 class CompressionDepth:
     """Enumeration for compression depth levels."""

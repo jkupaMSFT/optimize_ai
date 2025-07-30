@@ -149,3 +149,6 @@ dmypy.json
 .Trashes
 ehthumbs.db
 Thumbs.db
+
+#CAI specific files
+.optimize_ai/

@@ -1,0 +1,151 @@
+{
+"name": "optimize-ai-vscode",
+"displayName": "Optimize AI - Code Compression",
+"description": "Intelligent code compression for AI-powered development. Reduce token usage by 87% while maintaining code quality.",
+"version": "0.1.0",
+"publisher": "optimize-ai",
+"icon": "images/icon.png",
+"license": "MIT",
+"engines": {
+"vscode": "^1.74.0"
+},
+"categories": [
+"Other",
+"Programming Languages",
+"Machine Learning"
+],
+"keywords": [
+"ai",
+"compression",
+"gpt",
+"claude",
+"copilot",
+"optimization",
+"python",
+"llm",
+"code-optimizer"
+],
+"activationEvents": [
+"onLanguage:python",
+"onCommand:optimize-ai.compress",
+"onCommand:optimize-ai.showStats",
+"onCommand:optimize-ai.copyCompressed",
+"onCommand:optimize-ai.toggleAutoCompress"
+],
+"main": "./out/extension.js",
+"contributes": {
+"commands": [
+{
+"command": "optimize-ai.compress",
+"title": "Compress for AI",
+"category": "Optimize AI"
+},
+{
+"command": "optimize-ai.showStats",
+"title": "Show Compression Stats",
+"category": "Optimize AI"
+},
+{
+"command": "optimize-ai.copyCompressed",
+"title": "Copy Compressed to Clipboard",
+"category": "Optimize AI"
+},
+{
+"command": "optimize-ai.toggleAutoCompress",
+"title": "Toggle Auto Compression",
+"category": "Optimize AI"
+}
+],
+"configuration": {
+"title": "Optimize AI",
+"properties": {
+"optimize-ai.enabled": {
+"type": "boolean",
+"default": true,
+"description": "Enable/disable Optimize AI extension"
+},
+"optimize-ai.autoCompress": {
+"type": "boolean",
+"default": true,
+"description": "Automatically compress Python files when opened"
+},
+"optimize-ai.showStatusBar": {
+"type": "boolean",
+"default": true,
+"description": "Show compression stats in status bar"
+},
+"optimize-ai.compressionThreshold": {
+"type": "number",
+"default": 100,
+"description": "Minimum file size (in tokens) to trigger compression"
+},
+"optimize-ai.serverUrl": {
+"type": "string",
+"default": "http://localhost:8000",
+"description": "Optimize AI server URL"
+},
+"optimize-ai.debugMode": {
+"type": "boolean",
+"default": false,
+"description": "Enable debug logging"
+}
+}
+},
+"statusBarItems": [
+{
+"id": "optimize-ai.statusBar",
+"name": "Optimize AI Status Bar",
+"text": "Optimize AI",
+"alignment": "right",
+"priority": 100
+}
+],
+"menus": {
+"editor/context": [
+{
+"when": "resourceLangId == python",
+"command": "optimize-ai.compress",
+"group": "optimize-ai@1"
+},
+{
+"when": "resourceLangId == python",
+"command": "optimize-ai.showStats",
+"group": "optimize-ai@2"
+},
+{
+"when": "resourceLangId == python",
+"command": "optimize-ai.copyCompressed",
+"group": "optimize-ai@3"
+},
+{
+"when": "resourceLangId == python",
+"command": "optimize-ai.toggleAutoCompress",
+"group": "optimize-ai@4"
+}
+]
+}
+},
+"scripts": {
+"vscode:prepublish": "npm run compile",
+"compile": "tsc -p ./",
+"watch": "tsc -watch -p ./",
+"pretest": "npm run compile",
+"lint": "eslint src --ext ts"
+},
+"devDependencies": {
+"@types/vscode": "^1.74.0",
+"@types/node": "16.x",
+"typescript": "^4.9.5",
+"eslint": "^8.36.0",
+"@typescript-eslint/parser": "^5.56.0",
+"@typescript-eslint/eslint-plugin": "^5.56.0"
+},
+"repository": {
+"type": "git",
+"url": "https://github.com/optimize-ai/optimize-ai.git"
+},
+"bugs": {
+"url": "https://github.com/optimize-ai/optimize-ai/issues"
+},
+"homepage": "https://github.com/optimize-ai/optimize-ai#readme"
+}

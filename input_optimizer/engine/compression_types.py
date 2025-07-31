@@ -50,6 +50,11 @@ class CompressionResult:
     def post_tokens(self) -> int:
         """Legacy property for backward compatibility."""  
         return self.compressed_tokens
+    
+    @property
+    def output_tokens(self) -> int:
+        """Output tokens for benchmark compatibility."""
+        return self.compressed_tokens
         
     @property
     def additional_metrics(self) -> Dict[str, Any]:

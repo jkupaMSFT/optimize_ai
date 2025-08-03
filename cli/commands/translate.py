@@ -36,7 +36,9 @@ def translate(cai_file: str, output: str, json_output: bool, verbose: bool):
         
         cai_content = path.read_text(encoding='utf-8')
         
-        result = translator.translate(cai_content)
+        # Create a temporary session for CLI usage
+        session_id = "cli_translate_session"
+        result = translator.translate(session_id, cai_content)
         
         if result.success:
             python_code = result.python_code

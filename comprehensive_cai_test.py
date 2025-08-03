@@ -454,7 +454,7 @@ class ComprehensiveCAITester:
             )
             
             # Translate
-            result = await self.translator.translate(session_id, test_case.cai_code)
+            result = self.translator.translate(session_id, test_case.cai_code)
             
             # Analyze result
             translation_analysis = {

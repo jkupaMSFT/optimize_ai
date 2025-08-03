@@ -28,9 +28,34 @@ if sys.version_info < (3, 9):
     asyncio.to_thread = _to_thread
 
 # Additions: Import shared components for MVP (observability, configurability; assume from architecture)
-from .metrics_collector import EnhancedMetricsCollector  # For session metrics (e.g., create count)
-from .config import ConfigManager  # For agent-specific timeouts
-from utils.logger import MinifierLogger  # Your enhanced logger for structured logs
+try:
+    from .metrics_collector import EnhancedMetricsCollector  # For session metrics (e.g., create count)
+except ImportError:
+    class EnhancedMetricsCollector:
+        def __init__(self, *args, **kwargs): pass
+        def record(self, *args, **kwargs): pass
+
+try:
+    from .config import ConfigManager  # For agent-specific timeouts
+except ImportError:
+    class ConfigManager:
+        def __init__(self, *args, **kwargs): pass
+        def get(self, key, default=None): return default
+        def get_config(self, agent): 
+            # Return a mock config object
+            class MockConfig:
+                session_timeout = 3600
+            return MockConfig()
+
+try:
+    from utils.logger import MinifierLogger  # Your enhanced logger for structured logs
+except ImportError:
+    class MinifierLogger:
+        def __init__(self, *args, **kwargs): pass
+        def info(self, msg): print(f"INFO: {msg}")
+        def warning(self, msg): print(f"WARNING: {msg}")
+        def error(self, msg): print(f"ERROR: {msg}")
+        def debug(self, msg): pass
 
 @dataclass
 class Session:

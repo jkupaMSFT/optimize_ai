@@ -3,7 +3,7 @@ import click
 from pathlib import Path
 import logging
 import json
-from ...output_translator.core.translator import CAIToPythonTranslator
+from output_translator.core.translator import CAIToPythonTranslator
 
 # Set up logging
 logger = logging.getLogger(__name__)

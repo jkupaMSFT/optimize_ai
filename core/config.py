@@ -8,8 +8,16 @@ import os  # Addition: For file permissions/security
 import stat  # Addition: For chmod
 
 # Additions: Import shared components (assume from architecture; for observability/config)
-from utils.logger import MinifierLogger  # Your enhanced logger
-from core.metrics_collector import EnhancedMetricsCollector  # For config events
+try:
+    from optimize_ai.utils.logger import MinifierLogger  # Your enhanced logger
+except ImportError:
+    # Fallback for when modules are not available during development
+    MinifierLogger = None
+
+# Import metrics collector with lazy loading to avoid circular imports
+from typing import TYPE_CHECKING
+if TYPE_CHECKING:
+    from optimize_ai.core.metrics_collector import EnhancedMetricsCollector
 
 @dataclass
 class AgentConfig:
@@ -73,16 +81,50 @@ class ConfigManager:
     def __init__(
         self,
         config_path: Path = Path(".optimize_ai/config.json"),
-        metrics_collector: Optional[EnhancedMetricsCollector] = None,
-        logger: Optional[MinifierLogger] = None
+        metrics_collector = None,
+        logger = None
     ):
         self.config_path = config_path
         self.configs = {k: v for k, v in self.DEFAULT_CONFIGS.items()}  # Deep copy to avoid mutation
-        self.metrics = metrics_collector or EnhancedMetricsCollector()  # Fallback
-        self.logger = logger or MinifierLogger()  # Fallback
+        
+        # Import and create metrics collector with lazy loading
+        if metrics_collector is None:
+            try:
+                from optimize_ai.core.metrics_collector import EnhancedMetricsCollector
+                self.metrics = EnhancedMetricsCollector()
+            except ImportError:
+                # Fallback to a basic metrics collector
+                self.metrics = None
+        else:
+            self.metrics = metrics_collector
+            
+        # Create logger with fallback
+        if logger is None and MinifierLogger is not None:
+            self.logger = MinifierLogger()
+        elif logger is not None:
+            self.logger = logger
+        else:
+            # Basic fallback logger
+            import logging
+            self.logger = logging.getLogger(__name__)
         self._load_custom_config()
         # Addition: Hot-reload task will be started manually when needed
         self._reload_task = None
+    
+    def _safe_log(self, level: str, message: str):
+        """Safely log a message, handling None logger."""
+        if hasattr(self.logger, level):
+            getattr(self.logger, level)(message)
+        elif hasattr(self.logger, 'log'):
+            # Handle standard logging logger
+            import logging
+            log_level = getattr(logging, level.upper(), logging.INFO)
+            self.logger.log(log_level, message)
+    
+    def _safe_record_metric(self, event: str, data: dict = None):
+        """Safely record a metric, handling None metrics collector."""
+        if self.metrics and hasattr(self.metrics, 'record'):
+            self.metrics.record(event, data or {})
     
     def start_hot_reload(self, interval: int = 60):
         """Start hot-reload watching (call this when you have an event loop)."""
@@ -103,8 +145,8 @@ class ConfigManager:
                 if current_mod > last_mod:
                     self._load_custom_config()
                     last_mod = current_mod
-                    self.logger.info("Config hot-reloaded")
-                    self.metrics.record('config_reload', {'path': str(self.config_path)})
+                    self._safe_log("info", "Config hot-reloaded")
+                    self._safe_record_metric('config_reload', {'path': str(self.config_path)})
             except FileNotFoundError:
                 pass  # Ignore if deleted
     
@@ -117,19 +159,19 @@ class ConfigManager:
                     if agent in self.configs:
                         # Addition: Validate and recreate AgentConfig (ensures type safety)
                         self.configs[agent] = AgentConfig(**settings)  # Will raise if invalid
-                self.logger.info(f"Loaded custom config from {self.config_path}")
-                self.metrics.record('config_load_success', {'agents_updated': len(custom)})
+                self._safe_log("info", f"Loaded custom config from {self.config_path}")
+                self._safe_record_metric('config_load_success', {'agents_updated': len(custom)})
             except (json.JSONDecodeError, ValueError) as e:  # Addition: Specific catches (corrupt JSON/invalid fields)
-                self.logger.error(f"Invalid custom config: {e}. Falling back to defaults.")
-                self.metrics.record('config_load_failure', {'error': str(e)})
+                self._safe_log("error", f"Invalid custom config: {e}. Falling back to defaults.")
+                self._safe_record_metric('config_load_failure', {'error': str(e)})
             except PermissionError as e:  # Addition: Handle read denials
-                self.logger.error(f"Permission denied loading config: {e}")
-                self.metrics.record('config_load_failure', {'error': 'PermissionError'})
+                self._safe_log("error", f"Permission denied loading config: {e}")
+                self._safe_record_metric('config_load_failure', {'error': 'PermissionError'})
                 
     def get_config(self, agent: str) -> AgentConfig:
         """Get config for agent (with fallback)."""
         config = self.configs.get(agent, self.DEFAULT_CONFIGS['vscode'])
-        self.logger.debug(f"Retrieved config for {agent}")
+        self._safe_log("debug", f"Retrieved config for {agent}")
         return config
     
     def get(self, key: str, default: Any = None) -> Any:
@@ -206,13 +248,13 @@ class ConfigManager:
             self.config_path.write_text(json.dumps(custom, indent=2))
             # Addition: Set secure permissions (owner read/write only)
             os.chmod(self.config_path, stat.S_IRUSR | stat.S_IWUSR)  # 0o600
-            self.logger.info(f"Saved custom config to {self.config_path}")
-            self.metrics.record('config_save_success', {'agents_saved': len(custom)})
+            self._safe_log("info", f"Saved custom config to {self.config_path}")
+            self._safe_record_metric('config_save_success', {'agents_saved': len(custom)})
         except PermissionError as e:  # Addition: Handle write denials
-            self.logger.error(f"Permission denied saving config: {e}")
-            self.metrics.record('config_save_failure', {'error': 'PermissionError'})
+            self._safe_log("error", f"Permission denied saving config: {e}")
+            self._safe_record_metric('config_save_failure', {'error': 'PermissionError'})
             raise
         except Exception as e:
-            self.logger.error(f"Unexpected save error: {e}")
-            self.metrics.record('config_save_failure', {'error': str(e)})
+            self._safe_log("error", f"Unexpected save error: {e}")
+            self._safe_record_metric('config_save_failure', {'error': str(e)})
             raise

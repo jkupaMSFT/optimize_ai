@@ -5,16 +5,16 @@ import fcntl  # For file locking
 from typing import Optional
 
 try:
-    from ....utils.logger import get_simple_logger
+    from ....utils.logger import get_logger
     from ..compression_types import CompressionTier
 except ImportError:
     # Fallback for direct execution
     import sys
     sys.path.append('/Users/jkupa/MacDrive/optimize_ai/optimize_ai')
-    from utils.logger import get_simple_logger
+    from utils.logger import get_logger
     from input_optimizer.engine.compression_types import CompressionTier
 
-logger = get_simple_logger(__name__)
+logger = get_logger(__name__)
 
 class CacheManager:
     """Hidden-file manager for .cai cache, ensuring idempotent operations and robust error handling."""

@@ -29,13 +29,23 @@ if sys.version_info < (3, 9):
 
 # Additions: Import shared components (assume from architecture; for configurability/observability)
 try:
-    from core.config import ConfigManager  # To make path/max_entries tunable
+    from optimize_ai.core.config import ConfigManager  # To make path/max_entries tunable
 except ImportError:
     class ConfigManager:
         def __init__(self): pass
         def get(self, key, default=None): return default
 
-from utils.logger import MinifierLogger  # For structured logging
+try:
+    from optimize_ai.utils.logger import MinifierLogger  # For structured logging
+except ImportError:
+    # Fallback basic logger
+    import logging
+    class MinifierLogger:
+        def __init__(self):
+            self.logger = logging.getLogger(__name__)
+        def warning(self, msg): self.logger.warning(msg)
+        def info(self, msg): self.logger.info(msg)
+        def error(self, msg): self.logger.error(msg)
 
 class EnhancedMetricsCollector:
     """Async metrics with aggregation.
@@ -53,11 +63,33 @@ class EnhancedMetricsCollector:
     def __init__(
         self,
         log_path: Optional[Path] = None,  # Addition: Optional for config override
-        config_manager: Optional[ConfigManager] = None,
-        logger: Optional[MinifierLogger] = None
+        config_manager = None,
+        logger = None
     ):
-        self.config = config_manager or ConfigManager()  # Addition: Fallback config
-        self.logger = logger or MinifierLogger()  # Addition: Fallback structured logger
+        # Avoid circular imports by not creating ConfigManager by default
+        if config_manager is not None:
+            self.config = config_manager
+        else:
+            # Create a minimal config fallback that doesn't import ConfigManager
+            class SimpleConfig:
+                def get(self, key, default=None):
+                    simple_defaults = {
+                        'metrics_log_path': '.optimize_ai/metrics.json',
+                        'metrics_max_entries': 5000
+                    }
+                    return simple_defaults.get(key, default)
+            self.config = SimpleConfig()
+            
+        # Setup logger
+        if logger is not None:
+            self.logger = logger
+        else:
+            try:
+                from optimize_ai.utils.logger import MinifierLogger
+                self.logger = MinifierLogger()
+            except ImportError:
+                import logging
+                self.logger = logging.getLogger(__name__)
         # Addition: Configurable path/max (e.g., per-agent log paths)
         self.log_path = log_path or Path(self.config.get('metrics_log_path', ".optimize_ai/metrics.json"))
         self.max_entries = self.config.get('metrics_max_entries', 5000)

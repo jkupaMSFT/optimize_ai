@@ -8,11 +8,23 @@ import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 try:
+    # Try absolute imports first
     from cli.commands.compress import compress
     from cli.commands.translate import translate
     from cli.commands.session import session
     from cli.commands.integrate import integrate
-except ImportError:
+    from cli.commands.demo import demo
+except ImportError as e:
+    print(f"Absolute import error: {e}")
+    try:
+        # Try relative imports as backup
+        from .commands.compress import compress
+        from .commands.translate import translate
+        from .commands.session import session
+        from .commands.integrate import integrate
+        from .commands.demo import demo
+    except ImportError as e2:
+        print(f"Relative import error: {e2}")
     # Fallback for development/testing
     @click.command()
     def compress():
@@ -29,6 +41,10 @@ except ImportError:
     @click.command()
     def integrate():
         click.echo("Integrate command not available")
+    
+    @click.command()
+    def demo():
+        click.echo("Demo command not available")
 
 __version__ = '0.1.0'  # MVP version
 
@@ -54,6 +70,7 @@ cli.add_command(compress)
 cli.add_command(translate)
 cli.add_command(session)
 cli.add_command(integrate)
+cli.add_command(demo)
 
 if __name__ == '__main__':
     try:

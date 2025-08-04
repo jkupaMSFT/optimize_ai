@@ -29,33 +29,26 @@ if sys.version_info < (3, 9):
 
 # Additions: Import shared components for MVP (observability, configurability; assume from architecture)
 try:
-    from .metrics_collector import EnhancedMetricsCollector  # For session metrics (e.g., create count)
+    from optimize_ai.core.metrics_collector import EnhancedMetricsCollector  # For session metrics (e.g., create count)
 except ImportError:
     class EnhancedMetricsCollector:
         def __init__(self, *args, **kwargs): pass
         def record(self, *args, **kwargs): pass
 
-try:
-    from .config import ConfigManager  # For agent-specific timeouts
-except ImportError:
-    class ConfigManager:
-        def __init__(self, *args, **kwargs): pass
-        def get(self, key, default=None): return default
-        def get_config(self, agent): 
-            # Return a mock config object
-            class MockConfig:
-                session_timeout = 3600
-            return MockConfig()
+# Use lazy loading for ConfigManager to avoid circular imports
+# ConfigManager will be imported only when needed
 
 try:
-    from utils.logger import MinifierLogger  # Your enhanced logger for structured logs
+    from optimize_ai.utils.logger import MinifierLogger  # For structured logging
 except ImportError:
+    import logging
     class MinifierLogger:
-        def __init__(self, *args, **kwargs): pass
-        def info(self, msg): print(f"INFO: {msg}")
-        def warning(self, msg): print(f"WARNING: {msg}")
-        def error(self, msg): print(f"ERROR: {msg}")
-        def debug(self, msg): pass
+        def __init__(self): 
+            self.logger = logging.getLogger(__name__)
+        def info(self, msg): self.logger.info(msg)
+        def warning(self, msg): self.logger.warning(msg)
+        def error(self, msg): self.logger.error(msg)
+        def debug(self, msg): self.logger.debug(msg)
 
 @dataclass
 class Session:
@@ -78,16 +71,37 @@ class SecureSessionManager:
         self,
         secret_key: str = None,
         metrics_collector: Optional[EnhancedMetricsCollector] = None,  # Addition: Inject for observability (track creates/accesses)
-        config_manager: Optional[ConfigManager] = None,  # Addition: Inject for tunable params (e.g., per-agent timeouts)
-        logger: Optional[MinifierLogger] = None  # Addition: Inject logger for production tracing
+        config_manager = None,  # Addition: Inject for tunable params (e.g., per-agent timeouts)
+        logger = None  # Addition: Inject logger for production tracing
     ):
         self.sessions: Dict[str, Session] = {}
         self.secret_key = secret_key or self._generate_secret()
         self._lock = threading.Lock()
         self._cleanup_task = None
         self.metrics = metrics_collector or EnhancedMetricsCollector()  # Fallback
-        self.config = config_manager or ConfigManager()  # Fallback
-        self.logger = logger or MinifierLogger()  # Fallback
+        
+        # Lazy load ConfigManager to avoid circular imports
+        if config_manager is None:
+            try:
+                from optimize_ai.core.config import ConfigManager
+                self.config = ConfigManager()
+            except ImportError:
+                # Fallback config
+                class MockConfig:
+                    def get(self, key, default=None): return default
+                    def get_config(self, agent): 
+                        class MockAgentConfig:
+                            session_timeout = 3600
+                        return MockAgentConfig()
+                self.config = MockConfig()
+        else:
+            self.config = config_manager
+            
+        # Setup logger
+        if logger is None:
+            self.logger = MinifierLogger()
+        else:
+            self.logger = logger
         
         # Addition: Start cleanup task manually when event loop is available
         self._start_cleanup_on_demand()
@@ -205,6 +219,29 @@ class SecureSessionManager:
                 self.metrics.record('session_access', {'id': session_id})
                 return session
             return None
+    
+    def update_session(self, session_id: str, updates: Dict[str, Any]) -> bool:
+        """Update session metadata and content."""
+        session = self.get_session(session_id)
+        if not session:
+            self.logger.warning(f"Attempt to update non-existent session: {session_id}")
+            return False
+            
+        with self._lock:
+            # Update metadata
+            if updates:
+                session.metadata.update(updates)
+                
+                # Update specific fields if provided
+                if 'compressed_content' in updates:
+                    session.compressed_content = updates['compressed_content']
+                
+                session.last_accessed = time.time()
+                
+                self.logger.debug(f"Updated session {session_id} with {len(updates)} fields")
+                self.metrics.record('session_update', {'id': session_id, 'fields': len(updates)})
+                
+        return True
             
     def cleanup_expired(self, timeout: int = 3600) -> int:
         """Clean expired sessions, return count removed."""

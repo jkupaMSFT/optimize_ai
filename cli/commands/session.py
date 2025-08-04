@@ -3,8 +3,8 @@ import click
 from pathlib import Path
 import logging
 import json
-from ...core.session_manager import SecureSessionManager
-from ...input_optimizer.engine.waterfall_compressor import WaterfallCompressor
+from core.session_manager import SecureSessionManager
+from input_optimizer.engine.waterfall_compressor import WaterfallCompressor
 
 # Set up logging
 logger = logging.getLogger(__name__)

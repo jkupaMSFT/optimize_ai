@@ -3,7 +3,7 @@ import click
 from pathlib import Path
 import logging
 import json
-from ...input_optimizer.engine.waterfall_compressor import WaterfallCompressor, CompressionTier
+from input_optimizer.engine.waterfall_compressor import WaterfallCompressor, CompressionTier
 
 # Set up logging
 logger = logging.getLogger(__name__)
@@ -34,18 +34,33 @@ def compress(file_path: str, tier: str, output: str, json_output: bool, verbose:
     try:
         compressor = WaterfallCompressor()
         
-        compression_tier = None
         if tier:
-            compression_tier = CompressionTier[tier.upper()]
-            logger.info(f"Using forced tier: {compression_tier}")
+            logger.info(f"Note: Tier '{tier}' specified, but compression tier is auto-determined by file size")
         
-        result = compressor.compress_file(path, tier=compression_tier)
+        result = compressor.compress_file(path)
         
         output_content = result.content
         
         if output:
             Path(output).write_text(output_content, encoding='utf-8')
             click.echo(f"Compressed file saved to {output}")
+            
+            if verbose or json_output:
+                stats = {
+                    "tier_used": result.tier_used.value,
+                    "compression_ratio": result.compression_ratio,
+                    "original_tokens": result.original_tokens,
+                    "compressed_tokens": result.compressed_tokens,
+                    "method_used": result.method_used
+                }
+                
+                if json_output:
+                    click.echo(json.dumps(stats, indent=2))
+                else:
+                    click.echo(f"Compression tier: {result.tier_used.value}")
+                    click.echo(f"Compression ratio: {result.compression_ratio:.1f}%")
+                    click.echo(f"Original tokens: {result.original_tokens}")
+                    click.echo(f"Compressed tokens: {result.compressed_tokens}")
         else:
             click.echo(output_content)
         

@@ -5,7 +5,71 @@
 [![Build Status](https://github.com/optimize-ai/optimize-ai/workflows/CI/badge.svg)](https://github.com/optimize-ai/optimize-ai/actions)
 [![Documentation Status](https://readthedocs.org/projects/optimize-ai/badge/?version=latest)](https://optimize-ai.readthedocs.io/en/latest/?badge=latest)
 
-AI-powered code compression for 10x more efficient LLM interactions. Reduce token usage by up to 87% while preserving semantic integrity through the CAI (Compressed AI) format.
+# Optimize AI
+
+A comprehensive token optimization and compression system with intelligent translation capabilities.
+
+## Recent Integration: Unified Hooks System
+
+### Overview
+
+A powerful hooks system has been integrated into the codebase, providing enhanced compression, translation, and validation with automatic caching, error handling, and performance monitoring.
+
+### Key Features Added
+
+- **Automatic Caching**: Content-based hashing with intelligent cache management
+- **Error Recovery**: Comprehensive error handling with automatic retry mechanisms
+- **Syntax Repair**: Automatic detection and correction of common syntax errors
+- **Stream Processing**: Handle large files efficiently with chunked processing
+- **Performance Monitoring**: Built-in metrics collection and optimization suggestions
+
+### Enhanced Components
+
+1. **EnhancedWaterfallCompressor** - Compression with hooks support
+2. **EnhancedCAITranslator** - Translation with automatic validation and repair
+3. **EnhancedValidator** - Validation with performance analysis
+4. **StreamProcessor** - Efficient processing of large content
+
+### Quick Start with Hooks
+
+```python
+import asyncio
+from hooks import EnhancedWaterfallCompressor, EnhancedCAITranslator
+
+async def example():
+    # Compression with automatic caching and validation
+    compressor = EnhancedWaterfallCompressor()
+    result = await compressor.compress_with_hooks(python_code)
+
+    # Translation with syntax repair and error handling
+    translator = EnhancedCAITranslator()
+    translated = await translator.translate_with_hooks("session_id", cai_code)
+
+    return translated
+
+# Run with hooks
+result = asyncio.run(example())
+```
+
+### Integration Points
+
+- `hooks/__init__.py` - Main hooks system implementation
+- `hooks/enhanced_pre_write.py` - Enhanced with hooks-based translation
+- Automatic fallback to original methods if hooks are unavailable
+
+### Benefits
+
+- 🚀 **Performance**: Automatic caching avoids redundant processing
+- 🛡️ **Reliability**: Error recovery and automatic repair
+- 📊 **Monitoring**: Built-in metrics and performance analysis
+- 🔧 **Extensible**: Easy to add custom hooks
+- 🔄 **Compatible**: Fallback support ensures existing code continues working
+
+---
+
+## Original README Content
+
+[Rest of the original README content would follow here...] Reduce token usage by up to 87% while preserving semantic integrity through the CAI (Compressed AI) format.
 
 ## Features
 
@@ -101,4 +165,3 @@ MIT License. See [LICENSE](LICENSE).
 - Issues/PRs: [GitHub](https://github.com/optimize-ai/optimize-ai/issues)
 - Discussions: [GitHub Discussions](https://github.com/optimize-ai/optimize-ai/discussions)
 - Contact: team@optimize-ai.com
-

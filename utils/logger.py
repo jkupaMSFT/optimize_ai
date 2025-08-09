@@ -190,6 +190,44 @@ def minify_with_otpm_tracking(code: str, remaining_pct: float = 100.0, **kwargs)
         }
 
 
+def setup_logger(name: str = "optimize_ai", log_level: str = "INFO", log_file: Optional[str] = None) -> logging.Logger:
+    """
+    Setup a logger instance for backwards compatibility.
+    Returns a standard Python logger.
+    """
+    logger = logging.getLogger(name)
+    
+    # Avoid adding handlers multiple times
+    if logger.handlers:
+        return logger
+        
+    # Set log level
+    logger.setLevel(getattr(logging, log_level.upper(), logging.INFO))
+    
+    # Console handler
+    console_handler = logging.StreamHandler(sys.stdout)
+    console_handler.setLevel(logging.INFO)
+    console_formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(name)s - %(message)s')
+    console_handler.setFormatter(console_formatter)
+    logger.addHandler(console_handler)
+    
+    # File handler if specified
+    if log_file:
+        log_path = Path(log_file)
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        file_handler = RotatingFileHandler(
+            log_path,
+            maxBytes=10*1024*1024,  # 10MB
+            backupCount=5  # Keep 5 backups
+        )
+        file_handler.setLevel(logging.DEBUG)
+        file_formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(name)s - %(message)s')
+        file_handler.setFormatter(file_formatter)
+        logger.addHandler(file_handler)
+    
+    return logger
+
+
 def get_compression_recommendation(length: int) -> str:
     """Get compression recommendation based on input length."""
     if length < 1000:

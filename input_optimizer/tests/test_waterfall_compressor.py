@@ -83,10 +83,10 @@ def multiply_by_three(x):
 def multiply_by_four(x):
     '''Multiply by four.'''
     return x * 4
-""",  # ~300 tokens with repetitive patterns (SMALL: 10-2499)
-        "medium.py": "def f(x: int) -> int:\n    return x * 2\n" * 350,  # ~5600 tokens (MEDIUM: 2500-9999)
-        "large.py": "def f(x: int) -> int:\n    return x * 2\n" * 1500,  # ~24000 tokens (LARGE: 10000-39999)
-        "huge.py": "def f(x: int) -> int:\n    return x * 2\n" * 10000,  # ~160000 tokens (HUGE: 40000+)
+""",  # ~300 tokens with repetitive patterns (MEDIUM: 250-999)
+        "medium.py": "def f(x: int) -> int:\n    return x * 2\n" * 60,  # ~960 tokens (MEDIUM: 250-999)
+        "large.py": "def f(x: int) -> int:\n    return x * 2\n" * 350,  # ~5600 tokens (LARGE: 1000-9999)
+        "huge.py": "def f(x: int) -> int:\n    return x * 2\n" * 800,  # ~12800 tokens (HUGE: 10000+)
         "invalid.py": "def invalid:  # Syntax error\n    pass",
         "empty.py": "",
         "complex.py": """
@@ -120,21 +120,21 @@ def test_count_tokens():
 def test_determine_tier():
     """Test tier selection logic with new aggressive thresholds."""
     compressor = WaterfallCompressor()
-    # New aggressive thresholds: TINY(0-9), SMALL(10-2499), MEDIUM(2500-9999), LARGE(10000-39999), HUGE(40000+)
+    # New aggressive thresholds: TINY(0-9), SMALL(10-249), MEDIUM(250-999), LARGE(1000-9999), HUGE(10000+)
     assert compressor._determine_tier(5) == CompressionTier.TINY
     assert compressor._determine_tier(9) == CompressionTier.TINY
     assert compressor._determine_tier(10) == CompressionTier.SMALL
     assert compressor._determine_tier(50) == CompressionTier.SMALL
-    assert compressor._determine_tier(500) == CompressionTier.SMALL
-    assert compressor._determine_tier(2499) == CompressionTier.SMALL
-    assert compressor._determine_tier(2500) == CompressionTier.MEDIUM
-    assert compressor._determine_tier(5000) == CompressionTier.MEDIUM
-    assert compressor._determine_tier(9999) == CompressionTier.MEDIUM
-    assert compressor._determine_tier(10000) == CompressionTier.LARGE
-    assert compressor._determine_tier(25000) == CompressionTier.LARGE
-    assert compressor._determine_tier(39999) == CompressionTier.LARGE
-    assert compressor._determine_tier(40000) == CompressionTier.HUGE
-    assert compressor._determine_tier(60000) == CompressionTier.HUGE
+    assert compressor._determine_tier(100) == CompressionTier.SMALL
+    assert compressor._determine_tier(249) == CompressionTier.SMALL
+    assert compressor._determine_tier(250) == CompressionTier.MEDIUM
+    assert compressor._determine_tier(500) == CompressionTier.MEDIUM
+    assert compressor._determine_tier(999) == CompressionTier.MEDIUM
+    assert compressor._determine_tier(1000) == CompressionTier.LARGE
+    assert compressor._determine_tier(5000) == CompressionTier.LARGE
+    assert compressor._determine_tier(9999) == CompressionTier.LARGE
+    assert compressor._determine_tier(10000) == CompressionTier.HUGE
+    assert compressor._determine_tier(25000) == CompressionTier.HUGE
     assert compressor._determine_tier(0) == CompressionTier.TINY
     assert compressor._determine_tier(1000000) == CompressionTier.HUGE
 
@@ -197,7 +197,7 @@ def test_summarization_compression(tmp_dir, sample_files):
     assert result.compressed_tokens < result.original_tokens
     assert result.compression_ratio > 80, f"Expected >80% reduction, got {result.compression_ratio}%"
     assert "CODE STRUCTURE SUMMARY" in result.content
-    assert "Functions: 10000" in result.content
+    assert "Functions: 800" in result.content
 
 # Edge Case Tests
 def test_override_flags(tmp_dir):

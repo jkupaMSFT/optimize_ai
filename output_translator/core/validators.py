@@ -154,17 +154,20 @@ class TranslationValidator:
         tasks = [run_validator(name) for name in self.active_validators]
         
         try:
-            async with asyncio.timeout(self.config.get('total_validation_timeout', 10.0)):
-                validator_results = await asyncio.gather(*tasks)
-        except TimeoutError:
+            # Use asyncio.wait_for for Python 3.9 compatibility instead of asyncio.timeout
+            validator_results = await asyncio.wait_for(
+                asyncio.gather(*tasks), 
+                timeout=self.config.get('total_validation_timeout', 10.0)
+            )
+        except asyncio.TimeoutError:
             errors.append("Overall validation timed out")
             for task in tasks:
                 task.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
             validator_results = []
-        finally:
-            # Ensure any pending cancellations are processed
-            await asyncio.gather(*tasks, return_exceptions=True)
+        except Exception as e:
+            errors.append(f"Validation gather failed: {str(e)}")
+            validator_results = []
         
         for name, res in validator_results:
             if isinstance(res, ValidationResult):
@@ -519,12 +522,14 @@ class BehaviorValidator:
         metrics_collector: Optional[EnhancedMetricsCollector] = None,
         config_manager: Optional[ConfigManager] = None,
         logger: Optional[MinifierLogger] = None,
-        code_backend: Optional[CodeBackend] = None
+        code_backend: Optional[CodeBackend] = None,
+        thread_pool: Optional[ThreadPoolExecutor] = None
     ):
         self.config = config_manager or ConfigManager()
         self.metrics = metrics_collector or EnhancedMetricsCollector()
         self.logger = logger or MinifierLogger()
         self.code_backend = code_backend or CodeBackend()
+        self.executor = thread_pool
         self.dis_similarity_threshold = self.config.get('validators.behavior.dis_similarity_threshold', 0.8)
         self.dis_internal_timeout = self.config.get('validators.behavior.internal_timeout', 2.0)
         
@@ -593,12 +598,14 @@ class ComplexityAssessor:
         metrics_collector: Optional[EnhancedMetricsCollector] = None,
         config_manager: Optional[ConfigManager] = None,
         logger: Optional[MinifierLogger] = None,
-        code_backend: Optional[CodeBackend] = None
+        code_backend: Optional[CodeBackend] = None,
+        thread_pool: Optional[ThreadPoolExecutor] = None
     ):
         self.config = config_manager or ConfigManager()
         self.metrics = metrics_collector or EnhancedMetricsCollector()
         self.logger = logger or MinifierLogger()
         self.code_backend = code_backend or CodeBackend()
+        self.executor = thread_pool
         self.complexity_ratio_threshold = self.config.get('validators.complexity.ratio_threshold', 1.5)
         self.complexity_internal_timeout = self.config.get('validators.complexity.internal_timeout', 2.0)
         

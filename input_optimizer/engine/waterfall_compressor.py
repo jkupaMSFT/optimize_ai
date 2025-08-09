@@ -70,10 +70,10 @@ class WaterfallCompressor:
         # Tier thresholds (more aggressive for better real-world performance)
         self.thresholds = {
             CompressionTier.TINY: (0, 10),            # 0-9 tokens (truly minimal snippets)
-            CompressionTier.SMALL: (10, 2500),        # 10-2499 tokens (functions/small classes get smart compression)
-            CompressionTier.MEDIUM: (2500, 10000),    # 2500-9999 tokens (full modules)
-            CompressionTier.LARGE: (10000, 40000),    # 10000-39999 tokens (large files)
-            CompressionTier.HUGE: (40000, float('inf'))  # 40000+ tokens (massive files)
+            CompressionTier.SMALL: (10, 250),         # 10-249 tokens (functions/small classes get smart compression)
+            CompressionTier.MEDIUM: (250, 1000),      # 250-999 tokens (full modules)
+            CompressionTier.LARGE: (1000, 10000),     # 1000-9999 tokens (large files)
+            CompressionTier.HUGE: (10000, float('inf'))  # 10000+ tokens (massive files)
         }
         
         # Add CAI compressor for test compatibility
@@ -392,6 +392,7 @@ class WaterfallCompressor:
                                    original_content: str) -> str:
         """Wrap minified content in CAI format for test compatibility and reversibility."""
         import hashlib
+        import ast
         
         cai_lines = ["# CAI Format - Standard Compression (Minifier-based)"]
         
@@ -401,63 +402,80 @@ class WaterfallCompressor:
             source_hash = hashlib.md5(original_content.encode()).hexdigest()[:8]
             cai_lines.append(f"# Source-Hash: {source_hash}")
         
-        # For standard compression, detect repeated patterns and use CAI efficiently
-        lines = original_content.strip().split('\n')
-        
-        # For repeated function patterns, create efficient CAI representation
-        func_patterns = {}
-        
-        # Parse and deduplicate functions
-        i = 0
-        while i < len(lines):
-            line = lines[i].strip()
-            if line.startswith('def ') and ':' in line:
-                func_sig = line
-                func_body = []
-                i += 1
-                
-                # Collect function body
-                while i < len(lines) and (lines[i].startswith('    ') or lines[i].strip() == ''):
-                    if lines[i].strip():
-                        func_body.append(lines[i].strip())
-                    i += 1
-                
-                func_pattern = (func_sig, tuple(func_body))
-                func_patterns[func_pattern] = func_patterns.get(func_pattern, 0) + 1
-                i -= 1
-            i += 1
-        
-        # Create moderately efficient CAI representation for standard tier (50-90% compression)
-        cai_lines.append("# Method: cai_deduplication")
-        cai_lines.append("# CAI_STRUCTURE:")
-        
-        for (func_sig, func_body), count in func_patterns.items():
-            # Extract function name and args
-            func_name = func_sig.split('(')[0].replace('def ', '').strip()
-            args_part = func_sig.split('(', 1)[1].split(')')[0] if '(' in func_sig else ''
+        # For non-repetitive content, create comprehensive CAI representation
+        try:
+            tree = ast.parse(original_content)
             
-            # For standard compression, limit repetition to achieve 50-90% compression
-            body_summary = func_body[0] if func_body else 'pass'
+            # Count overall structure
+            classes = [n for n in ast.walk(tree) if isinstance(n, ast.ClassDef)]
+            functions = [n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)]
+            imports = [n for n in ast.walk(tree) if isinstance(n, (ast.Import, ast.ImportFrom))]
             
-            if count > 10:
-                # For standard compression, aim for ~60% compression by being more conservative
-                # Keep about 40% of instances as separate entries  
-                # This makes the compression less efficient to stay in 50-90% range
+            cai_lines.append("# Method: cai_structural")
+            cai_lines.append(f"# Structure: {len(classes)} classes, {len(functions)} functions, {len(imports)} imports")
+            cai_lines.append("# CAI_STRUCTURE:")
+            cai_lines.append("")
+            
+            # Add imports summary
+            if imports:
+                cai_lines.append("# Imports:")
+                for imp in imports[:5]:  # Show first 5 imports
+                    if isinstance(imp, ast.Import):
+                        names = [alias.name for alias in imp.names]
+                        cai_lines.append(f"I[{', '.join(names)}]")
+                    elif isinstance(imp, ast.ImportFrom):
+                        names = [alias.name for alias in imp.names]
+                        cai_lines.append(f"I[from {imp.module}: {', '.join(names)}]")
+                if len(imports) > 5:
+                    cai_lines.append(f"I[... and {len(imports) - 5} more imports]")
+                cai_lines.append("")
+            
+            # Add classes with their methods
+            for cls in classes:
+                class_methods = [n for n in cls.body if isinstance(n, ast.FunctionDef)]
+                class_attrs = [n for n in cls.body if isinstance(n, ast.AnnAssign)]
                 
-                instances_to_keep = max(int(count * 0.4), 1)  # Keep 40% as individual entries
-                instances_to_group = count - instances_to_keep
+                cai_lines.append(f"C[{cls.name}] -> {len(class_methods)} methods, {len(class_attrs)} attributes")
                 
-                # Add individual entries first
-                for _ in range(instances_to_keep):
-                    cai_lines.append(f"F[{func_name}({args_part}) -> {body_summary}]")
+                # Show key methods
+                for method in class_methods[:3]:  # Show first 3 methods
+                    args = [arg.arg for arg in method.args.args]
+                    has_return = any(isinstance(n, ast.Return) for n in ast.walk(method))
+                    return_hint = " -> value" if has_return else ""
+                    cai_lines.append(f"  M[{method.name}({', '.join(args)}){return_hint}]")
                 
-                # Add grouped entries if any remaining
-                if instances_to_group > 0:
-                    cai_lines.append(f"F[{func_name}({args_part})*{instances_to_group} -> {body_summary}]")
-            elif count > 1:
-                cai_lines.append(f"F[{func_name}({args_part})*{count} -> {body_summary}]")
-            else:
-                cai_lines.append(f"F[{func_name}({args_part}) -> {body_summary}]")
+                if len(class_methods) > 3:
+                    cai_lines.append(f"  M[... and {len(class_methods) - 3} more methods]")
+                cai_lines.append("")
+            
+            # Add standalone functions
+            standalone_funcs = [n for n in tree.body if isinstance(n, ast.FunctionDef)]
+            if standalone_funcs:
+                cai_lines.append("# Standalone functions:")
+                for func in standalone_funcs:
+                    args = [arg.arg for arg in func.args.args]
+                    has_return = any(isinstance(n, ast.Return) for n in ast.walk(func))
+                    return_hint = " -> value" if has_return else ""
+                    docstring = ast.get_docstring(func)
+                    doc_summary = f" # {docstring[:50]}..." if docstring else ""
+                    cai_lines.append(f"F[{func.name}({', '.join(args)}){return_hint}]{doc_summary}")
+                cai_lines.append("")
+            
+            # Add a sample of the minified content for context
+            cai_lines.append("# Minified content sample (first 200 chars):")
+            cai_lines.append(f"# {minified_content[:200]}...")
+            cai_lines.append("")
+            cai_lines.append("# === FULL MINIFIED CONTENT ===")
+            cai_lines.append(minified_content)
+            
+        except SyntaxError:
+            # Fallback for unparseable content
+            cai_lines.append("# Method: cai_fallback")
+            cai_lines.append("# CAI_STRUCTURE:")
+            cai_lines.append("# (Syntax error - using minified content directly)")
+            cai_lines.append("")
+            cai_lines.append("# === MINIFIED CONTENT ===")
+            cai_lines.append(minified_content)
         
         return '\n'.join(cai_lines)
         
@@ -509,8 +527,12 @@ class WaterfallCompressor:
         
         return '\n'.join(compressed_lines)
         
-    def _light_compression(self, content: str, original_tokens: int) -> CompressionResult:
+    def _light_compression(self, content: str, original_tokens: int, tier: Optional[CompressionTier] = None) -> CompressionResult:
         """Light compression for small files - use proven minifier with basic compression."""
+        # Determine tier if not provided
+        if tier is None:
+            tier = self._determine_tier(original_tokens)
+            
         try:
             # Import the proven minifier
             from .minifier import minify_code, CompressionDepth
@@ -609,7 +631,7 @@ class WaterfallCompressor:
             original_tokens=original_tokens,
             compressed_tokens=compressed_tokens,
             compression_ratio=(1 - compressed_tokens / original_tokens) * 100 if original_tokens > 0 else 0,
-            tier_used=CompressionTier.SMALL,
+            tier_used=tier,
             method_used="light_compression",
             content=compressed
         )
@@ -663,8 +685,9 @@ class WaterfallCompressor:
             
         except Exception as e:
             self.logger.error(f"Standard compression failed: {e}")
-            # Fallback to light compression
-            return self._light_compression(content, original_tokens)
+            # Fallback to light compression, preserving the original tier
+            tier = self._determine_tier(original_tokens)
+            return self._light_compression(content, original_tokens, tier)
     
     def _smart_small_compression(self, content: str, original_tokens: int, 
                                 source_path: Optional[Path] = None) -> CompressionResult:

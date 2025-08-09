@@ -1526,13 +1526,13 @@ def mock_compression(content: str, tier: CompressionType) -> str:
 def run_waterfall_tests():
     """Run test cases for the waterfall tier selection with logging demonstration."""
     test_cases = [
-        (300, CompressionType.BASIC, "# Small Python script\nprint('Hello, World!')"),
-        (1500, CompressionType.STANDARD, "# Medium Python script\n" + "x = 1\n" * 75),
-        (7500, CompressionType.AGGRESSIVE, "# Large Python script\n" + "def func():\n    pass\n" * 500),
-        (15000, CompressionType.SUMMARIZE, "# Very large Python script\n" + "class TestClass:\n    def method(self):\n        return True\n" * 500),
-        (1000, CompressionType.BASIC, "# Boundary test\n" + "y = 2\n" * 50),
-        (5000, CompressionType.STANDARD, "# Boundary test\n" + "z = 3\n" * 250),
-        (10000, CompressionType.AGGRESSIVE, "# Boundary test\n" + "a = 4\n" * 500),
+        (100, CompressionType.BASIC, "# Small Python script\nprint('Hello, World!')"),
+        (500, CompressionType.STANDARD, "# Medium Python script\n" + "x = 1\n" * 25),
+        (2000, CompressionType.AGGRESSIVE, "# Large Python script\n" + "def func():\n    pass\n" * 100),
+        (5000, CompressionType.SUMMARIZE, "# Very large Python script\n" + "class TestClass:\n    def method(self):\n        return True\n" * 200),
+        (250, CompressionType.BASIC, "# Boundary test\n" + "y = 2\n" * 12),
+        (1000, CompressionType.STANDARD, "# Boundary test\n" + "z = 3\n" * 50),
+        (4000, CompressionType.AGGRESSIVE, "# Boundary test\n" + "a = 4\n" * 200),
     ]
 
     logger._safe_log(logger.logger.info, "=" * 60)

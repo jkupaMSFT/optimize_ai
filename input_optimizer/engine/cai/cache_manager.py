@@ -5,14 +5,38 @@ import fcntl  # For file locking
 from typing import Optional
 
 try:
+    # Try relative import first
     from ....utils.logger import get_logger
     from ..compression_types import CompressionTier
 except ImportError:
-    # Fallback for direct execution
-    import sys
-    sys.path.append('/Users/jkupa/MacDrive/optimize_ai/optimize_ai')
-    from utils.logger import get_logger
-    from input_optimizer.engine.compression_types import CompressionTier
+    # Fallback to absolute imports
+    try:
+        import sys
+        import os
+        
+        # Get the project root directory
+        current_dir = os.path.dirname(os.path.abspath(__file__))
+        project_root = os.path.dirname(os.path.dirname(os.path.dirname(current_dir)))
+        
+        if project_root not in sys.path:
+            sys.path.insert(0, project_root)
+            
+        from utils.logger import get_logger
+        from input_optimizer.engine.compression_types import CompressionTier
+    except ImportError:
+        # Final fallback - create minimal logger
+        import logging
+        def get_logger(name):
+            return logging.getLogger(name)
+        
+        # Create fallback CompressionTier
+        from enum import Enum, auto
+        class CompressionTier(Enum):
+            TINY = auto()
+            SMALL = auto()
+            MEDIUM = auto()
+            LARGE = auto()
+            HUGE = auto()
 
 logger = get_logger(__name__)
 

@@ -117,6 +117,16 @@ class MinifierLogger:
         """Log token metrics data."""
         self.info("Token metrics", data)
 
+    def log_validation_result(self, msg: str = "Validation result", **kwargs):
+        """Log validation result with optional metadata."""
+        extra = kwargs if kwargs else {}
+        self.info(msg, extra)
+
+    def log_performance_metrics(self, msg: str = "Performance metrics", **kwargs):
+        """Log performance metrics with optional metadata."""
+        extra = kwargs if kwargs else {}
+        self.info(msg, extra)
+
     def _safe_log(self, log_method, message: str, extra: Optional[Dict[str, Any]] = None):
         """Safe logging method that handles exceptions."""
         try:

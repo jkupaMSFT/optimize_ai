@@ -103,6 +103,11 @@ class PatternType(Enum):
     SYMBOL_CLASS = auto()       # τ ClassName{...}
     # JavaScript-style patterns
     JS_TRY_CATCH = auto()       # try { ... } catch { ... } finally { ... }
+    # Compressed format patterns
+    FUNCTION_COMPRESSED = auto()  # F[name(args)] without body
+    CLASS_COMPRESSED = auto()     # C[ClassName] -> N methods
+    METHOD_COMPRESSED = auto()    # M[method(N args)]
+    IMPORT_FROM = auto()          # I[from module: names]
 
 
 @dataclass
@@ -158,36 +163,34 @@ class CAIPatternEngine:
     def _compile_patterns(self):
         """Compile all CAI patterns with enhanced regex"""
         self.patterns = {
-            # FIX 1: Updated FUNCTION pattern to properly match F[...→{...}]
+            # Standard full CAI format patterns
             PatternType.FUNCTION: re.compile(
-                # match F[ name ( args ) arrow { body } ]
-                r'''
-                  F\[                            # literal "F["
-                  \s*([a-zA-Z_]\w*)\s*          # function name
-                  \(\s*(.*?)\s*\)\s*            # ( args )
-                  (?:→|->)\s*                   # Unicode or ASCII arrow
-                  \{\s*([\s\S]*?)\s*\}\s*       # { body }
-                  \]                            # literal "]"
-                ''',
-                re.VERBOSE | re.DOTALL
+                r'F\[\s*([a-zA-Z_]\w*)\s*\(\s*(.*?)\s*\)\s*(?:→|->)\s*\{\s*([\s\S]*?)\s*\}\s*\]',
+                re.DOTALL
             ),
             PatternType.CLASS: re.compile(
-                r'''
-                  C\[                           # literal "C["
-                  \s*([a-zA-Z_]\w*)\s*         # class name
-                  (?:\(\s*(.*?)\s*\))?\s*      # optional ( bases )
-                  (?:→|->)\s*                  # Unicode or ASCII arrow
-                  \{\s*([\s\S]*?)\s*\}\s*      # { body } with multiline support
-                  \]                           # literal "]"
-                ''',
-                re.VERBOSE | re.DOTALL
+                r'C\[\s*([a-zA-Z_]\w*)\s*(?:\(\s*(.*?)\s*\))?\s*(?:→|->)\s*\{\s*([\s\S]*?)\s*\}\s*\]',
+                re.DOTALL
             ),
             PatternType.METHOD: re.compile(
-                r'^\s*M\[([a-zA-Z_]\w*)\.([a-zA-Z_]\w*)\((.*?)\)\s*(?:→|->)\s*(.*?)\]',
+                r'M\[(?:([a-zA-Z_]\w*)\.)?([a-zA-Z_]\w*)\s*\(\s*(.*?)\s*\)\s*(?:→|->)\s*(.*?)\]',
                 re.DOTALL | re.MULTILINE
             ),
             PatternType.IMPORT: re.compile(
-                r'^\s*I\[(.+?)\]'
+                r'I\[(.+?)\]'
+            ),
+            # Compressed format patterns
+            PatternType.FUNCTION_COMPRESSED: re.compile(
+                r'F\[\s*([a-zA-Z_]\w*)\s*\(\s*(\d+)\s*args\s*\)(?:\s*(?:→|->) value)?(?:\s*#.*?)?\s*\]'
+            ),
+            PatternType.CLASS_COMPRESSED: re.compile(
+                r'C\[\s*([a-zA-Z_]\w*)\s*\]\s*(?:->|→)\s*(\d+)\s*methods(?:,\s*(\d+)\s*attributes)?'
+            ),
+            PatternType.METHOD_COMPRESSED: re.compile(
+                r'M\[\s*([a-zA-Z_]\w*)\s*\(\s*(\d+)\s*args\s*\)(?:\s*(?:→|->) value)?\s*\]'
+            ),
+            PatternType.IMPORT_FROM: re.compile(
+                r'I\[from\s+([^:]+):\s*(.+?)\]'
             ),
             PatternType.VARIABLE: re.compile(
                 r'^\s*V\[(\w+)\s*=\s*(.+?)\]'
@@ -758,17 +761,25 @@ class CAIPatternEngine:
         self.logger.info(f"Match groups available: {match.lastindex if match.lastindex else 0}")
         
         if pattern_type == PatternType.FUNCTION:
-            # Ensure we capture the FULL body content
+            # Handle both full format F[name(args)→{body}] and compressed format F[name(args)]
             name = match.group(1) if match.lastindex >= 1 else ''
-            args = match.group(2) if match.lastindex >= 2 else ''
-            body = match.group(3) if match.lastindex >= 3 else ''
+            
+            # Check if this is full format or compressed format
+            if match.lastindex >= 3 and match.group(3):  # Full format with body
+                args = match.group(2) if match.lastindex >= 2 else ''
+                body = match.group(3) if match.lastindex >= 3 else ''
+            elif match.lastindex >= 4 and match.group(4):  # Compressed format
+                args = match.group(4) if match.lastindex >= 4 else ''
+                body = 'pass  # Method body not preserved in compressed format'
+            else:  # Fallback
+                args = match.group(2) if match.lastindex >= 2 else ''
+                body = 'pass  # Body not available'
             
             # Log body content capture
             self.logger.info(f"Function body captured: {len(body)} characters")
             if body:
                 self.logger.debug(f"Function body content: {repr(body[:100])}")
             
-            # CRITICAL: Don't strip or process the body here
             return {
                 'name': name.strip(),
                 'args': args.strip(),
@@ -776,8 +787,21 @@ class CAIPatternEngine:
             }
         elif pattern_type == PatternType.CLASS:
             name = match.group(1) if match.lastindex >= 1 else ''
-            bases = match.group(2) if match.lastindex >= 2 else ''
-            body = match.group(3) if match.lastindex >= 3 else ''
+            
+            # Handle both full format and compressed format
+            if match.lastindex >= 3 and match.group(3):  # Full format with body
+                bases = match.group(2) if match.lastindex >= 2 else ''
+                body = match.group(3) if match.lastindex >= 3 else ''
+            elif match.lastindex >= 4 and match.group(4):  # Compressed format with method count
+                bases = ''
+                method_count = match.group(4) if match.lastindex >= 4 else '0'
+                attr_count = match.group(5) if match.lastindex >= 5 else '0'
+                body = f'pass  # Class with {method_count} methods'
+                if attr_count and attr_count != '0':
+                    body += f' and {attr_count} attributes'
+            else:
+                bases = match.group(2) if match.lastindex >= 2 else ''
+                body = 'pass  # Class body not available'
             
             # Log body content capture
             self.logger.info(f"Class body captured: {len(body)} characters")
@@ -790,10 +814,21 @@ class CAIPatternEngine:
                 'body': body  # Keep original body
             }
         elif pattern_type == PatternType.METHOD:
-            class_name = match.group(1) if match.lastindex >= 1 else ''
+            # Handle both full format and compressed format
+            class_name = match.group(1) if match.lastindex >= 1 and match.group(1) else ''
             method_name = match.group(2) if match.lastindex >= 2 else ''
-            args = match.group(3) if match.lastindex >= 3 else ''
-            body = match.group(4) if match.lastindex >= 4 else ''
+            
+            # Check format
+            if match.lastindex >= 4 and match.group(4):  # Full format
+                args = match.group(3) if match.lastindex >= 3 else ''
+                body = match.group(4) if match.lastindex >= 4 else ''
+            elif match.lastindex >= 5 and match.group(5):  # Compressed format
+                arg_count = match.group(5) if match.lastindex >= 5 else '0'
+                args = f'*args  # {arg_count} args'
+                body = 'pass  # Method body not preserved in compressed format'
+            else:
+                args = match.group(3) if match.lastindex >= 3 else ''
+                body = 'pass  # Method body not available'
             
             return {
                 'class_name': class_name.strip(),
@@ -801,8 +836,79 @@ class CAIPatternEngine:
                 'args': args.strip(),
                 'body': body  # Keep original body
             }
+        elif pattern_type == PatternType.FUNCTION_COMPRESSED:
+            # Handle compressed function format: F[name(N args)]
+            name = match.group(1) if match.lastindex >= 1 else ''
+            arg_count_str = match.group(2) if match.lastindex >= 2 else '0'
+            arg_count = int(arg_count_str) if arg_count_str.isdigit() else 0
+            
+            # Generate proper parameter list
+            if arg_count == 0:
+                args = ''
+            elif arg_count == 1:
+                args = 'arg1'
+            elif arg_count == 2:
+                args = 'arg1, arg2'
+            elif arg_count == 3:
+                args = 'arg1, arg2, arg3'
+            else:
+                args = f'arg1, arg2, *args'  # for more than 3 args
+            
+            body = 'pass  # Function body not preserved in compressed format'
+            
+            self.logger.info(f"Compressed function captured: {name} with {arg_count} args")
+            
+            return {
+                'name': name.strip(),
+                'args': args,
+                'body': body
+            }
+        elif pattern_type == PatternType.CLASS_COMPRESSED:
+            # Handle compressed class format: C[ClassName] -> N methods
+            name = match.group(1) if match.lastindex >= 1 else ''
+            method_count = match.group(2) if match.lastindex >= 2 else '0'
+            attr_count = match.group(3) if match.lastindex >= 3 else '0'
+            
+            body = f'pass  # Class with {method_count} methods'
+            if attr_count and attr_count != '0':
+                body += f' and {attr_count} attributes'
+            
+            self.logger.info(f"Compressed class captured: {name} with {method_count} methods")
+            
+            return {
+                'name': name.strip(),
+                'bases': '',
+                'body': body
+            }
+        elif pattern_type == PatternType.METHOD_COMPRESSED:
+            # Handle compressed method format: M[method(N args)]
+            method_name = match.group(1) if match.lastindex >= 1 else ''
+            arg_count = match.group(2) if match.lastindex >= 2 else '0'
+            
+            # Generate proper parameter list
+            if arg_count == '0':
+                args = ''
+            elif arg_count == '1':
+                args = 'self'
+            elif arg_count == '2':
+                args = 'self, arg1'
+            else:
+                args = f'self, *args'  # for more than 2 args
+            
+            body = 'pass  # Method body not preserved in compressed format'
+            
+            return {
+                'class_name': '',
+                'method_name': method_name.strip(),
+                'args': args,
+                'body': body
+            }
         elif pattern_type == PatternType.IMPORT:
-            statement = match.group(1) if match.lastindex >= 1 else ''
+            # Handle simple import format: I[names]
+            statement = match.group(1).strip()
+            if not statement.startswith(('import ', 'from ')):
+                statement = f'import {statement}'
+            
             # Extract module name from import statement
             module = 'unknown'
             if statement.strip().startswith('import '):
@@ -812,6 +918,21 @@ class CAIPatternEngine:
                 parts = statement.strip().split()
                 if len(parts) >= 2:
                     module = parts[1]
+            
+            return {
+                'statement': statement,
+                'module': module
+            }
+        elif pattern_type == PatternType.IMPORT_FROM:
+            # Handle from-import format: I[from module: names]
+            module = match.group(1).strip()
+            names = match.group(2).strip()
+            statement = f'from {module} import {names}'
+            
+            return {
+                'statement': statement,
+                'module': module
+            }
             return {'statement': statement, 'module': module}
         elif pattern_type == PatternType.VARIABLE:
             return {
@@ -1110,23 +1231,1101 @@ class CAIToPythonTranslator:
         
         return ''.join(cleaned)
         
+    def _scrub_unicode_preserve_patterns(self, code: str, patterns: List) -> str:
+        """Clean Unicode while preserving pattern content integrity"""
+        if not code:
+            return code
+            
+        # Create a map of pattern positions to preserve their content
+        pattern_regions = []
+        for pattern in patterns:
+            if hasattr(pattern, 'raw_match') and pattern.raw_match:
+                start_pos = code.find(pattern.raw_match)
+                if start_pos != -1:
+                    end_pos = start_pos + len(pattern.raw_match)
+                    pattern_regions.append((start_pos, end_pos, pattern.raw_match))
+        
+        # Sort by start position
+        pattern_regions.sort(key=lambda x: x[0])
+        
+        # Process the code while preserving pattern regions
+        result = []
+        last_pos = 0
+        
+        for start_pos, end_pos, original_content in pattern_regions:
+            # Process text before this pattern
+            before_pattern = code[last_pos:start_pos]
+            result.append(self._scrub_all_unicode_early(before_pattern))
+            
+            # Preserve the pattern content but do minimal essential cleanup
+            pattern_content = original_content
+            # Only remove arrows that break parsing, keep structural symbols
+            pattern_content = pattern_content.replace('→', '')
+            result.append(pattern_content)
+            
+            last_pos = end_pos
+        
+        # Process remaining text after last pattern
+        if last_pos < len(code):
+            remaining = code[last_pos:]
+            result.append(self._scrub_all_unicode_early(remaining))
+        
+        return ''.join(result)
+    
+    def _translate_to_ast_enhanced(self, cleaned_cai_code: str, patterns: List) -> ast.Module:
+        """Enhanced AST translation with better pattern processing - FIXED VERSION"""
+        body = []
+        context = TranslationContext()
+        
+        # Check if this is extracted Python code from CAI format
+        if '# === CONTENT ===' in cleaned_cai_code:
+            python_code = self._extract_python_from_cai(cleaned_cai_code)
+            if python_code:
+                try:
+                    # Parse the extracted Python code directly
+                    parsed_module = ast.parse(python_code)
+                    self.logger.info(f"Successfully parsed extracted Python code with {len(parsed_module.body)} statements")
+                    return parsed_module
+                except SyntaxError as e:
+                    self.logger.warning(f"Failed to parse extracted Python code: {e}, falling back to pattern processing")
+                    # Continue with pattern processing as fallback
+        
+        if patterns:
+            self.logger.info(f"Using {len(patterns)} provided patterns")
+            
+            # CRITICAL FIX: Use the PatternToASTTranslator properly
+            # Instead of manually building each type, use the translator that knows how to handle all patterns
+            for pattern in patterns:
+                try:
+                    # Log what we're processing
+                    self.logger.info(f"Processing pattern: {pattern.pattern_type} - {pattern.parsed_data.get('name', 'unnamed')}")
+                    
+                    # Use the pattern_to_ast translator for all patterns
+                    if hasattr(self, 'pattern_to_ast') and self.pattern_to_ast:
+                        ast_nodes = self.pattern_to_ast.translate(pattern, context)
+                        
+                        # Handle single node or list of nodes
+                        if ast_nodes:
+                            if isinstance(ast_nodes, list):
+                                body.extend(ast_nodes)
+                            else:
+                                body.append(ast_nodes)
+                            
+                            self.logger.info(f"Successfully translated {pattern.pattern_type} pattern: {pattern.parsed_data.get('name', 'unnamed')}")
+                        else:
+                            self.logger.warning(f"Pattern translator returned None for {pattern.pattern_type}")
+                    else:
+                        # Fallback to manual building if pattern_to_ast is not available
+                        self.logger.warning("PatternToASTTranslator not available, using fallback")
+                        
+                        if hasattr(pattern, 'pattern_type'):
+                            if pattern.pattern_type.name == 'IMPORT':
+                                import_node = self._build_import_stmt(pattern.parsed_data, context)
+                                body.append(import_node)
+                            elif pattern.pattern_type.name in ['CLASS', 'CONCEPT_CLASS', 'SYMBOL_CLASS']:
+                                class_node = self._build_enhanced_class_def(pattern, context)
+                                body.append(class_node)
+                            elif pattern.pattern_type.name in ['FUNCTION', 'CONCEPT_FUNCTION', 'METHOD']:
+                                func_node = self._build_enhanced_function_def(pattern, context)
+                                body.append(func_node)
+                            elif pattern.pattern_type.name == 'VARIABLE':
+                                var_node = self._build_variable_assign(pattern.parsed_data, context)
+                                body.append(var_node)
+                            else:
+                                # For other pattern types, create a pass statement with comment
+                                comment_node = ast.Expr(
+                                    value=ast.Constant(value=f"# TODO: Handle {pattern.pattern_type} pattern"),
+                                    lineno=1,
+                                    col_offset=0
+                                )
+                                body.append(comment_node)
+                                
+                except Exception as e:
+                    self.logger.error(f"Failed to process pattern {pattern.pattern_type}: {e}")
+                    # Add a comment node for failed patterns to preserve information
+                    comment_node = ast.Expr(
+                        value=ast.Constant(value=f"# ERROR: Failed to translate {pattern.pattern_type}: {pattern.raw_match[:50]}..."),
+                        lineno=1,
+                        col_offset=0
+                    )
+                    body.append(comment_node)
+            
+            # Log the results
+            if body:
+                self.logger.info(f"Successfully created AST module with {len(body)} top-level statements")
+                # Log what types were created
+                node_types = {}
+                for node in body:
+                    node_type = type(node).__name__
+                    node_types[node_type] = node_types.get(node_type, 0) + 1
+                self.logger.info(f"AST node types: {node_types}")
+            else:
+                # Only fall back to comments if we truly have no parseable patterns
+                self.logger.warning("No patterns were successfully translated, preserving original content")
+                body = self._create_comment_fallback(cleaned_cai_code)
+        else:
+            # No patterns detected - try to parse as raw code or create minimal structure
+            body = self._parse_raw_cai_code(cleaned_cai_code)
+        
+        # Create module with body
+        module = ast.Module(body=body, type_ignores=[])
+        
+        # Fix missing attributes for Python AST compatibility
+        for node in ast.walk(module):
+            if not hasattr(node, 'lineno'):
+                node.lineno = 1
+            if not hasattr(node, 'col_offset'):
+                node.col_offset = 0
+        
+        return module
+    
+    def _group_patterns_by_type(self, patterns: List) -> Dict[str, List]:
+        """Group patterns by type for organized processing"""
+        groups = {
+            'imports': [],
+            'classes': [],
+            'functions': [],
+            'variables': [],
+            'other': []
+        }
+        
+        for pattern in patterns:
+            if hasattr(pattern, 'pattern_type'):
+                pattern_type = pattern.pattern_type
+                if pattern_type.name in ['IMPORT']:
+                    groups['imports'].append(pattern)
+                elif pattern_type.name in ['CLASS', 'CONCEPT_CLASS', 'SYMBOL_CLASS']:
+                    groups['classes'].append(pattern)
+                elif pattern_type.name in ['FUNCTION', 'CONCEPT_FUNCTION', 'METHOD']:
+                    groups['functions'].append(pattern)
+                elif pattern_type.name in ['VARIABLE']:
+                    groups['variables'].append(pattern)
+                else:
+                    groups['other'].append(pattern)
+        
+        return groups
+    
+    def _build_enhanced_class_def(self, pattern, context: TranslationContext) -> ast.ClassDef:
+        """Enhanced class definition building with better error handling"""
+        try:
+            data = pattern.parsed_data
+            name = data.get('name', 'UnnamedClass')
+            body_str = data.get('body', 'pass')
+            
+            # Use appropriate body expansion based on pattern type
+            if hasattr(pattern, 'pattern_type'):
+                if pattern.pattern_type.name == 'CONCEPT_CLASS':
+                    body_stmts = self._build_concept_body_statements(body_str, context)
+                elif pattern.pattern_type.name == 'SYMBOL_CLASS':
+                    body_stmts = self._build_symbol_body_statements(body_str, context)
+                else:
+                    body_stmts = self._build_body_statements(body_str, context)
+            else:
+                body_stmts = self._build_body_statements(body_str, context)
+            
+            return ast.ClassDef(
+                name=name,
+                bases=[],
+                keywords=[],
+                body=body_stmts,
+                decorator_list=[],
+                lineno=1,
+                col_offset=0
+            )
+        except Exception as e:
+            self.logger.error(f"Failed to build enhanced class def: {e}")
+            # Return a minimal class
+            return ast.ClassDef(
+                name='ErrorClass',
+                bases=[],
+                keywords=[],
+                body=[ast.Pass(lineno=1, col_offset=0)],
+                decorator_list=[],
+                lineno=1,
+                col_offset=0
+            )
+    
+    def _build_enhanced_function_def(self, pattern, context: TranslationContext) -> ast.FunctionDef:
+        """Enhanced function definition building with better error handling"""
+        try:
+            data = pattern.parsed_data
+            name = data.get('name', 'unnamed_function')
+            args_str = data.get('args', '')
+            body_str = data.get('body', 'pass')
+            
+            # Parse arguments with better error handling
+            args = self._build_function_args(args_str)
+            
+            # Use appropriate body expansion
+            if hasattr(pattern, 'pattern_type') and pattern.pattern_type.name == 'CONCEPT_FUNCTION':
+                body_stmts = self._build_concept_body_statements(body_str, context)
+            else:
+                body_stmts = self._build_body_statements(body_str, context)
+            
+            return ast.FunctionDef(
+                name=name,
+                args=args,
+                body=body_stmts,
+                decorator_list=[],
+                returns=None,
+                lineno=1,
+                col_offset=0
+            )
+        except Exception as e:
+            self.logger.error(f"Failed to build enhanced function def: {e}")
+            # Return a minimal function
+            return ast.FunctionDef(
+                name='error_function',
+                args=ast.arguments(
+                    posonlyargs=[], args=[], vararg=None, kwonlyargs=[],
+                    kw_defaults=[], kwarg=None, defaults=[]
+                ),
+                body=[ast.Pass(lineno=1, col_offset=0)],
+                decorator_list=[],
+                returns=None,
+                lineno=1,
+                col_offset=0
+            )
+    
+    def _build_concept_body_statements(self, body_str: str, context: TranslationContext) -> List[ast.stmt]:
+        """Build AST statements for concept bodies with enhanced processing"""
+        if not body_str or not body_str.strip() or body_str.strip() == 'pass':
+            return [ast.Pass(lineno=1, col_offset=0)]
+        
+        try:
+            # Use the enhanced concept body expansion
+            python_code = self._expand_concept_body_sync(body_str, context, base_indent=0)
+            
+            # Clean and parse the converted code
+            lines = python_code.split('\n')
+            cleaned_lines = []
+            for line in lines:
+                if line.strip():
+                    stripped = line.lstrip()
+                    indent_level = len(line) - len(stripped)
+                    normalized_indent = '    ' * (indent_level // 4)
+                    cleaned_lines.append(normalized_indent + stripped)
+                else:
+                    cleaned_lines.append('')
+            
+            cleaned_python_code = '\n'.join(cleaned_lines)
+            body_ast = ast.parse(cleaned_python_code)
+            return body_ast.body if body_ast.body else [ast.Pass(lineno=1, col_offset=0)]
+            
+        except Exception as e:
+            self.logger.warning(f"Concept body parsing failed: {e}")
+            # Fallback to regular body processing
+            return self._build_body_statements(body_str, context)
+    
+    def _create_comment_fallback(self, cleaned_cai_code: str) -> List[ast.stmt]:
+        """Create comment fallback only when necessary"""
+        body = []
+        
+        try:
+            lines = cleaned_cai_code.split('\n')[:10]  # Limit to first 10 lines
+            for line_num, line in enumerate(lines, 1):
+                if line.strip():
+                    comment_node = ast.Expr(
+                        value=ast.Constant(value=f"# Original CAI: {line.strip()}"),
+                        lineno=line_num,
+                        col_offset=0
+                    )
+                    body.append(comment_node)
+            
+            # Add at least one executable statement
+            body.append(ast.Pass(lineno=len(lines) + 1, col_offset=0))
+            self.logger.info(f"Preserved {min(len(lines), 10)} lines of original CAI code as comments")
+            
+        except Exception as e:
+            self.logger.error(f"Failed to create comment fallback: {e}")
+            body = [ast.Pass(lineno=1, col_offset=0)]
+        
+        return body
+    
+    def _parse_raw_cai_code(self, cleaned_cai_code: str) -> List[ast.stmt]:
+        """Try to parse CAI code directly when no patterns are detected"""
+        try:
+            # First try to parse as Python directly
+            parsed = ast.parse(cleaned_cai_code)
+            if parsed.body:
+                return parsed.body
+        except:
+            pass
+        
+        # Check if this is CAI metadata format
+        if self._is_cai_metadata_format(cleaned_cai_code):
+            return self._parse_cai_metadata_format(cleaned_cai_code)
+        
+        try:
+            # Try basic JavaScript to Python conversion
+            python_code = self._convert_js_syntax(cleaned_cai_code)
+            parsed = ast.parse(python_code)
+            if parsed.body:
+                return parsed.body
+        except:
+            pass
+        
+        # Final fallback - create meaningful content based on code structure
+        return self._create_structured_fallback(cleaned_cai_code)
+    
+    def _determine_pipeline_type(self, code: str) -> str:
+        """Determine which pipeline to use based on content analysis"""
+        lines = code.split('\n')
+        total_lines = len(lines)
+        
+        # Analyze content characteristics
+        has_cai_header = any('CAI Format' in line for line in lines[:5])
+        has_structure_info = any('Structure:' in line for line in lines[:10])
+        has_compression_markers = any('compressed' in line.lower() or 'chunk' in line.lower() for line in lines[:10])
+        has_content_marker = any('# === CONTENT ===' in line for line in lines[:15])
+        
+        # Count CAI pattern types
+        cai_pattern_count = sum(1 for line in lines if line.strip().startswith(('I[', 'C[', 'F[', 'M[', 'V[', 'D[')))
+        metadata_ratio = cai_pattern_count / max(total_lines, 1)
+        
+        # Pipeline decision logic
+        if has_cai_header and has_structure_info and has_content_marker:
+            # Modern CAI format with content marker = enhanced pattern engine for proper extraction
+            return "enhanced_pattern"
+        elif has_cai_header and has_structure_info and (has_compression_markers or metadata_ratio > 0.8):
+            # High metadata density + compression markers = metadata compression pipeline
+            return "metadata_compression"
+        elif cai_pattern_count > 0 or any(line.strip().startswith(('concept ', 'function ', 'τ ')) for line in lines):
+            # Has CAI patterns or concept syntax = enhanced pattern engine
+            return "enhanced_pattern"
+        else:
+            # Unknown format = fallback
+            return "fallback"
+    
+    def _enhanced_pattern_matching(self, cai_code: str) -> List:
+        """Enhanced pattern matching with improved CAI format support"""
+        
+        # Check if this is the new CAI format with embedded Python code
+        if '# === CONTENT ===' in cai_code:
+            # Extract Python code from CAI format
+            python_code = self._extract_python_from_cai(cai_code)
+            
+            # CRITICAL NEW: Check for enhanced pattern section
+            pattern_section = self._extract_patterns_from_cai(cai_code)
+            
+            all_patterns = []
+            
+            if python_code:
+                # Process the extracted Python code directly using standard pattern engine
+                python_patterns = self.pattern_engine.match_all(python_code)
+                self.logger.info(f"Extracted Python code from CAI format, found {len(python_patterns)} Python patterns")
+                all_patterns.extend(python_patterns)
+            
+            if pattern_section:
+                # Process F[...] patterns from the PATTERNS section
+                cai_patterns = self.pattern_engine.match_all(pattern_section)
+                self.logger.info(f"Extracted pattern section from CAI format, found {len(cai_patterns)} F[...] patterns")
+                all_patterns.extend(cai_patterns)
+            
+            # CRITICAL FIX: Also process the CAI metadata for enhanced patterns
+            # This preserves the semantic information from the CAI format
+            cai_enhanced_patterns = self._enhance_import_patterns(cai_code, [])
+            cai_concept_patterns = self._match_concept_patterns(cai_code)
+            
+            # Combine all patterns for maximum semantic preservation
+            all_patterns.extend(cai_enhanced_patterns)
+            all_patterns.extend(cai_concept_patterns)
+            
+            self.logger.info(f"Combined patterns: {len(all_patterns)} total (Python + F[...] + enhanced + concept)")
+            return all_patterns
+        
+        # Start with standard pattern engine for legacy formats
+        patterns = self.pattern_engine.match_all(cai_code)
+        
+        # Enhance import pattern recognition for CAI metadata format
+        enhanced_patterns = self._enhance_import_patterns(cai_code, patterns)
+        
+        # Add concept and symbol pattern recognition
+        concept_patterns = self._match_concept_patterns(cai_code)
+        
+        # Combine all patterns
+        all_patterns = enhanced_patterns + concept_patterns
+        
+        self.logger.info(f"Enhanced matching: {len(patterns)} standard + {len(concept_patterns)} concept = {len(all_patterns)} total")
+        
+        return all_patterns
+    
+    def _extract_python_from_cai(self, cai_code: str) -> Optional[str]:
+        """Extract Python code from CAI format with # === CONTENT === marker"""
+        lines = cai_code.split('\n')
+        
+        # Find the content marker
+        content_start = -1
+        for i, line in enumerate(lines):
+            if line.strip() == "# === CONTENT ===":
+                content_start = i + 1
+                break
+        
+        if content_start != -1 and content_start < len(lines):
+            python_lines = lines[content_start:]
+            # Join and clean up the Python code
+            python_code = '\n'.join(python_lines).strip()
+            if python_code:
+                self.logger.info(f"Extracted {len(python_code)} characters of Python code from CAI format")
+                
+                # CRITICAL FIX: Apply black formatting to fix indentation issues from ultra-aggressive minification
+                formatted_code = self._apply_black_formatting_to_extracted_code(python_code)
+                if formatted_code:
+                    self.logger.info(f"Successfully formatted extracted Python code with black")
+                    return formatted_code
+                else:
+                    self.logger.warning("Black formatting failed, returning raw extracted code")
+                    return python_code
+        
+        return None
+    
+    def _extract_patterns_from_cai(self, cai_code: str) -> Optional[str]:
+        """Extract F[...] patterns from CAI format with # === PATTERNS === marker"""
+        lines = cai_code.split('\n')
+        
+        # Find the patterns marker
+        patterns_start = -1
+        for i, line in enumerate(lines):
+            if line.strip() == "# === PATTERNS ===":
+                patterns_start = i + 1
+                break
+        
+        if patterns_start != -1 and patterns_start < len(lines):
+            pattern_lines = lines[patterns_start:]
+            pattern_content = '\n'.join(pattern_lines).strip()
+            if pattern_content:
+                self.logger.info(f"Extracted {len(pattern_content)} characters of pattern content from CAI format")
+                return pattern_content
+        
+        return None
+    
+    def _apply_black_formatting_to_extracted_code(self, python_code: str) -> Optional[str]:
+        """Apply black formatting to extracted Python code to fix indentation issues"""
+        try:
+            import black
+            
+            # First, try to fix obvious indentation issues before black formatting
+            # Black requires syntactically valid Python, so we need to preprocess
+            preprocessed_code = self._preprocess_code_for_black(python_code)
+            
+            # Apply black formatting
+            formatted_code = black.format_str(preprocessed_code, mode=black.FileMode())
+            return formatted_code
+            
+        except ImportError:
+            self.logger.warning("Black not available, applying basic indentation fixes")
+            return self._basic_indentation_fix(python_code)
+        except Exception as e:
+            self.logger.warning(f"Black formatting failed: {e}, applying basic indentation fixes")
+            return self._basic_indentation_fix(python_code)
+    
+    def _preprocess_code_for_black(self, python_code: str) -> str:
+        """Preprocess code to make it parseable for black formatting"""
+        lines = python_code.split('\n')
+        fixed_lines = []
+        indent_level = 0
+        
+        for line in lines:
+            stripped = line.strip()
+            if not stripped:
+                fixed_lines.append('')
+                continue
+            
+            # Determine if this line should increase or decrease indent
+            if any(stripped.startswith(keyword) for keyword in ['def ', 'class ', 'if ', 'elif ', 'else:', 'for ', 'while ', 'try:', 'except', 'finally:', 'with ']):
+                if stripped.startswith('else:') or stripped.startswith('elif ') or stripped.startswith('except') or stripped.startswith('finally:'):
+                    # These keywords should be at the same level as their matching statement
+                    current_indent = max(0, indent_level - 1)
+                else:
+                    current_indent = indent_level
+                
+                if stripped.endswith(':'):
+                    # This line starts a new block
+                    fixed_lines.append('    ' * current_indent + stripped)
+                    indent_level = current_indent + 1
+                else:
+                    fixed_lines.append('    ' * current_indent + stripped)
+            else:
+                # Regular statement - use current indent level
+                current_indent = max(0, indent_level)
+                fixed_lines.append('    ' * current_indent + stripped)
+        
+        return '\n'.join(fixed_lines)
+    
+    def _basic_indentation_fix(self, python_code: str) -> str:
+        """Basic indentation fix when black is not available"""
+        lines = python_code.split('\n')
+        fixed_lines = []
+        indent_level = 0
+        
+        for line in lines:
+            stripped = line.strip()
+            if not stripped:
+                fixed_lines.append('')
+                continue
+            
+            # Basic indentation logic
+            if any(stripped.startswith(keyword) for keyword in ['def ', 'class ']):
+                fixed_lines.append('    ' * indent_level + stripped)
+                if stripped.endswith(':'):
+                    indent_level += 1
+            elif any(stripped.startswith(keyword) for keyword in ['if ', 'elif ', 'else:', 'for ', 'while ', 'try:', 'except', 'finally:', 'with ']):
+                if stripped.startswith('else:') or stripped.startswith('elif ') or stripped.startswith('except') or stripped.startswith('finally:'):
+                    current_indent = max(0, indent_level - 1)
+                else:
+                    current_indent = indent_level
+                fixed_lines.append('    ' * current_indent + stripped)
+                if stripped.endswith(':'):
+                    indent_level = current_indent + 1
+            else:
+                fixed_lines.append('    ' * indent_level + stripped)
+        
+        return '\n'.join(fixed_lines)
+    
+    def _enhance_import_patterns(self, cai_code: str, existing_patterns: List) -> List:
+        """Enhance import pattern recognition for CAI metadata format"""
+        enhanced_patterns = []
+        
+        # Keep all non-import patterns as-is
+        for pattern in existing_patterns:
+            if not (hasattr(pattern, 'pattern_type') and pattern.pattern_type == PatternType.IMPORT):
+                enhanced_patterns.append(pattern)
+        
+        # Re-process import patterns with enhanced logic
+        lines = cai_code.split('\n')
+        for line_num, line in enumerate(lines, 1):
+            line = line.strip()
+            if line.startswith('I[') and line.endswith(']'):
+                import_content = line[2:-1]
+                enhanced_import = self._parse_enhanced_import(import_content, line, line_num)
+                if enhanced_import:
+                    enhanced_patterns.append(enhanced_import)
+        
+        return enhanced_patterns
+    
+    def _parse_enhanced_import(self, import_content: str, raw_line: str, line_num: int):
+        """Parse import with enhanced CAI metadata format support"""
+        try:
+            # Handle CAI metadata format: "from typing: List, Optional"
+            if 'from ' in import_content and ': ' in import_content:
+                parts = import_content.split(': ', 1)
+                if len(parts) == 2:
+                    from_part = parts[0].strip()
+                    names_part = parts[1].strip()
+                    
+                    if from_part.startswith('from '):
+                        module_name = from_part[5:].strip()
+                        names = [n.strip() for n in names_part.split(',')]
+                        
+                        # Create standard Python import statement
+                        statement = f"from {module_name} import {', '.join(names)}"
+                        
+                        return self._create_enhanced_import_pattern(statement, module_name, raw_line, line_num)
+            
+            # Handle standard format: "from module import names"
+            elif 'from ' in import_content and ' import ' in import_content:
+                parts = import_content.split(' import ', 1)
+                if len(parts) == 2:
+                    module_name = parts[0].replace('from ', '').strip()
+                    names = [n.strip() for n in parts[1].split(',')]
+                    statement = f"from {module_name} import {', '.join(names)}"
+                    
+                    return self._create_enhanced_import_pattern(statement, module_name, raw_line, line_num)
+            
+            # Handle regular import: "module1, module2"
+            else:
+                modules = [m.strip() for m in import_content.split(',')]
+                for module in modules:
+                    if module:
+                        statement = f"import {module}"
+                        return self._create_enhanced_import_pattern(statement, module, raw_line, line_num)
+        
+        except Exception as e:
+            self.logger.warning(f"Failed to parse enhanced import '{import_content}': {e}")
+        
+        return None
+    
+    def _create_enhanced_import_pattern(self, statement: str, module: str, raw_line: str, line_num: int):
+        """Create an enhanced import pattern object"""
+        class EnhancedImportPattern:
+            def __init__(self, statement, module, raw_match, line_num):
+                self.pattern_type = PatternType.IMPORT
+                self.parsed_data = {'statement': statement, 'module': module}
+                self.raw_match = raw_match
+                self.line_number = line_num
+                self.confidence = 0.95  # High confidence for enhanced parsing
+        
+        return EnhancedImportPattern(statement, module, raw_line, line_num)
+    
+    def _match_concept_patterns(self, cai_code: str) -> List:
+        """Match concept and symbol patterns for advanced CAI syntax"""
+        concept_patterns = []
+        
+        # Use existing pattern engine for concept patterns
+        lines = cai_code.split('\n')
+        
+        for line_num, line in enumerate(lines, 1):
+            # Check for concept class syntax
+            if line.strip().startswith('concept '):
+                # Extract full concept class including body
+                concept_match = self._extract_concept_class(lines, line_num - 1)
+                if concept_match:
+                    concept_patterns.append(concept_match)
+            
+            # Check for symbol class syntax (τ prefix)
+            elif line.strip().startswith('τ '):
+                symbol_match = self._extract_symbol_class(lines, line_num - 1)
+                if symbol_match:
+                    concept_patterns.append(symbol_match)
+            
+            # Check for function syntax
+            elif line.strip().startswith(('function ', 'fn ')):
+                function_match = self._extract_concept_function(lines, line_num - 1)
+                if function_match:
+                    concept_patterns.append(function_match)
+        
+        return concept_patterns
+    
+    def _extract_concept_class(self, lines: List[str], start_index: int):
+        """Extract concept class with its full body"""
+        try:
+            header_line = lines[start_index].strip()
+            # Parse: concept ClassName {
+            match = re.match(r'concept\s+([a-zA-Z_]\w*)\s*\{', header_line)
+            if not match:
+                return None
+            
+            class_name = match.group(1)
+            body_lines = []
+            brace_count = 1
+            current_index = start_index + 1
+            
+            while current_index < len(lines) and brace_count > 0:
+                line = lines[current_index]
+                brace_count += line.count('{') - line.count('}')
+                if brace_count > 0:
+                    body_lines.append(line)
+                current_index += 1
+            
+            body = '\n'.join(body_lines)
+            raw_match = '\n'.join(lines[start_index:current_index])
+            
+            class ConceptClassPattern:
+                def __init__(self, name, body, raw_match):
+                    self.pattern_type = PatternType.CONCEPT_CLASS
+                    self.parsed_data = {'name': name, 'body': body}
+                    self.raw_match = raw_match
+                    self.confidence = 0.9
+            
+            return ConceptClassPattern(class_name, body, raw_match)
+        
+        except Exception as e:
+            self.logger.warning(f"Failed to extract concept class: {e}")
+            return None
+    
+    def _extract_symbol_class(self, lines: List[str], start_index: int):
+        """Extract symbol class (τ prefix) with its body"""
+        try:
+            header_line = lines[start_index].strip()
+            # Parse: τ ClassName {
+            match = re.match(r'τ\s+([a-zA-Z_]\w*)\s*\{', header_line)
+            if not match:
+                return None
+            
+            class_name = match.group(1)
+            body_lines = []
+            brace_count = 1
+            current_index = start_index + 1
+            
+            while current_index < len(lines) and brace_count > 0:
+                line = lines[current_index]
+                brace_count += line.count('{') - line.count('}')
+                if brace_count > 0:
+                    body_lines.append(line)
+                current_index += 1
+            
+            body = '\n'.join(body_lines)
+            raw_match = '\n'.join(lines[start_index:current_index])
+            
+            class SymbolClassPattern:
+                def __init__(self, name, body, raw_match):
+                    self.pattern_type = PatternType.SYMBOL_CLASS
+                    self.parsed_data = {'name': name, 'body': body}
+                    self.raw_match = raw_match
+                    self.confidence = 0.9
+            
+            return SymbolClassPattern(class_name, body, raw_match)
+        
+        except Exception as e:
+            self.logger.warning(f"Failed to extract symbol class: {e}")
+            return None
+    
+    def _extract_concept_function(self, lines: List[str], start_index: int):
+        """Extract concept function with its body"""
+        try:
+            header_line = lines[start_index].strip()
+            # Parse: function functionName(args) { or fn functionName(args) {
+            match = re.match(r'(?:function|fn)\s+([a-zA-Z_]\w*)\s*\((.*?)\)\s*\{', header_line)
+            if not match:
+                return None
+            
+            func_name = match.group(1)
+            func_args = match.group(2)
+            body_lines = []
+            brace_count = 1
+            current_index = start_index + 1
+            
+            while current_index < len(lines) and brace_count > 0:
+                line = lines[current_index]
+                brace_count += line.count('{') - line.count('}')
+                if brace_count > 0:
+                    body_lines.append(line)
+                current_index += 1
+            
+            body = '\n'.join(body_lines)
+            raw_match = '\n'.join(lines[start_index:current_index])
+            
+            class ConceptFunctionPattern:
+                def __init__(self, name, args, body, raw_match):
+                    self.pattern_type = PatternType.CONCEPT_FUNCTION
+                    self.parsed_data = {'name': name, 'args': args, 'body': body}
+                    self.raw_match = raw_match
+                    self.confidence = 0.9
+            
+            return ConceptFunctionPattern(func_name, func_args, body, raw_match)
+        
+        except Exception as e:
+            self.logger.warning(f"Failed to extract concept function: {e}")
+            return None
+    
+    def _is_cai_metadata_format(self, code: str) -> bool:
+        """Check if code is in CAI metadata format (kept for backward compatibility)"""
+        # This method is now primarily used by the metadata compression pipeline
+        lines = code.split('\n')
+        has_cai_header = any('CAI Format' in line for line in lines[:5])
+        has_structure_info = any('Structure:' in line for line in lines[:10])
+        has_cai_patterns = any(line.strip().startswith(('I[', 'C[', 'F[', 'M[')) for line in lines)
+        
+        return has_cai_header and (has_structure_info or has_cai_patterns)
+    
+    def _parse_cai_metadata_format(self, code: str) -> List[ast.stmt]:
+        """Parse CAI metadata format and extract structure"""
+        body = []
+        lines = code.split('\n')
+        
+        # Extract structure information from metadata
+        imports_count = 0
+        classes_count = 0
+        functions_count = 0
+        
+        for line in lines:
+            if 'Structure:' in line:
+                # Parse "Structure: 3 classes, 8 functions, 8 imports"
+                parts = line.split('Structure:')[1].strip()
+                for part in parts.split(','):
+                    part = part.strip()
+                    if 'class' in part:
+                        classes_count = int(part.split()[0])
+                    elif 'function' in part:
+                        functions_count = int(part.split()[0])
+                    elif 'import' in part:
+                        imports_count = int(part.split()[0])
+        
+        # Generate basic structure based on metadata
+        current_line = 1
+        
+        # Add imports
+        for i in range(min(imports_count, 5)):  # Limit to reasonable number
+            import_name = f"module_{i+1}" if i > 0 else "sys"
+            body.append(ast.Import(
+                names=[ast.alias(name=import_name, asname=None)],
+                lineno=current_line,
+                col_offset=0
+            ))
+            current_line += 1
+        
+        if imports_count > 0:
+            current_line += 1  # Add spacing
+        
+        # Add classes
+        for i in range(min(classes_count, 3)):  # Limit to reasonable number
+            class_name = f"Class_{i+1}"
+            
+            # Add some methods to each class
+            methods = []
+            for j in range(min(2, max(1, functions_count // max(classes_count, 1)))):
+                method_name = f"method_{j+1}"
+                method = ast.FunctionDef(
+                    name=method_name,
+                    args=ast.arguments(
+                        posonlyargs=[],
+                        args=[ast.arg(arg='self', annotation=None)],
+                        vararg=None,
+                        kwonlyargs=[],
+                        kw_defaults=[],
+                        kwarg=None,
+                        defaults=[]
+                    ),
+                    body=[ast.Pass(lineno=current_line + j + 2, col_offset=0)],
+                    decorator_list=[],
+                    returns=None,
+                    lineno=current_line + j + 2,
+                    col_offset=0
+                )
+                methods.append(method)
+            
+            if not methods:
+                methods = [ast.Pass(lineno=current_line + 1, col_offset=0)]
+            
+            body.append(ast.ClassDef(
+                name=class_name,
+                bases=[],
+                keywords=[],
+                body=methods,
+                decorator_list=[],
+                lineno=current_line,
+                col_offset=0
+            ))
+            current_line += len(methods) + 2
+        
+        # Add standalone functions
+        remaining_functions = max(0, functions_count - (classes_count * 2))
+        for i in range(min(remaining_functions, 3)):  # Limit to reasonable number
+            func_name = f"function_{i+1}"
+            body.append(ast.FunctionDef(
+                name=func_name,
+                args=ast.arguments(
+                    posonlyargs=[],
+                    args=[],
+                    vararg=None,
+                    kwonlyargs=[],
+                    kw_defaults=[],
+                    kwarg=None,
+                    defaults=[]
+                ),
+                body=[ast.Pass(lineno=current_line + 1, col_offset=0)],
+                decorator_list=[],
+                returns=None,
+                lineno=current_line,
+                col_offset=0
+            ))
+            current_line += 2
+        
+        # Parse any explicit CAI patterns in the content
+        for line in lines:
+            line = line.strip()
+            if line.startswith('I[') and line.endswith(']'):
+                # Import pattern
+                import_content = line[2:-1]
+                if 'from ' in import_content and ': ' in import_content:
+                    # from module: names format (CAI format)
+                    parts = import_content.split(': ')
+                    if len(parts) == 2:
+                        from_part = parts[0].strip()
+                        names_part = parts[1].strip()
+                        
+                        if from_part.startswith('from '):
+                            module_name = from_part[5:].strip()  # Remove 'from '
+                            names = [n.strip() for n in names_part.split(',')]
+                            aliases = [ast.alias(name=name, asname=None) for name in names[:3]]  # Limit names
+                            body.append(ast.ImportFrom(
+                                module=module_name,
+                                names=aliases,
+                                level=0,
+                                lineno=current_line,
+                                col_offset=0
+                            ))
+                            current_line += 1
+                elif 'from ' in import_content and ' import ' in import_content:
+                    # Standard from module import names format
+                    parts = import_content.split(' import ')
+                    if len(parts) == 2:
+                        module_name = parts[0].replace('from ', '').strip()
+                        names = [n.strip() for n in parts[1].split(',')]
+                        aliases = [ast.alias(name=name, asname=None) for name in names[:3]]  # Limit names
+                        body.append(ast.ImportFrom(
+                            module=module_name,
+                            names=aliases,
+                            level=0,
+                            lineno=current_line,
+                            col_offset=0
+                        ))
+                        current_line += 1
+                else:
+                    # regular import
+                    names = [n.strip() for n in import_content.split(',')]
+                    for name in names[:2]:  # Limit to 2 imports per line
+                        body.append(ast.Import(
+                            names=[ast.alias(name=name, asname=None)],
+                            lineno=current_line,
+                            col_offset=0
+                        ))
+                        current_line += 1
+            
+            elif line.startswith('C[') and line.endswith(']'):
+                # Class pattern
+                class_content = line[2:-1]
+                if ' -> ' in class_content:
+                    class_name = class_content.split(' -> ')[0].strip()
+                else:
+                    class_name = class_content.strip()
+                
+                body.append(ast.ClassDef(
+                    name=class_name,
+                    bases=[],
+                    keywords=[],
+                    body=[ast.Pass(lineno=current_line + 1, col_offset=0)],
+                    decorator_list=[],
+                    lineno=current_line,
+                    col_offset=0
+                ))
+                current_line += 2
+            
+            elif line.startswith('F[') and line.endswith(']'):
+                # Function pattern
+                func_content = line[2:-1]
+                if ' -> ' in func_content:
+                    func_sig = func_content.split(' -> ')[0].strip()
+                else:
+                    func_sig = func_content.strip()
+                
+                if '(' in func_sig:
+                    func_name = func_sig.split('(')[0].strip()
+                    args_part = func_sig.split('(')[1].split(')')[0].strip()
+                    
+                    # Parse basic arguments
+                    args = []
+                    if args_part and args_part != '0 args':
+                        if 'args' in args_part:
+                            # Handle "2 args" format
+                            try:
+                                arg_count = int(args_part.split()[0])
+                                args = [ast.arg(arg=f'arg{i+1}', annotation=None) for i in range(min(arg_count, 3))]
+                            except:
+                                pass
+                        else:
+                            # Handle actual argument names
+                            arg_names = [a.strip() for a in args_part.split(',') if a.strip()]
+                            args = [ast.arg(arg=name, annotation=None) for name in arg_names[:3]]
+                else:
+                    func_name = func_sig.strip()
+                    args = []
+                
+                body.append(ast.FunctionDef(
+                    name=func_name,
+                    args=ast.arguments(
+                        posonlyargs=[],
+                        args=args,
+                        vararg=None,
+                        kwonlyargs=[],
+                        kw_defaults=[],
+                        kwarg=None,
+                        defaults=[]
+                    ),
+                    body=[ast.Pass(lineno=current_line + 1, col_offset=0)],
+                    decorator_list=[],
+                    returns=None,
+                    lineno=current_line,
+                    col_offset=0
+                ))
+                current_line += 2
+        
+        # If no body was generated, add a basic pass statement
+        if not body:
+            body.append(ast.Pass(lineno=1, col_offset=0))
+        
+        return body
+    
+    def _create_structured_fallback(self, cleaned_cai_code: str) -> List[ast.stmt]:
+        """Create structured fallback based on code analysis"""
+        body = []
+        
+        # Look for common patterns and create appropriate AST nodes
+        lines = cleaned_cai_code.split('\n')
+        
+        has_functions = any('def ' in line or 'function ' in line for line in lines)
+        has_classes = any('class ' in line or 'concept ' in line for line in lines)
+        has_imports = any('import ' in line or 'from ' in line for line in lines)
+        
+        if has_imports:
+            # Add a basic import
+            body.append(ast.Import(names=[ast.alias(name='sys', asname=None)], lineno=1, col_offset=0))
+        
+        if has_classes:
+            # Add a basic class
+            body.append(ast.ClassDef(
+                name='GeneratedClass',
+                bases=[],
+                keywords=[],
+                body=[ast.Pass(lineno=2, col_offset=0)],
+                decorator_list=[],
+                lineno=2,
+                col_offset=0
+            ))
+        
+        if has_functions:
+            # Add a basic function
+            body.append(ast.FunctionDef(
+                name='generated_function',
+                args=ast.arguments(
+                    posonlyargs=[], args=[], vararg=None, kwonlyargs=[],
+                    kw_defaults=[], kwarg=None, defaults=[]
+                ),
+                body=[ast.Pass(lineno=3, col_offset=0)],
+                decorator_list=[],
+                returns=None,
+                lineno=3,
+                col_offset=0
+            ))
+        
+        # If no structure detected, add a basic pass statement
+        if not body:
+            body.append(ast.Pass(lineno=1, col_offset=0))
+        
+        return body
+        
     def translate(self, session_id: str, cai_code: str, original_py: Optional[str] = None, 
                   *, source_map: Dict = None, level: str = "full") -> TranslationResult:
-        """Streamlined translate method with consolidated phases"""
+        """Dual-pipeline translation method with optimized routing"""
         
         start_time = time.time()
         context = TranslationContext(source_map=source_map or {})
         
         try:
-            # STAGE 0: Do pattern matching FIRST before Unicode cleanup
-            # This allows patterns like τ (tau) to be recognized
-            patterns = self.pattern_engine.match_all(cai_code)
+            self.logger.info(f"Starting AST translation for {len(cai_code)} characters of CAI code")
             
-            # STAGE 1: Now do Unicode cleanup on the raw code for AST generation
-            cleaned_cai_code = self._scrub_all_unicode_early(cai_code)
+            # PIPELINE ROUTING: Determine which pipeline to use based on content analysis
+            pipeline_type = self._determine_pipeline_type(cai_code)
+            self.logger.info(f"Using pipeline: {pipeline_type}")
             
-            # Centralized processing pipeline - now uses cleaned code for AST generation
-            module = self._translate_to_ast(cleaned_cai_code, patterns)
+            if pipeline_type == "metadata_compression":
+                # METADATA COMPRESSION PIPELINE: For large tier files with chunk compression
+                self.logger.info("Using metadata compression pipeline for fast processing")
+                patterns = []  # No pattern matching needed for compressed metadata
+                cleaned_cai_code = cai_code  # Minimal preprocessing
+                body = self._parse_cai_metadata_format(cai_code)
+                module = ast.Module(body=body, type_ignores=[])
+                
+            elif pipeline_type == "enhanced_pattern":
+                # ENHANCED PATTERN ENGINE PIPELINE: For semantic preservation and complex CAI
+                self.logger.info("Using enhanced pattern engine pipeline for semantic preservation")
+                
+                # STAGE 1: Enhanced pattern matching with CAI format support
+                patterns = self._enhanced_pattern_matching(cai_code)
+                self.logger.info(f"Enhanced pattern matching found {len(patterns)} patterns")
+                
+                # STAGE 2: Selective Unicode cleanup preserving pattern content
+                cleaned_cai_code = self._scrub_unicode_preserve_patterns(cai_code, patterns)
+                
+                # STAGE 3: Advanced AST generation with semantic analysis
+                module = self._translate_to_ast_enhanced(cleaned_cai_code, patterns)
+                
+            else:  # fallback pipeline
+                # FALLBACK PIPELINE: Basic processing for unknown formats
+                self.logger.info("Using fallback pipeline for unknown format")
+                patterns = self.pattern_engine.match_all(cai_code)
+                cleaned_cai_code = self._scrub_unicode_preserve_patterns(cai_code, patterns)
+                module = self._translate_to_ast_enhanced(cleaned_cai_code, patterns)
             raw_py = self._ast_to_code(module)
             cleaned = self._final_cleanup(raw_py, context)
             validated, repaired = self._validate_or_repair(cleaned, context)
@@ -1194,12 +2393,11 @@ class CAIToPythonTranslator:
     
     
     def _expand_body_sync(self, body: str, context: TranslationContext, base_indent: int = 0) -> str:
-        """Synchronous version of body expansion - FIXED VERSION to preserve content"""
+        """Synchronous version of body expansion - FIXED JavaScript-to-Python conversion"""
         if not body or not body.strip():
             return '    ' * (base_indent + 1) + 'pass'
         
-        # CRITICAL FIX: Don't strip the body content, preserve it
-        self.logger.info(f"Body expansion input: {repr(body[:100])}")  # Log input for debugging
+        self.logger.info(f"Body expansion input: {repr(body[:100])}")
         
         lines = []
         body_lines = body.strip().split('\n')
@@ -1215,61 +2413,101 @@ class CAIToPythonTranslator:
                 i += 1
                 continue
                 
-            # Basic Python conversions without losing content
             processed_line = line.strip()
             
-            # Only apply essential conversions that don't lose data
+            # Skip empty braces and standalone function keywords
+            if processed_line in ['{', '}', 'function', 'function {', '} function']:
+                i += 1
+                continue
+            
+            # Handle } else { patterns first
+            if processed_line.startswith('} else'):
+                if len(indent_stack) > 1:
+                    indent_stack.pop()
+                processed_line = 'else:'
+                current_indent = indent_stack[-1]
+                lines.append('    ' * current_indent + processed_line)
+                indent_stack.append(current_indent + 1)
+                i += 1
+                continue
+            
+            # Handle } catch patterns  
+            if '} catch' in processed_line:
+                if len(indent_stack) > 1:
+                    indent_stack.pop()
+                # Extract exception variable if present
+                catch_match = re.search(r'\} catch\s*(\w+\s+as\s+\w+|\w+)', processed_line)
+                if catch_match:
+                    exception_part = catch_match.group(1)
+                    processed_line = f'except {exception_part}:'
+                else:
+                    processed_line = 'except Exception as e:'
+                current_indent = indent_stack[-1]
+                lines.append('    ' * current_indent + processed_line)
+                indent_stack.append(current_indent + 1)
+                i += 1
+                continue
+            
+            # Handle standalone closing braces
+            if processed_line == '}':
+                if len(indent_stack) > 1:
+                    indent_stack.pop()
+                i += 1
+                continue
+            
+            # Basic replacements first
             processed_line = processed_line.replace('console.log', 'print')
-            processed_line = processed_line.replace('&&', ' and ')
-            processed_line = processed_line.replace('||', ' or ')
             processed_line = processed_line.replace('true', 'True')
             processed_line = processed_line.replace('false', 'False')
+            processed_line = processed_line.replace('null', 'None')
             
             # Remove trailing semicolons
             if processed_line.endswith(';'):
                 processed_line = processed_line[:-1]
             
-            # Remove JavaScript variable keywords but preserve the rest
-            processed_line = re.sub(r'\bvar\s+', '', processed_line)
-            processed_line = re.sub(r'\blet\s+', '', processed_line)
-            processed_line = re.sub(r'\bconst\s+', '', processed_line)
+            # Remove JavaScript keywords
+            processed_line = re.sub(r'\b(var|let|const)\s+', '', processed_line)
             
-            # Convert JavaScript control structures to Python
-            original_line = processed_line
+            # Fix JavaScript operators BEFORE processing control structures
+            # Handle negation: (!email) -> (not email)
+            processed_line = re.sub(r'\(\s*!\s*([^)]+)\s*\)', r'(not \1)', processed_line)
+            processed_line = re.sub(r'\b!\s*(\w+)', r'not \1', processed_line)
             
-            # Handle closing braces that indicate end of blocks
-            if processed_line == '}':
-                # Pop from indent stack
+            # Handle logical operators
+            processed_line = re.sub(r'\s*&&\s*', ' and ', processed_line)
+            processed_line = re.sub(r'\s*\|\|\s*', ' or ', processed_line)
+            
+            # Convert control structures with proper condition handling
+            if_match = re.match(r'if\s*\(\s*(.*?)\s*\)\s*\{?', processed_line)
+            if if_match:
+                condition = if_match.group(1)
+                processed_line = f'if {condition}:'
+            elif re.match(r'for\s*\(', processed_line):
+                # Handle for loops
+                for_match = re.match(r'for\s*\(\s*(\w+)\s+(of|in)\s+(.*?)\s*\)\s*\{?', processed_line)
+                if for_match:
+                    var_name = for_match.group(1)
+                    iterable = for_match.group(3)
+                    processed_line = f'for {var_name} in {iterable}:'
+            elif re.match(r'while\s*\(', processed_line):
+                while_match = re.match(r'while\s*\(\s*(.*?)\s*\)\s*\{?', processed_line)
+                if while_match:
+                    condition = while_match.group(1)
+                    processed_line = f'while {condition}:'
+            elif processed_line.startswith('try {'):
+                processed_line = 'try:'
+            elif processed_line.startswith('} finally'):
                 if len(indent_stack) > 1:
                     indent_stack.pop()
-                # Check if next line is else/elif
-                if i + 1 < len(body_lines):
-                    next_line = body_lines[i + 1].strip()
-                    if next_line.startswith('} else'):
-                        # Skip this brace, the else will be handled next
-                        i += 1
-                        continue
-                i += 1
-                continue
+                processed_line = 'finally:'
             
-            # Handle } else { patterns
-            if processed_line.startswith('} else'):
-                # Pop one level for the closing brace, then process else
-                if len(indent_stack) > 1:
-                    indent_stack.pop()
-                processed_line = re.sub(r'\}\s*else\s*\{?', 'else:', processed_line)
-            else:
-                # Convert other control structures
-                processed_line = re.sub(r'\bif\s*\(\s*(.*?)\s*\)\s*\{?', r'if \1:', processed_line)
-                processed_line = re.sub(r'\bfor\s*\(\s*(\w+)\s+of\s+(.*?)\s*\)\s*\{?', r'for \1 in \2:', processed_line)
-                processed_line = re.sub(r'\bfor\s*\(\s*(\w+)\s+in\s+(.*?)\s*\)\s*\{?', r'for \1 in \2:', processed_line)
-                processed_line = re.sub(r'\bwhile\s*\(\s*(.*?)\s*\)\s*\{?', r'while \1:', processed_line)
-            
-            # Convert JavaScript array methods to Python equivalents
+            # Convert JavaScript methods to Python
             processed_line = re.sub(r'(\w+)\.push\((.*?)\)', r'\1.append(\2)', processed_line)
-            processed_line = re.sub(r'(\w+)\.length', r'len(\1)', processed_line)
+            processed_line = re.sub(r'(\w+)\.length\b', r'len(\1)', processed_line)
+            processed_line = re.sub(r'\.toLowerCase\(\)', '.lower()', processed_line)
+            processed_line = re.sub(r'\.toUpperCase\(\)', '.upper()', processed_line)
             
-            # Skip standalone opening braces
+            # Skip lines that are just opening braces
             if processed_line.strip() == '{':
                 i += 1
                 continue
@@ -1279,18 +2517,17 @@ class CAIToPythonTranslator:
             
             # Check if this line starts a new block
             if processed_line.endswith(':'):
-                # Add to current level, then push new level
                 lines.append('    ' * current_indent + processed_line)
                 indent_stack.append(current_indent + 1)
             elif processed_line.startswith('else:') or processed_line.startswith('elif '):
                 # else/elif should be at the same level as the matching if
                 if len(indent_stack) > 1:
-                    indent_stack.pop()  # Return to the if level
+                    indent_stack.pop()
                 current_indent = indent_stack[-1]
                 lines.append('    ' * current_indent + processed_line)
-                indent_stack.append(current_indent + 1)  # Push new level for else body
+                indent_stack.append(current_indent + 1)
             else:
-                # Regular statement at current level
+                # Regular statement
                 lines.append('    ' * current_indent + processed_line)
             
             self.logger.info(f"Body expansion preserved line: {repr(processed_line)}")
@@ -1303,10 +2540,11 @@ class CAIToPythonTranslator:
     def _expand_concept_body_sync(self, body: str, context: TranslationContext, base_indent: int = 0) -> str:
         """Synchronous version of concept body expansion"""
         if not body or not body.strip():
-            return '    ' * (base_indent + 1) + 'pass'
+            return 'pass' if base_indent == 0 else '    ' * (base_indent + 1) + 'pass'
         
         lines = []
-        indent_level = base_indent + 1
+        # Use base_indent directly for top-level functions when base_indent is 0
+        indent_level = base_indent if base_indent == 0 else base_indent + 1
         
         body_lines = body.strip().split('\n')
         i = 0
@@ -1336,7 +2574,7 @@ class CAIToPythonTranslator:
                 else:
                     method_params = "self"
                 
-                # Add function definition
+                # Add function definition with proper indentation
                 lines.append('    ' * indent_level + f"def {func_name}({method_params}):")
                 
                 # Process function body - collect all lines until matching brace
@@ -1362,39 +2600,40 @@ class CAIToPythonTranslator:
                 
                 # Process the collected function body
                 if func_body_lines:
-                    # Join the function body and apply exception processing
-                    func_body_text = '\n'.join(func_body_lines)
-                    func_body_processed = self._process_exception_blocks(func_body_text)
+                    # Simple JavaScript to Python conversion without complex exception processing
+                    current_block_indent = indent_level + 1
+                    block_stack = [current_block_indent]
                     
-                    # Split the processed body and preserve the indentation from exception processing
-                    processed_lines = func_body_processed.split('\n')
-                    
-                    for proc_line in processed_lines:
-                        if not proc_line.strip():
+                    for body_line in func_body_lines:
+                        body_line_stripped = body_line.strip()
+                        if not body_line_stripped:
                             continue
+                        
+                        # Check if this line starts a control block
+                        starts_block = (
+                            body_line_stripped.endswith('{') or
+                            re.search(r'\b(if|while|for|else|try|except|finally)\b.*:', body_line_stripped) or
+                            re.search(r'\b(if|while|for)\s*\(.*\)\s*:', body_line_stripped)
+                        )
+                        
+                        # Check if this line ends a block (closing brace)
+                        ends_block = body_line_stripped == '}' or body_line_stripped.startswith('}')
+                        
+                        if ends_block:
+                            # Pop from block stack if we can
+                            if len(block_stack) > 1:
+                                block_stack.pop()
+                            continue  # Skip the closing brace line
+                        
+                        # Convert JavaScript to Python
+                        converted_line = self._convert_js_statement_simple(body_line_stripped)
+                        if converted_line:
+                            current_indent = block_stack[-1]
+                            lines.append('    ' * current_indent + converted_line)
                             
-                        # The line has already been processed by _process_exception_blocks
-                        # Only apply minimal JavaScript conversion for things that weren't handled
-                        line_content = proc_line.strip()
-                        
-                        # Check if this is already a Python control structure (has colon)
-                        if any(line_content.startswith(kw) for kw in ['try:', 'except', 'finally:', 'if ', 'elif ', 'else:', 'for ', 'while ']) and line_content.endswith(':'):
-                            # Already processed, just use as-is
-                            converted_line = line_content
-                        else:
-                            # Apply minimal conversion for expressions and assignments
-                            converted_line = self._convert_js_to_python_minimal(line_content)
-                        
-                        if not converted_line.strip():
-                            continue
-                        
-                        # Preserve the indentation from exception processing and add function base indent
-                        original_indent = len(proc_line) - len(proc_line.lstrip())
-                        function_base_indent = '    ' * (indent_level + 1)
-                        preserved_indent = '    ' * (original_indent // 4) if original_indent > 0 else ''
-                        
-                        final_line = function_base_indent + preserved_indent + converted_line.strip()
-                        lines.append(final_line)
+                            # If this line starts a block, push new indent level
+                            if starts_block or converted_line.endswith(':'):
+                                block_stack.append(current_indent + 1)
                 else:
                     lines.append('    ' * (indent_level + 1) + 'pass')
                     
@@ -1417,7 +2656,8 @@ class CAIToPythonTranslator:
                         lines.append('    ' * indent_level + processed_line.strip())
                 i += 1
         
-        return '\n'.join(lines) if lines else '    ' * (base_indent + 1) + 'pass'
+        result = '\n'.join(lines) if lines else ('pass' if base_indent == 0 else '    ' * (base_indent + 1) + 'pass')
+        return result
     
     def _expand_symbol_body_sync(self, body: str, context: TranslationContext, base_indent: int = 0) -> str:
         """Synchronous version of symbol body expansion"""
@@ -1466,6 +2706,86 @@ class CAIToPythonTranslator:
                 lines.append('')  # Blank line between methods
         
         return '\n'.join(lines) if lines else '    ' * base_indent + 'pass'
+    
+    def _convert_js_statement_simple(self, statement: str) -> str:
+        """Convert a single JavaScript statement to Python - FIXED VERSION"""
+        if not statement or not statement.strip():
+            return ""
+        
+        statement = statement.strip()
+        
+        # Remove trailing semicolon
+        if statement.endswith(';'):
+            statement = statement[:-1]
+        
+        # Skip empty braces and function keywords
+        if statement in ['{', '}', 'function', 'function {']:
+            return ""
+        
+        # Remove JavaScript variable keywords
+        statement = re.sub(r'\b(var|let|const)\s+', '', statement)
+        
+        # Handle negation FIRST - this is critical for proper conversion
+        statement = re.sub(r'\(\s*!\s*([^)]+)\s*\)', r'(not \1)', statement)
+        statement = re.sub(r'\b!\s*(\w+)', r'not \1', statement)
+        
+        # Convert logical operators
+        statement = statement.replace('&&', ' and ')
+        statement = statement.replace('||', ' or ')
+        
+        # Convert boolean values
+        statement = statement.replace('true', 'True')
+        statement = statement.replace('false', 'False')
+        statement = statement.replace('null', 'None')
+        
+        # Convert console.log to print
+        statement = re.sub(r'\bconsole\.log\b', 'print', statement)
+        
+        # Convert control structures with proper condition handling
+        if_match = re.match(r'if\s*\(\s*(.*?)\s*\)\s*\{?', statement)
+        if if_match:
+            condition = if_match.group(1)
+            return f'if {condition}:'
+        
+        while_match = re.match(r'while\s*\(\s*(.*?)\s*\)\s*\{?', statement)
+        if while_match:
+            condition = while_match.group(1)
+            return f'while {condition}:'
+        
+        for_match = re.match(r'for\s*\(\s*(\w+)\s+(of|in)\s+(.*?)\s*\)\s*\{?', statement)
+        if for_match:
+            var_name = for_match.group(1)
+            iterable = for_match.group(3)
+            return f'for {var_name} in {iterable}:'
+        
+        # Handle try/catch/finally blocks
+        if statement.startswith('try {') or statement == 'try':
+            return 'try:'
+        
+        if 'catch' in statement:
+            catch_match = re.search(r'catch\s*(\w+\s+as\s+\w+|\w+)', statement)
+            if catch_match:
+                exception_part = catch_match.group(1)
+                return f'except {exception_part}:'
+            else:
+                return 'except Exception as e:'
+        
+        if statement.startswith('finally {') or statement == 'finally':
+            return 'finally:'
+        
+        if statement.startswith('else {') or statement == 'else':
+            return 'else:'
+        
+        # Convert array methods
+        statement = re.sub(r'(\w+)\.push\((.*?)\)', r'\1.append(\2)', statement)
+        statement = re.sub(r'(\w+)\.length\b', r'len(\1)', statement)
+        statement = re.sub(r'\.toLowerCase\(\)', '.lower()', statement)
+        statement = re.sub(r'\.toUpperCase\(\)', '.upper()', statement)
+        
+        # Clean up whitespace
+        statement = re.sub(r'\s+', ' ', statement).strip()
+        
+        return statement
     
     def _process_line_basic(self, line: str) -> str:
         """Basic line processing for synchronous operations"""
@@ -1581,111 +2901,42 @@ class CAIToPythonTranslator:
         return lines if lines else ['    ' * indent_level + 'pass']
 
     def _convert_js_to_python_simple(self, code: str) -> str:
-        """Simple JavaScript to Python conversion"""
+        """Simple JavaScript to Python conversion - FIXED VERSION"""
+        if not code or not code.strip():
+            return ""
+        
         # Remove function keyword
         code = re.sub(r'\bfunction\s+', '', code)
         
         # Remove JavaScript variable declarations
-        code = re.sub(r'\bvar\s+', '', code)
-        code = re.sub(r'\blet\s+', '', code)
-        code = re.sub(r'\bconst\s+', '', code)
+        code = re.sub(r'\b(var|let|const)\s+', '', code)
         
-        # Convert boolean operators FIRST, before handling parentheses
+        # Handle negation FIRST - this is critical
+        code = re.sub(r'\(\s*!\s*([^)]+)\s*\)', r'(not \1)', code)
+        code = re.sub(r'\b!\s*(\w+)', r'not \1', code)
+        
+        # Convert logical operators 
         code = code.replace('&&', ' and ')
         code = code.replace('||', ' or ')
-        code = re.sub(r'(?<![=!])!(?![=])', ' not ', code)
         
-        # Convert if statements with parentheses - use a more robust approach
-        code = self._convert_conditional_statements(code, 'if')
-        code = self._convert_conditional_statements(code, 'elif')
+        # Convert boolean values
+        code = code.replace('true', 'True')
+        code = code.replace('false', 'False')
+        code = code.replace('null', 'None')
         
-        # Convert else statements
-        code = re.sub(r'\belse\s*\{', r'else:', code)
-        code = re.sub(r'\belse\b(?!\s*:)', r'else:', code)
+        # Convert JavaScript methods
+        code = re.sub(r'(\w+)\.push\((.*?)\)', r'\1.append(\2)', code)
+        code = re.sub(r'(\w+)\.length\b', r'len(\1)', code)
+        code = re.sub(r'\.toLowerCase\(\)', '.lower()', code)
+        code = re.sub(r'\.toUpperCase\(\)', '.upper()', code)
         
-        # Convert for loops - use the same robust approach
-        code = self._convert_conditional_statements(code, 'for')
+        # Convert console.log
+        code = re.sub(r'\bconsole\.log\b', 'print', code)
         
-        # Convert while loops - use the same robust approach
-        code = self._convert_conditional_statements(code, 'while')
+        # Remove trailing semicolons
+        code = re.sub(r';+$', '', code.strip())
         
-        # Convert try/catch/finally blocks
-        code = re.sub(r'try\s*\{', r'try:', code)
-        code = re.sub(r'catch\s*\((.*?)\)\s*\{', r'except \1:', code)
-        code = re.sub(r'catch\s*\{', r'except:', code)
-        code = re.sub(r'finally\s*\{', r'finally:', code)
-        
-        # Handle dictionary and object literals carefully
-        # First, preserve dictionary literals by temporarily replacing them
-        dict_placeholders = {}
-        dict_counter = 0
-        
-        # Use a simpler, more reliable approach for dictionary detection
-        # Find all brace pairs and classify them as dictionaries or control structures
-        i = 0
-        loop_counter = 0
-        max_iterations = len(code) + 500  # Safety limit
-        while i < len(code) and loop_counter < max_iterations:
-            loop_counter += 1
-            if code[i] == '{':
-                # Found opening brace, find matching closing brace
-                brace_count = 1
-                start = i
-                i += 1
-                
-                inner_loop_counter = 0
-                max_inner_iterations = len(code) - start + 100  # Safety limit
-                while i < len(code) and brace_count > 0 and inner_loop_counter < max_inner_iterations:
-                    inner_loop_counter += 1
-                    if code[i] == '{':
-                        brace_count += 1
-                    elif code[i] == '}':
-                        brace_count -= 1
-                    i += 1
-                
-                if brace_count == 0:  # Found matching closing brace
-                    dict_content = code[start:i]
-                    
-                    # Check if this is likely a dictionary vs control structure
-                    # Look at what comes before the opening brace
-                    before_brace = code[:start].strip()
-                    
-                    # Dictionary patterns: assignment (=), empty braces, or contains colons
-                    is_dictionary = (
-                        dict_content == '{}' or  # Empty dict
-                        ':' in dict_content or   # Has key:value pairs
-                        (before_brace.endswith('=') and '=' not in dict_content.replace('{', '').replace('}', ''))  # Assignment without inner =
-                    )
-                    
-                    # Control structure patterns: preceded by keywords
-                    control_keywords = ['if', 'elif', 'else', 'for', 'while', 'try', 'except', 'finally', 'with']
-                    is_control_structure = any(before_brace.split()[-1:] == [keyword] for keyword in control_keywords)
-                    
-                    if is_dictionary and not is_control_structure:
-                        # This is likely a dictionary, preserve it
-                        placeholder = f"__DICT_PLACEHOLDER_{dict_counter}__"
-                        dict_placeholders[placeholder] = dict_content
-                        code = code[:start] + placeholder + code[i:]
-                        # Adjust position after replacement
-                        i = start + len(placeholder)
-                        dict_counter += 1
-                    else:
-                        # This is likely a control structure brace, continue
-                        pass
-            else:
-                i += 1
-        
-        # Now remove control structure braces (which should be most remaining braces)
-        code = code.replace('{', '').replace('}', '')
-        
-        # Restore dictionary literals
-        for placeholder, original in dict_placeholders.items():
-            code = code.replace(placeholder, original)
-        
-        # Convert true/false
-        code = code.replace('true', 'True').replace('false', 'False')
-        
-        # Clean up any double spaces or trailing spaces
+        # Clean up whitespace
         code = re.sub(r'\s+', ' ', code).strip()
         
         return code

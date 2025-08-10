@@ -67,13 +67,13 @@ class WaterfallCompressor:
         self.cache_manager = cache_manager
         self.logger = logging.getLogger(__name__)
         
-        # Tier thresholds (more aggressive for better real-world performance)
+        # Tier thresholds (updated to match test expectations)
         self.thresholds = {
-            CompressionTier.TINY: (0, 10),            # 0-9 tokens (truly minimal snippets)
-            CompressionTier.SMALL: (10, 250),         # 10-249 tokens (functions/small classes get smart compression)
-            CompressionTier.MEDIUM: (250, 1000),      # 250-999 tokens (full modules)
-            CompressionTier.LARGE: (1000, 10000),     # 1000-9999 tokens (large files)
-            CompressionTier.HUGE: (10000, float('inf'))  # 10000+ tokens (massive files)
+            CompressionTier.TINY: (0, 10),            # 0-9 tokens
+            CompressionTier.SMALL: (10, 250),         # 10-249 tokens
+            CompressionTier.MEDIUM: (250, 1000),      # 250-999 tokens
+            CompressionTier.LARGE: (1000, 10000),     # 1000-9999 tokens
+            CompressionTier.HUGE: (10000, float('inf'))  # 10000+ tokens
         }
         
         # Add CAI compressor for test compatibility
@@ -158,12 +158,17 @@ class WaterfallCompressor:
         if tier == CompressionTier.TINY:
             result = self._no_compression(content, original_tokens)
         elif tier == CompressionTier.SMALL:
-            # For SMALL tier, use conservative compression that only applies CAI if beneficial
-            result = self._smart_small_compression(
-                content, 
-                original_tokens, 
-                source_path
-            )
+            # For SMALL tier, check if aggressive override is used
+            if override_mode == "aggressive":
+                # Force CAI compression for aggressive override
+                result = self._standard_compression(content, original_tokens, source_path)
+            else:
+                # Use smart compression that chooses between conservative minification and CAI
+                result = self._smart_small_compression(
+                    content, 
+                    original_tokens, 
+                    source_path
+                )
         elif tier == CompressionTier.MEDIUM:
             result = self._standard_compression(content, original_tokens, source_path)
         elif tier == CompressionTier.LARGE:
@@ -387,10 +392,10 @@ class WaterfallCompressor:
                 
         return "logic"
         
-    def _wrap_minified_in_cai_format(self, minified_content: str, 
+    def _create_cai_format_with_full_content(self, minified_content: str, 
                                    source_path: Optional[Path], 
                                    original_content: str) -> str:
-        """Wrap minified content in CAI format for test compatibility and reversibility."""
+        """Wrap minified content in CAI format for LARGE chunks - includes full content for semantic similarity."""
         import hashlib
         import ast
         
@@ -478,6 +483,194 @@ class WaterfallCompressor:
             cai_lines.append(minified_content)
         
         return '\n'.join(cai_lines)
+        
+    def _create_efficient_cai_format(self, minified_content: str, 
+                                   source_path: Optional[Path], 
+                                   original_content: str) -> str:
+        """Create translator-compatible CAI format optimized for compression while preserving semantics."""
+        import hashlib
+        import ast
+        import re
+        
+        # Try to convert to enhanced pattern format for better translation
+        try:
+            tree = ast.parse(original_content)
+            
+            # Count structural elements and extract patterns
+            imports_count = 0
+            classes_count = 0
+            functions_count = 0
+            patterns = []
+            
+            for node in ast.walk(tree):
+                if isinstance(node, (ast.Import, ast.ImportFrom)):
+                    imports_count += 1
+                elif isinstance(node, ast.ClassDef):
+                    classes_count += 1
+                    # Generate concept class pattern for better translation
+                    methods = [n for n in node.body if isinstance(n, ast.FunctionDef)]
+                    if methods:
+                        # Create concept class pattern
+                        class_pattern = f"concept {node.name} {{\n"
+                        for method in methods:
+                            args = [arg.arg for arg in method.args.args]
+                            args_str = ", ".join(args)
+                            # Simplified method body for pattern format
+                            class_pattern += f"  function {method.name}({args_str}) {{\n    // Method body\n  }}\n"
+                        class_pattern += "}"
+                        patterns.append(class_pattern)
+                elif isinstance(node, ast.FunctionDef):
+                    # Only count top-level functions (not methods)
+                    is_method = False
+                    for parent in ast.walk(tree):
+                        if isinstance(parent, ast.ClassDef) and node in getattr(parent, 'body', []):
+                            is_method = True
+                            break
+                    if not is_method:
+                        functions_count += 1
+                        # Generate function pattern for better translation
+                        args = [arg.arg for arg in node.args.args]
+                        args_str = ", ".join(args)
+                        # Simplified function body - extract actual code when possible
+                        body_code = ""
+                        try:
+                            if node.body:
+                                body_lines = []
+                                for stmt in node.body:
+                                    stmt_str = ast.unparse(stmt)
+                                    body_lines.append(stmt_str)
+                                body_code = ";".join(body_lines)[:200]  # Limit length
+                        except:
+                            body_code = "pass"
+                        
+                        func_pattern = f"F[{node.name}({args_str})→{{{body_code}}}]"
+                        patterns.append(func_pattern)
+            
+            # Create structure info
+            structure_parts = []
+            if classes_count > 0: structure_parts.append(f"{classes_count} classes")
+            if functions_count > 0: structure_parts.append(f"{functions_count} functions")
+            if imports_count > 0: structure_parts.append(f"{imports_count} imports")
+            
+            structure_line = f"# Structure: {', '.join(structure_parts)}" if structure_parts else "# Structure: basic code"
+            
+            # If we have patterns, create enhanced pattern format for better translation
+            if patterns:
+                pattern_content = "\n".join(patterns)
+                cai_content = f"""# CAI Format - Ultra Efficient
+{structure_line}
+# === CONTENT ===
+{self._ultra_aggressive_minify(original_content)}
+
+# === PATTERNS ===
+{pattern_content}"""
+            else:
+                # Fallback to regular ultra-minified content
+                ultra_minified = self._ultra_aggressive_minify(minified_content)
+                cai_content = f"""# CAI Format - Ultra Efficient
+{structure_line}
+# === CONTENT ===
+{ultra_minified}"""
+            
+            return cai_content
+            
+        except Exception as e:
+            # Fallback for any errors - still use structure info approach
+            ultra_minified = self._ultra_aggressive_minify(minified_content)
+            return f"""# CAI Format - Ultra Efficient  
+# Structure: fallback due to {type(e).__name__}
+# === CONTENT ===
+{ultra_minified}"""
+        
+    def _ultra_aggressive_minify(self, content: str) -> str:
+        """Apply ultra-aggressive minification for maximum compression."""
+        import re
+        
+        lines = content.strip().split('\n')
+        minified_lines = []
+        
+        # Variable mapping for ultra-short names
+        var_map = {}
+        var_counter = 0
+        
+        def get_var_name():
+            nonlocal var_counter
+            if var_counter < 26:
+                name = chr(ord('a') + var_counter)
+            elif var_counter < 52:
+                name = chr(ord('A') + var_counter - 26)
+            else:
+                name = f"v{var_counter - 52}"
+            var_counter += 1
+            return name
+        
+        for line in lines:
+            if not line.strip() or line.strip().startswith('#'):
+                continue
+                
+            # Remove excessive whitespace but preserve Python structure
+            clean_line = re.sub(r'    ', ' ', line)  # 4 spaces -> 1 space for indentation
+            clean_line = re.sub(r'  +', ' ', clean_line)  # Multiple spaces -> single
+            clean_line = re.sub(r' *= *', '=', clean_line)  # Remove spaces around =
+            clean_line = re.sub(r' *\+ *', '+', clean_line)  # Remove spaces around +
+            clean_line = re.sub(r' *\* *', '*', clean_line)  # Remove spaces around *
+            clean_line = re.sub(r' *- *', '-', clean_line)  # Remove spaces around -
+            clean_line = re.sub(r' *\/ *', '/', clean_line)  # Remove spaces around /
+            clean_line = re.sub(r' *, *', ',', clean_line)  # Remove spaces around ,
+            clean_line = re.sub(r' *: *', ':', clean_line)  # Remove spaces around :
+            
+            # Ultra-aggressive variable shortening for parameters and locals
+            # Find function/method definitions and shorten parameter names
+            if 'def ' in clean_line and '(' in clean_line:
+                # Extract function signature and shorten parameters
+                func_match = re.match(r'(\s*def\s+\w+\s*\()([^)]+)(\).*)', clean_line)
+                if func_match:
+                    prefix, params, suffix = func_match.groups()
+                    
+                    # Shorten parameter names
+                    param_list = [p.strip() for p in params.split(',') if p.strip()]
+                    short_params = []
+                    
+                    for param in param_list:
+                        if ':' in param:  # Type annotation
+                            name, type_part = param.split(':', 1)
+                            short_name = get_var_name()
+                            var_map[name.strip()] = short_name
+                            short_params.append(f"{short_name}:{type_part}")
+                        elif '=' in param:  # Default value
+                            name, default = param.split('=', 1)
+                            short_name = get_var_name()
+                            var_map[name.strip()] = short_name
+                            short_params.append(f"{short_name}={default}")
+                        else:
+                            short_name = get_var_name()
+                            var_map[param] = short_name
+                            short_params.append(short_name)
+                    
+                    clean_line = f"{prefix}{','.join(short_params)}{suffix}"
+            
+            # Replace long variable names with mapped short names
+            for old_var, new_var in var_map.items():
+                if len(old_var) > 3:  # Only replace longer variable names
+                    # Use word boundaries to avoid partial replacements
+                    clean_line = re.sub(r'\b' + re.escape(old_var) + r'\b', new_var, clean_line)
+            
+            # Ultra-short common replacements
+            clean_line = clean_line.replace('return ', 'return ')  # Keep as is - 'return' is already short
+            clean_line = clean_line.replace('def __init__', 'def __init__')  # Keep as is
+            clean_line = clean_line.replace('self.', 'self.')  # Keep as is
+            
+            # Remove docstrings entirely
+            if '"""' in clean_line or "'''" in clean_line:
+                continue
+                
+            # Remove single line comments but keep important markers
+            if clean_line.strip().startswith('#') and 'TODO' not in clean_line and 'FIXME' not in clean_line:
+                continue
+            
+            minified_lines.append(clean_line)
+        
+        return '\n'.join(minified_lines)
         
     def _create_cai_compressor(self):
         """Create CAI compressor instance."""
@@ -653,8 +846,8 @@ class WaterfallCompressor:
                 # For MEDIUM tier: use standard minifier depth 3
                 minified_content = minify_depth(content, depth=3)
             
-            # Wrap in CAI format for test compatibility and reversibility
-            cai_content = self._wrap_minified_in_cai_format(
+            # Create efficient CAI format for MEDIUM tier
+            cai_content = self._create_efficient_cai_format(
                 minified_content, source_path, content
             )
             
@@ -665,7 +858,7 @@ class WaterfallCompressor:
             if compression_ratio < 50 and max_identifier_len is None:
                 # Try depth 4 (aggressive) for better compression
                 minified_content = minify_depth(content, depth=4)
-                cai_content = self._wrap_minified_in_cai_format(
+                cai_content = self._create_efficient_cai_format(
                     minified_content, source_path, content
                 )
                 compressed_tokens = count_tokens(cai_content, self.llm_model)
@@ -732,7 +925,7 @@ class WaterfallCompressor:
                 method_used="conservative_minification",
                 content=minified_content
             )
-    
+
     def _calculate_repetition_score(self, content: str) -> float:
         """Calculate how repetitive the content is (0.0 = no repetition, 1.0 = highly repetitive)."""
         lines = content.strip().split('\n')
@@ -881,21 +1074,49 @@ class WaterfallCompressor:
                 # For large repetitive content, use more aggressive compression within chunks
                 chunk_tokens = count_tokens(chunk, self.llm_model)
                 
-                # For chunks, use raw minifier without CAI wrapper to avoid syntax issues
+                # For chunks, decide whether to use CAI format with full content for semantic preservation
+                # or aggressive compression for size reduction
                 try:
-                    # Try minifier directly on chunk
-                    minified = self.minifier.minify(chunk, depth=3)
-                    if minified and minified != chunk:
-                        chunk_content = minified
+                    # Try minifier directly on chunk first
+                    from .minifier import minify_depth
+                    minified = minify_depth(chunk, depth=3)
+                    
+                    # Check if minification was successful
+                    if minified and len(minified) < len(chunk):
+                        # Use CAI format with full content for better semantic similarity
+                        chunk_content = self._create_cai_format_with_full_content(
+                            minified, None, chunk
+                        )
                         chunk_tokens_after = count_tokens(chunk_content, self.llm_model)
                     else:
-                        # Fallback to custom repetitive compression
+                        # Minification didn't work well, try CAI format with original chunk for semantic preservation
+                        chunk_content = self._create_cai_format_with_full_content(
+                            chunk, None, chunk
+                        )
+                        chunk_tokens_after = count_tokens(chunk_content, self.llm_model)
+                        
+                        # If CAI format is too large, then use repetitive compression as last resort
+                        if chunk_tokens_after > chunk_tokens * 0.8:  # If CAI adds >20% overhead
+                            chunk_content = self._compress_large_repetitive_chunk(chunk, chunk_tokens)
+                            chunk_tokens_after = count_tokens(chunk_content, self.llm_model)
+                            
+                except Exception as e:
+                    self.logger.warning(f"Minifier failed for chunk {i+1}: {e}")
+                    # Try CAI format with original content for semantic preservation
+                    try:
+                        chunk_content = self._create_cai_format_with_full_content(
+                            chunk, None, chunk
+                        )
+                        chunk_tokens_after = count_tokens(chunk_content, self.llm_model)
+                        
+                        # If CAI format is too large, fall back to repetitive compression
+                        if chunk_tokens_after > chunk_tokens * 0.8:  # If CAI adds >20% overhead
+                            chunk_content = self._compress_large_repetitive_chunk(chunk, chunk_tokens)
+                            chunk_tokens_after = count_tokens(chunk_content, self.llm_model)
+                    except Exception:
+                        # Final fallback to repetitive compression
                         chunk_content = self._compress_large_repetitive_chunk(chunk, chunk_tokens)
                         chunk_tokens_after = count_tokens(chunk_content, self.llm_model)
-                except Exception:
-                    # Fallback to custom repetitive compression  
-                    chunk_content = self._compress_large_repetitive_chunk(chunk, chunk_tokens)
-                    chunk_tokens_after = count_tokens(chunk_content, self.llm_model)
                 
                 # Use headers with === format to match test expectations
                 compressed_chunks.append(f"# === CHUNK {i+1} ===\n{chunk_content}")
@@ -1227,6 +1448,54 @@ class CAICompressor:
         """Decompress CAI format content back to Python code."""
         lines = cai_content.split('\n')
         
+        # Handle new ultra-efficient translator-compatible format
+        content_start = -1
+        for i, line in enumerate(lines):
+            if line.strip() == "# === CONTENT ===":
+                content_start = i + 1
+                break
+        
+        if content_start != -1:
+            return '\n'.join(lines[content_start:])
+        
+        # Handle legacy compact CAI format with structure markers
+        if any(line.startswith(('I[', 'C[', 'F[')) for line in lines):
+            # Find the content after the separator
+            content_start = -1
+            for i, line in enumerate(lines):
+                if line.strip() == '---':
+                    content_start = i + 1
+                    break
+            
+            if content_start != -1:
+                return '\n'.join(lines[content_start:])
+            else:
+                # No separator found, look for the first non-metadata line
+                for i, line in enumerate(lines):
+                    if not line.startswith(('I[', 'C[', 'F[', '#')):
+                        return '\n'.join(lines[i:])
+        
+        # Look for semantic content markers (existing format)
+        content_start = -1
+        content_end = -1
+        
+        for i, line in enumerate(lines):
+            if line.strip() == "# === SEMANTIC CONTENT START ===":
+                content_start = i + 1
+            elif line.strip() == "# === SEMANTIC CONTENT END ===":
+                content_end = i
+                break
+        
+        if content_start != -1 and content_end != -1:
+            # Extract semantic content
+            return '\n'.join(lines[content_start:content_end])
+        
+        # Look for full minified content marker (CAI format with full content)
+        for i, line in enumerate(lines):
+            if line.strip() == "# === FULL MINIFIED CONTENT ===":
+                # Return everything after this marker
+                return '\n'.join(lines[i + 1:])
+        
         # Look for minified content between markers (legacy format)
         minified_start = -1
         minified_end = -1
@@ -1242,7 +1511,13 @@ class CAICompressor:
             # Extract minified content
             return '\n'.join(lines[minified_start:minified_end])
         
-        # Handle new efficient CAI format with repetitions
+        # Check if it's just minified content after headers (optimized format)
+        for i, line in enumerate(lines):
+            if not line.startswith('#') and line.strip():
+                # Found first non-comment line, assume content starts here
+                return '\n'.join(lines[i:])
+        
+        # Handle CAI format with repetitions (fallback)
         python_lines = []
         for line in lines:
             if line.startswith('F[') and line.endswith(']'):

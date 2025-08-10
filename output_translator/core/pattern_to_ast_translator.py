@@ -92,10 +92,18 @@ class PatternToASTTranslator:
             # Dispatch to appropriate build method based on pattern type
             if pattern.pattern_type.value == "function" or str(pattern.pattern_type) == "PatternType.FUNCTION":
                 return self._build_function_def(pattern.parsed_data, context)
+            elif pattern.pattern_type.value == "function_compressed" or str(pattern.pattern_type) == "PatternType.FUNCTION_COMPRESSED":
+                return self._build_function_def(pattern.parsed_data, context)  # Same handler
             elif pattern.pattern_type.value == "class" or str(pattern.pattern_type) == "PatternType.CLASS":
                 return self._build_class_def(pattern.parsed_data, context)
+            elif pattern.pattern_type.value == "class_compressed" or str(pattern.pattern_type) == "PatternType.CLASS_COMPRESSED":
+                return self._build_class_def(pattern.parsed_data, context)  # Same handler
             elif pattern.pattern_type.value == "method" or str(pattern.pattern_type) == "PatternType.METHOD":
                 return self._build_method_def(pattern.parsed_data, context)
+            elif pattern.pattern_type.value == "method_compressed" or str(pattern.pattern_type) == "PatternType.METHOD_COMPRESSED":
+                return self._build_method_def(pattern.parsed_data, context)  # Same handler
+            elif pattern.pattern_type.value == "import_from" or str(pattern.pattern_type) == "PatternType.IMPORT_FROM":
+                return self._build_import_stmt(pattern.parsed_data, context)  # Same handler
             elif pattern.pattern_type.value == "nested_method" or str(pattern.pattern_type) == "PatternType.NESTED_METHOD":
                 return self._build_nested_method_def(pattern.parsed_data, context)
             elif pattern.pattern_type.value == "concept_class" or str(pattern.pattern_type) == "PatternType.CONCEPT_CLASS":
@@ -1288,26 +1296,89 @@ class PatternToASTTranslator:
         
         return result
     
-    def _clean_body_for_parsing(self, body_str: str) -> str:
-        """Clean body string to prepare it for safe AST parsing."""
+    def _clean_body_for_parsing_preserve_content(self, body_str: str) -> str:
+        """Clean body string to prepare it for safe AST parsing while preserving all content."""
         if not body_str or not body_str.strip():
             return 'pass'
         
-        # Remove excessive indentation that can corrupt parsing
+        # Don't strip content aggressively - preserve structure but make it parseable
         lines = body_str.split('\n')
         cleaned_lines = []
         
         for line in lines:
-            # Strip leading/trailing whitespace but preserve structure
+            # Only remove excessive leading whitespace, but preserve the content
             stripped = line.strip()
             if stripped:
+                # Keep the line but normalize basic syntax issues
+                # Remove trailing semicolons that break Python
+                if stripped.endswith(';'):
+                    stripped = stripped[:-1]
+                
+                # Fix obvious JavaScript-isms that prevent parsing
+                stripped = stripped.replace('&&', ' and ')
+                stripped = stripped.replace('||', ' or ')
+                stripped = stripped.replace('true', 'True')
+                stripped = stripped.replace('false', 'False')
+                
                 cleaned_lines.append(stripped)
         
         result = '\n'.join(cleaned_lines)
         if not result:
             return 'pass'
         
-        self.logger.debug(f"Cleaned body: {result[:100]}...")
+        self.logger.debug(f"Preserved body content: {result[:200]}...")
+        return result
+    
+    def _convert_cai_to_python_preserve_content(self, body_str: str) -> str:
+        """Convert CAI to Python while preserving all content - no aggressive changes."""
+        code = body_str
+        
+        # Only apply essential conversions that are necessary for Python parsing
+        
+        # Phase 1: Essential boolean and operator conversions
+        code = code.replace('console.log', 'print')
+        code = code.replace('this.', 'self.')
+        
+        # Phase 2: Boolean conversions with word boundaries to avoid corrupting variable names
+        code = re.sub(r'\btrue\b', 'True', code)
+        code = re.sub(r'\bfalse\b', 'False', code)
+        code = re.sub(r'\s*&&\s*', ' and ', code)
+        code = re.sub(r'\s*\|\|\s*', ' or ', code)
+        
+        # Phase 3: Remove JavaScript variable declarations (conservative)
+        code = re.sub(r'\b(var|let|const)\s+', '', code)
+        
+        # Phase 4: Handle control structures with braces - but only convert obvious ones
+        if re.search(r'\b(if|for|while|try|catch|finally)\s*[({]', code):
+            # Convert control structures with braces to Python syntax
+            code = re.sub(r'\bif\s*\(\s*(.*?)\s*\)\s*\{', r'if \1:', code)
+            code = re.sub(r'\bfor\s*\(\s*(.*?)\s*\)\s*\{', r'for \1:', code)
+            code = re.sub(r'\bwhile\s*\(\s*(.*?)\s*\)\s*\{', r'while \1:', code)
+            code = re.sub(r'\btry\s*\{', r'try:', code)
+            code = re.sub(r'\bcatch\s*\(\s*(.*?)\s*\)\s*\{', r'except \1:', code)
+            code = re.sub(r'\bcatch\s*\{', r'except:', code)
+            code = re.sub(r'\bfinally\s*\{', r'finally:', code)
+            
+            # Remove orphaned braces
+            code = re.sub(r'\s*\{\s*', '', code)
+            code = re.sub(r'\s*\}\s*', '', code)
+        
+        # Phase 5: Handle semicolons carefully - only remove if they're statement terminators
+        lines = code.split('\n')
+        clean_lines = []
+        for line in lines:
+            if line.strip():
+                # Remove trailing semicolons but preserve structure
+                if line.rstrip().endswith(';'):
+                    line = line.rstrip()[:-1].rstrip()
+                clean_lines.append(line)
+        
+        result = '\n'.join(clean_lines)
+        
+        # Don't return empty result
+        if not result.strip():
+            return body_str  # Return original if conversion failed
+        
         return result
     
     def _strip_corrupting_indentation(self, code: str) -> str:
@@ -1398,11 +1469,13 @@ class PatternToASTTranslator:
         return bases
     
     def _build_body_statements(self, body_str: str, context) -> List[ast.stmt]:
-        """Build AST statements with proper block structure detection."""
+        """Build AST statements with proper block structure detection - FIXED VERSION."""
         if not body_str or not body_str.strip() or body_str.strip() == 'pass':
             return [ast.Pass(lineno=1, col_offset=0)]
         
-        self.logger.info(f"Building body statements from: {repr(body_str[:100])}")
+        self.logger.info(f"Building body statements from: {repr(body_str[:200])}")
+        
+        # CRITICAL FIX: Don't lose content - preserve everything we can
         
         # PRIORITY 1: Try direct Python parsing first (if it looks like Python already)
         try:
@@ -1417,10 +1490,13 @@ class PatternToASTTranslator:
         except SyntaxError:
             pass  # Continue to other methods
         
-        # PRIORITY 2: Try wrapped parsing with the original indented code
+        # PRIORITY 2: Try wrapped parsing with proper indentation handling
         try:
+            # Clean the body for proper parsing - but don't lose content
+            cleaned_body = self._clean_body_for_parsing_preserve_content(body_str)
+            
             # Wrap in a dummy function to provide proper context
-            wrapped_code = f"def _dummy():\n{body_str}"
+            wrapped_code = f"def _dummy():\n{self._indent_code(cleaned_body, 1)}"
             module_ast = ast.parse(wrapped_code)
             
             # Extract the body from the dummy function
@@ -1428,8 +1504,6 @@ class PatternToASTTranslator:
                 body_stmts = module_ast.body[0].body
                 self.logger.info(f"Successfully parsed {len(body_stmts)} statements with wrapping")
                 return body_stmts
-            else:
-                return [ast.Pass(lineno=1, col_offset=0)]
                 
         except SyntaxError as e:
             self.logger.warning(f"Wrapped parsing failed: {e}")
@@ -1442,7 +1516,7 @@ class PatternToASTTranslator:
             if hasattr(self.translator, '_expand_body_sync'):
                 try:
                     python_code = self.translator._expand_body_sync(body_str, context, 0)
-                    self.logger.info("Used translator _expand_body_sync")
+                    self.logger.info(f"Used translator _expand_body_sync, result length: {len(python_code)}")
                 except Exception as e:
                     self.logger.debug(f"_expand_body_sync failed: {e}")
             
@@ -1452,42 +1526,58 @@ class PatternToASTTranslator:
                     lines = self.translator._process_body_statements(body_str, 0)
                     if lines:
                         python_code = '\n'.join(lines)
-                        self.logger.info("Used translator _process_body_statements")
+                        self.logger.info(f"Used translator _process_body_statements, {len(lines)} lines")
                 except Exception as e:
                     self.logger.debug(f"_process_body_statements failed: {e}")
         
-        # PRIORITY 4: Fallback to our conversion (only when needed)
+        # PRIORITY 4: Use our improved conversion when needed
         if not python_code:
-            python_code = self._convert_cai_to_python(body_str)
-            self.logger.info("Used fallback CAI to Python conversion")
+            python_code = self._convert_cai_to_python_preserve_content(body_str)
+            self.logger.info(f"Used improved CAI to Python conversion, result length: {len(python_code)}")
         
-        # STEP 2: Parse the converted code with proper structure
-        try:
-            # First try to parse directly
-            body_ast = ast.parse(python_code)
-            if body_ast.body:
-                self.logger.info(f"Successfully parsed {len(body_ast.body)} statements directly")
-                return body_ast.body
-        except SyntaxError:
-            pass  # Continue to wrapped parsing
-        
-        try:
-            # Wrap in a dummy function to provide proper context
-            wrapped_code = f"def _dummy():\n" + self._indent_code(python_code, 1)
-            module_ast = ast.parse(wrapped_code)
+        # STEP 2: Parse the converted code with multiple attempts
+        if python_code and python_code.strip():
+            try:
+                # First try to parse directly
+                body_ast = ast.parse(python_code)
+                if body_ast.body:
+                    self.logger.info(f"Successfully parsed {len(body_ast.body)} statements from converted code")
+                    return body_ast.body
+            except SyntaxError:
+                pass  # Continue to wrapped parsing
             
-            # Extract the body from the dummy function
-            if module_ast.body and isinstance(module_ast.body[0], ast.FunctionDef):
-                body_stmts = module_ast.body[0].body
-                self.logger.info(f"Successfully parsed {len(body_stmts)} statements with wrapping")
-                return body_stmts
-            else:
-                return [ast.Pass(lineno=1, col_offset=0)]
+            try:
+                # Wrap in a dummy function to provide proper context
+                wrapped_code = f"def _dummy():\n" + self._indent_code(python_code, 1)
+                module_ast = ast.parse(wrapped_code)
                 
-        except SyntaxError as e:
-            self.logger.warning(f"Wrapped parsing failed: {e}")
-            # FINAL FALLBACK: Use block-aware parsing
-            return self._parse_with_block_detection(python_code, context)
+                # Extract the body from the dummy function
+                if module_ast.body and isinstance(module_ast.body[0], ast.FunctionDef):
+                    body_stmts = module_ast.body[0].body
+                    self.logger.info(f"Successfully parsed {len(body_stmts)} statements with wrapped converted code")
+                    return body_stmts
+                    
+            except SyntaxError as e:
+                self.logger.warning(f"Wrapped converted code parsing failed: {e}")
+        
+        # FINAL FALLBACK: Don't lose the content - preserve as comments with at least one executable statement
+        self.logger.warning(f"All parsing methods failed for body content, preserving as comments")
+        comment_lines = []
+        
+        # Split by lines and preserve each line as a comment
+        for i, line in enumerate(body_str.split('\n'), 1):
+            if line.strip():
+                comment_lines.append(ast.Expr(
+                    value=ast.Constant(value=f"# Body line {i}: {line.strip()}"),
+                    lineno=i,
+                    col_offset=0
+                ))
+        
+        # Add at least one executable statement
+        comment_lines.append(ast.Pass(lineno=len(comment_lines) + 1, col_offset=0))
+        
+        self.logger.info(f"Preserved {len(comment_lines)-1} lines of original body content as comments")
+        return comment_lines if comment_lines else [ast.Pass(lineno=1, col_offset=0)]
     
     def _split_statements_on_semicolon(self, line: str) -> List[str]:
         """Split a line on semicolons while preserving quoted strings."""

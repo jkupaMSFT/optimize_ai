@@ -11,6 +11,7 @@ from typing import Union, List, Tuple, Optional, Dict, Any
 import hashlib
 import ast
 import re
+from .cai3_waterfall_integration import enhance_waterfall_with_cai3
 
 # Test mode for unit test compatibility  
 TEST_MODE = bool(os.getenv("WATERFALL_TEST_MODE", ""))
@@ -1575,6 +1576,10 @@ class WaterfallCompressor:
         except Exception as e:
             self.logger.warning(f"Failed to cache result for {file_path}: {e}")
             
+
+# Enhance WaterfallCompressor with CAI3 integration
+enhance_waterfall_with_cai3(WaterfallCompressor)
+
 
 # Example usage
 if __name__ == "__main__":

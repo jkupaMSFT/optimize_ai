@@ -154,6 +154,7 @@ Thumbs.db
 .optimize_ai/
 .optimize_ai_cache/
 .optimize_ai_stats.json
+.cai3_cache/
 
 # Node.js dependencies and build artifacts
 node_modules/

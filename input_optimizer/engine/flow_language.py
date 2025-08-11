@@ -449,18 +449,27 @@ class FLOWCompiler:
         """Process assignment target with compression"""
         if isinstance(node, ast.Name):
             name = node.id
-            # Check local compressions first
-            if self.current_scope_id and self.current_scope_id in self.local_compressions:
-                local_map = self.local_compressions[self.current_scope_id]
-                if name in local_map:
-                    return local_map[name]
-            # Then global compressions
+            # Check local compressions first - if scope exists and name is in local map, use it
+            if self.current_scope_id and name in self.local_compressions.get(self.current_scope_id, {}):
+                return self.local_compressions[self.current_scope_id][name]
+            # If local scope exists but name not in local map, trust minified names (no double-compress)
+            elif self.current_scope_id and self.current_scope_id in self.local_compressions:
+                return name  # Trust the already minified name, don't apply global compression
+            # Only apply global compressions when no local scope is present
             return self.name_map.get(name, name)
         elif isinstance(node, ast.Attribute):
-            obj = self._process_value(node.value)
-            attr = node.attr
-            # Use dot notation but compress object name
-            return f"{obj}.{attr}"
+            # Build full chain once
+            chain = []
+            cur = node
+            while isinstance(cur, ast.Attribute):
+                chain.append(cur.attr)
+                cur = cur.value
+            base = self._process_value(cur)  # will return 's' for self, etc.
+            chain.append(base)
+            chain.reverse()
+            full = ".".join(chain)            # e.g., s.config.get
+            ali = self._maybe_alias(full)
+            return ali if ali else full
         elif isinstance(node, ast.Subscript):
             obj = self._process_value(node.value)
             index = self._process_value(node.slice)
@@ -491,12 +500,13 @@ class FLOWCompiler:
                 if name in builtin_map:
                     return builtin_map[name]
             
-            # Check local compressions
-            if self.current_scope_id and self.current_scope_id in self.local_compressions:
-                local_map = self.local_compressions[self.current_scope_id]
-                if name in local_map:
-                    return local_map[name]
-            
+            # Check local compressions - if scope exists and name is in local map, use it
+            if self.current_scope_id and name in self.local_compressions.get(self.current_scope_id, {}):
+                return self.local_compressions[self.current_scope_id][name]
+            # If local scope exists but name not in local map, trust minified names (no double-compress)
+            elif self.current_scope_id and self.current_scope_id in self.local_compressions:
+                return name  # Trust the already minified name, don't apply global compression
+            # Only apply global compressions when no local scope is present
             return self.name_map.get(name, name)
         elif isinstance(node, ast.Constant):
             # Pool constants if enabled and meet minimum length
@@ -517,11 +527,18 @@ class FLOWCompiler:
                 return "F" if self.dense_mode else "False"
             return str(node.value)
         elif isinstance(node, ast.Attribute):
-            obj = self._process_value(node.value)
-            # Compress common patterns
-            if self.dense_mode and obj == 's':  # self
-                return f"s.{node.attr}"
-            return f"{obj}.{node.attr}"
+            # Build full chain once
+            chain = []
+            cur = node
+            while isinstance(cur, ast.Attribute):
+                chain.append(cur.attr)
+                cur = cur.value
+            base = self._process_value(cur)  # will return 's' for self, etc.
+            chain.append(base)
+            chain.reverse()
+            full = ".".join(chain)            # e.g., s.config.get
+            ali = self._maybe_alias(full)
+            return ali if ali else full
         elif isinstance(node, ast.Call):
             return self._process_call(node)
         elif isinstance(node, ast.List):
@@ -613,11 +630,30 @@ class FLOWCompiler:
         if self.alias_chains:
             self.alias_chains_dict[full_chain] = alias
     
+    def _maybe_alias(self, full_chain: str) -> Optional[str]:
+        """Check if a full chain has an alias and return it"""
+        alias = self.alias_chains_dict.get(full_chain)
+        return alias
+    
     def _process_call(self, node: ast.Call) -> str:
         """Process function call with ultra-compact syntax"""
         if isinstance(node.func, ast.Attribute):
-            obj = self._process_value(node.func.value)
+            # reconstruct chain like above
+            chain = []
+            cur = node.func
+            while isinstance(cur, ast.Attribute):
+                chain.append(cur.attr)
+                cur = cur.value
+            base = self._process_value(cur)
+            chain.append(base)
+            chain.reverse()
+            full = ".".join(chain)            # s.config.get
+            ali = self._maybe_alias(full)
+            func_str = ali if ali else full
+            
+            # Extract method for special compact patterns
             method = node.func.attr
+            obj = self._process_value(node.func.value)
             
             # Special compact patterns
             if self.dense_mode:
@@ -635,12 +671,12 @@ class FLOWCompiler:
                     args = [self._process_value(a) for a in node.args]
                     return f"C({obj}.g,{','.join(args)})"
                 
-            # Regular method call
+            # Regular method call - use aliased function string
             args = [self._process_value(a) for a in node.args]
             if self.dense_mode:
-                return f"C({obj}.{method},{','.join(args)})" if args else f"C({obj}.{method})"
+                return f"C({func_str},{','.join(args)})" if args else f"C({func_str})"
             else:
-                return f"CALL({obj}.{method}, {', '.join(args)})" if args else f"CALL({obj}.{method})"
+                return f"CALL({func_str}, {', '.join(args)})" if args else f"CALL({func_str})"
         
         elif isinstance(node.func, ast.Name):
             func_name = self.name_map.get(node.func.id, node.func.id)

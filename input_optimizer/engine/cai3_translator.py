@@ -23,6 +23,22 @@ from .cai3_structures import (
 from .flow_language import FLOWCompiler
 
 
+class DeminifyTransformer(ast.NodeTransformer):
+    """
+    AST transformer to de-minify variable names using short->original mapping.
+    Only remaps names that exist in the mapping to preserve attributes/imports.
+    """
+    
+    def __init__(self, short_to_orig: Dict[str, str]):
+        self.s2o = short_to_orig
+    
+    def visit_Name(self, node: ast.Name):
+        # Only remap if we have an original; keep attributes/imports alone
+        if node.id in self.s2o:
+            node.id = self.s2o[node.id]
+        return self.generic_visit(node)
+
+
 class CAI3Translator:
     """
     Applies CAI3-PATCH to original source using locally stored FULL+MAP.
@@ -244,6 +260,23 @@ class CAI3Translator:
             new_body_stmts = flow_compiler._parse_flow_lines(
                 patch.body_content.split('\n'), 0
             )[0]
+            
+            # De-minify the B1 body before writing
+            # Build short->orig map for this cid
+            short_to_orig = {}
+            local_map = cai3_map.name_map  # already stores locals as f"{cid}:{short}" -> orig
+            # Build inverse for this cid only
+            prefix = f"{patch.target_cid}:"
+            for k, orig in local_map.items():
+                if k.startswith(prefix):
+                    short = k.split(":", 1)[1]
+                    short_to_orig[short] = orig
+            
+            if short_to_orig:
+                demin = DeminifyTransformer(short_to_orig)
+                new_body_stmts = [demin.visit(stmt) for stmt in new_body_stmts]
+                for s in new_body_stmts:
+                    ast.fix_missing_locations(s)
         else:
             # Parse as Python AST directly
             new_body = ast.parse(patch.body_content).body

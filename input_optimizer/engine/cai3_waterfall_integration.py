@@ -21,6 +21,13 @@ from .cai3_structures import (
 )
 from .flow_language import FLOWCompiler
 from .compression_types import CompressionResult, CompressionTier
+from ...config.constants import (
+    DENSE_FLOW_ASCII_OPS, DENSE_FLOW_NO_SPACES, DENSE_FLOW_INLINE_BLOCKS,
+    DENSE_FLOW_ALIAS_CHAINS, DENSE_FLOW_POOL_STRINGS_MIN_LEN,
+    LITE_FLAT_TABLE, LITE_CID_ALIAS_MAP, LITE_KEEP_E_TERMINATOR,
+    CAI3_MAX_EDIT_SCOPE_METHODS, CAI3_MIN_BUG_SCORE,
+    CAI3_AGGRESSIVE_NAME_COMPRESSION, CAI3_POOL_CONSTANTS
+)
 
 try:
     import tiktoken
@@ -56,13 +63,25 @@ class CAI3WaterfallEnhancement:
         self.logger = logging.getLogger(__name__)
         
         # Enhanced compression settings
-        self.max_edit_scope_methods = 2  # Strict limit for MEDIUM tier
-        self.min_bug_score = 10  # Higher threshold for inclusion
+        self.max_edit_scope_methods = CAI3_MAX_EDIT_SCOPE_METHODS  # Strict limit for MEDIUM tier
+        self.min_bug_score = CAI3_MIN_BUG_SCORE  # Higher threshold for inclusion
         self.use_dense_flow = True  # Ultra-dense FLOW syntax
-        self.compress_all_names = True  # Compress locals, params, attrs
-        self.pool_strings = True  # Pool all strings > 5 chars
+        self.compress_all_names = CAI3_AGGRESSIVE_NAME_COMPRESSION  # Compress locals, params, attrs
+        self.pool_strings = CAI3_POOL_CONSTANTS  # Pool all strings > 5 chars
         self.include_all_methods = False  # Flag to include all method bodies
         self.llm_model = "gpt-4"
+        
+        # Dense FLOW feature flags (enabled by default for MEDIUM when include_all_methods=True)
+        self.dense_flow_ascii_ops = DENSE_FLOW_ASCII_OPS
+        self.dense_flow_no_spaces = DENSE_FLOW_NO_SPACES
+        self.dense_flow_inline_blocks = DENSE_FLOW_INLINE_BLOCKS
+        self.dense_flow_alias_chains = DENSE_FLOW_ALIAS_CHAINS
+        self.dense_flow_pool_strings_min_len = DENSE_FLOW_POOL_STRINGS_MIN_LEN
+        
+        # LITE optimization flags
+        self.lite_flat_table = LITE_FLAT_TABLE
+        self.lite_cid_alias_map = LITE_CID_ALIAS_MAP
+        self.lite_keep_e_terminator = LITE_KEEP_E_TERMINATOR
     
     def _standard_compression_cai3(self, content: str, original_tokens: int,
                                    source_path: Optional[Path] = None) -> CompressionResult:
@@ -286,6 +305,21 @@ class CAI3WaterfallEnhancement:
                 names = ', '.join(alias.name for alias in node.names)
                 imports.append(f"from {node.module} import {names}")
         
+        # Collect string frequency and chain patterns
+        string_frequency = {}
+        chain_patterns = {}
+        
+        # First pass: collect string and chain frequencies
+        for node in ast.walk(tree):
+            # String frequency counting
+            if isinstance(node, ast.Constant) and isinstance(node.value, str):
+                string_frequency[node.value] = string_frequency.get(node.value, 0) + 1
+            
+            # Chain pattern detection
+            chain = self._extract_chain_pattern(node)
+            if chain:
+                chain_patterns[chain] = chain_patterns.get(chain, 0) + 1
+        
         lines = content.split('\n')
         
         # Process all classes and functions
@@ -375,15 +409,46 @@ class CAI3WaterfallEnhancement:
                         
                         nodes.append(method_node)
         
-        # Extract strings and constants to pools
+        # Extract strings and constants to pools with profitability rules
         pool_counter = 0
-        for node in ast.walk(tree):
-            if isinstance(node, ast.Constant):
-                if isinstance(node.value, str) and len(node.value) > 5:
-                    # Pool any string longer than 5 chars
-                    pool_key = f"s{pool_counter}"
-                    pools[pool_key] = node.value
-                    pool_counter += 1
+        chain_aliases = {}
+        pool_map = {}  # Centralized pool map: value -> pool_id
+        
+        # Apply profitability rule: len(value) >= 8 and occurrences >= 2
+        for string_val, freq in sorted(string_frequency.items(), key=lambda x: x[1], reverse=True):
+            if len(string_val) >= 8 and freq >= 2:
+                pool_key = f"p{pool_counter}"
+                pools[pool_key] = string_val
+                pool_map[string_val] = pool_key
+                pool_counter += 1
+        
+        # Create chain aliases with net savings calculation
+        alias_counter = 0
+        for chain, freq in sorted(chain_patterns.items(), key=lambda x: x[1], reverse=True):
+            if freq > 1:  # Only repeated chains
+                alias_key = f"g{alias_counter}"
+                
+                # Calculate net savings: (occurrences * savings_per_use) - definition_cost
+                savings_per_use = len(chain) - len(alias_key)  # bytes saved per use
+                definition_cost = len(f"{alias_key}={chain}") + 1  # +1 for separator in D: section
+                net_savings = (freq * savings_per_use) - definition_cost
+                
+                # Only include if net savings is positive
+                if net_savings > 0:
+                    chain_aliases[alias_key] = chain
+                    alias_counter += 1
+                    self.logger.debug(f"Chain alias '{alias_key}={chain}': {freq} uses, "
+                                    f"saves {savings_per_use} chars/use, "
+                                    f"costs {definition_cost} chars to define, "
+                                    f"net savings: {net_savings}")
+                else:
+                    self.logger.debug(f"Rejected chain alias '{alias_key}={chain}': {freq} uses, "
+                                    f"saves {savings_per_use} chars/use, "
+                                    f"costs {definition_cost} chars to define, "
+                                    f"net savings: {net_savings} (not profitable)")
+                
+                if alias_counter >= 10:  # Limit to 10 most frequent profitable chains
+                    break
         
         file_hash = hashlib.md5(content.encode()).hexdigest()[:8]
         
@@ -399,7 +464,11 @@ class CAI3WaterfallEnhancement:
             compression_stats={
                 'original_lines': len(content.split('\n')),
                 'node_count': len(nodes),
-                'pool_size': len(pools)
+                'pool_size': len(pools),
+                'pool_map': pool_map,  # Store centralized pool map
+                'chain_aliases': chain_aliases,  # Store chain aliases in metadata
+                'string_frequency': string_frequency,
+                'chain_frequency': chain_patterns
             }
         )
         
@@ -408,6 +477,7 @@ class CAI3WaterfallEnhancement:
     def _compress_name_aggressive(self, name: str, used_names: Set[str]) -> str:
         """
         Aggressive name compression - single/double char names.
+        Prohibits p\d+ and g\d+ patterns to avoid conflicts with pools/aliases.
         """
         # Special names that shouldn't be compressed
         if name in {'__init__', '__str__', '__repr__', '__eq__', '__hash__'}:
@@ -420,7 +490,7 @@ class CAI3WaterfallEnhancement:
                 '__hash__': 'h',
             }
             short = dunder_map.get(name, name[:2])
-            if short not in used_names:
+            if short not in used_names and not self._is_reserved_pattern(short):
                 used_names.add(short)
                 return short
         
@@ -436,20 +506,25 @@ class CAI3WaterfallEnhancement:
             # Simple name: take first 1-2 chars
             base = name[0] if len(name) > 5 else name[:2]
         
-        # Ensure uniqueness
-        if base not in used_names:
+        # Ensure uniqueness and avoid reserved patterns
+        if base not in used_names and not self._is_reserved_pattern(base):
             used_names.add(base)
             return base
         
-        # Try single char + number
+        # Try single char + number, avoiding reserved patterns
         for i in range(10):
             candidate = f"{base[0]}{i}"
-            if candidate not in used_names:
+            if candidate not in used_names and not self._is_reserved_pattern(candidate):
                 used_names.add(candidate)
                 return candidate
         
         # Fallback: use first 3 chars of hash
-        return hashlib.md5(name.encode()).hexdigest()[:3]
+        hash_candidate = hashlib.md5(name.encode()).hexdigest()[:3]
+        if not self._is_reserved_pattern(hash_candidate):
+            return hash_candidate
+        else:
+            # Final fallback with additional char
+            return hash_candidate + 'x'
     
     def _compress_method_locals(self, method_node: ast.FunctionDef, 
                                 used_names: Set[str]) -> Dict[str, str]:
@@ -477,6 +552,7 @@ class CAI3WaterfallEnhancement:
     def _compress_local_name(self, name: str, local_used: Set[str]) -> str:
         """
         Compress a local variable name to 1-2 chars.
+        Prohibits p\d+ and g\d+ patterns to avoid conflicts with pools/aliases.
         """
         # Common patterns
         common_map = {
@@ -507,31 +583,50 @@ class CAI3WaterfallEnhancement:
         # Check common patterns first
         for pattern, short in common_map.items():
             if pattern in name.lower():
-                if short not in local_used:
+                if short not in local_used and not self._is_reserved_pattern(short):
                     local_used.add(short)
                     return short
         
         # Use first char
         first = name[0].lower()
-        if first not in local_used:
+        if first not in local_used and not self._is_reserved_pattern(first):
             local_used.add(first)
             return first
         
-        # Try first char + number
+        # Try first char + number, but avoid reserved patterns
         for i in range(10):
             candidate = f"{first}{i}"
-            if candidate not in local_used:
+            if candidate not in local_used and not self._is_reserved_pattern(candidate):
                 local_used.add(candidate)
                 return candidate
         
-        # Use first 2 chars
+        # Use first 2 chars, avoiding reserved patterns
         two_char = name[:2].lower()
-        if two_char not in local_used:
+        if two_char not in local_used and not self._is_reserved_pattern(two_char):
             local_used.add(two_char)
             return two_char
         
-        # Fallback
+        # Fallback: try alternative single chars
+        for char in 'abcdefhjlmnqsuvwyz':  # Skip chars that might conflict
+            if char not in local_used and not self._is_reserved_pattern(char):
+                local_used.add(char)
+                return char
+        
+        # Final fallback
         return name[:3]
+    
+    def _is_reserved_pattern(self, name: str) -> bool:
+        """
+        Check if a name matches reserved patterns (p\d+, g\d+ for pools/aliases).
+        """
+        import re
+        # Prohibit p followed by digits (pool references)
+        if re.match(r'^p\d+$', name):
+            return True
+        # Prohibit g followed by digits (chain alias references)
+        if re.match(r'^g\d+$', name):
+            return True
+        return False
     
     def _create_cai3_map_enhanced(self, cai3_full: CAI3Full) -> CAI3Map:
         """Create enhanced mapping with local compressions"""
@@ -593,16 +688,17 @@ class CAI3WaterfallEnhancement:
         """
         Create ultra-dense CAI3-LITE achieving 70-90% compression.
         """
-        # Ultra-compact header
+        # Ultra-compact header with py= format
         source_file = Path(cai3_full.source_path).name if cai3_full.source_path else "?"
-        header = f"#C3L v2 p={cai3_full.python_version[:3]} f={source_file}"
+        header = f"#C3L v2 py={cai3_full.python_version[:4]} f={source_file}"
         
-        # Compress imports to single line
+        # Compress imports to single line - only include symbols used in bodies
+        used_in_bodies = self._find_symbols_used_in_bodies(cai3_full, edit_scope_cids, content)
         import_parts = []
         for imp in cai3_full.imports[:5]:  # Limit to 5 most important
             if imp.startswith('import '):
                 module = imp[7:].split(' as ')[0]
-                # Ultra-short common imports
+                # Ultra-short common imports - only if used
                 import_map = {
                     'json': 'j',
                     'datetime': 'dt',
@@ -615,7 +711,9 @@ class CAI3WaterfallEnhancement:
                     're': 'r',
                     'math': 'm',
                 }
-                import_parts.append(import_map.get(module, module[:2]))
+                short_name = import_map.get(module, module[:2])
+                if any(symbol in used_in_bodies for symbol in [module, short_name]):
+                    import_parts.append(short_name)
             elif imp.startswith('from '):
                 parts = imp[5:].split(' import ')
                 if len(parts) == 2:
@@ -623,9 +721,38 @@ class CAI3WaterfallEnhancement:
                     # Compress format
                     module_short = module.split('.')[-1][:2]
                     name_short = names.split(',')[0][:2]
-                    import_parts.append(f"{module_short}:{name_short}")
+                    if any(symbol in used_in_bodies for symbol in [module_short, name_short]):
+                        import_parts.append(f"{module_short}:{name_short}")
         
         imports = "I:" + '|'.join(import_parts) if import_parts else ""
+        
+        # Extract chain aliases from compression stats
+        chain_aliases_section = None
+        if 'chain_aliases' in cai3_full.compression_stats:
+            chain_aliases = cai3_full.compression_stats['chain_aliases']
+            if chain_aliases:
+                alias_parts = [f"{k}={v}" for k, v in chain_aliases.items()]
+                chain_aliases_section = f"D:{('|'.join(alias_parts))}"
+        
+        # Create CID aliasing map
+        cid_alias_map = {}
+        nodes_with_bodies = [node for node in cai3_full.nodes if node.cid in edit_scope_cids]
+        
+        # Build CID alias map for nodes that appear in bodies or table
+        alias_counter = 0
+        for node in cai3_full.nodes:
+            if node.type in (NodeType.METHOD, NodeType.FUNCTION) and (
+                node.cid in edit_scope_cids or 
+                node.type == NodeType.METHOD  # Include all methods for potential reference
+            ):
+                cid_alias_map[node.cid] = str(alias_counter)
+                alias_counter += 1
+        
+        # CID aliasing section
+        cid_aliases_section = None
+        if cid_alias_map:
+            alias_items = [f"{alias}={cid}" for cid, alias in cid_alias_map.items()]
+            cid_aliases_section = f"X:{('|'.join(alias_items))}"
         
         # Extract config keys (ultra-compact)
         config_keys = None
@@ -634,25 +761,11 @@ class CAI3WaterfallEnhancement:
             keys = ['rf', 'tv', 'fm', 'ts']  # Shortened versions
             config_keys = f"K:{','.join(keys)}"
         
-        # Pool section - reference strings from pools
-        pool_section = None
-        if cai3_full.pools:
-            # Create compact pool references
-            pool_items = []
-            for key, value in list(cai3_full.pools.items())[:10]:  # Limit pools
-                # Ultra-compress pool values
-                if len(value) > 20:
-                    compressed_val = value[:8] + "..." + value[-8:]
-                else:
-                    compressed_val = value
-                pool_items.append(f"{key}={compressed_val}")
-            if pool_items:
-                pool_section = f"P:{';'.join(pool_items)}"
-        
         # Build ultra-compact table
         table = []
         nodes_by_cid = {node.cid: node for node in cai3_full.nodes}
         
+        # Build table with CID aliases
         for node in cai3_full.nodes:
             if node.type == NodeType.CLASS:
                 # Ultra-compact class: C:dp
@@ -661,8 +774,11 @@ class CAI3WaterfallEnhancement:
                 # Determine fidelity
                 fidelity = "1" if node.cid in edit_scope_cids else "0"
                 
-                # Ultra-compact method: M:dp.vr(r)->b F1 cid
+                # Ultra-compact method: M:dp.vr(r)->b F1 #alias
                 prefix = "M:" if node.type == NodeType.METHOD else "F:"
+                
+                # Use CID alias if available
+                cid_ref = f"#{cid_alias_map[node.cid]}" if node.cid in cid_alias_map else f"#{node.cid}"
                 
                 if node.parent_cid:
                     parent = nodes_by_cid.get(node.parent_cid)
@@ -672,16 +788,20 @@ class CAI3WaterfallEnhancement:
                             entry = f"{prefix}{parent.short_name}.{node.short_name}"
                         else:
                             # Include signature only for B1
-                            entry = f"{prefix}{parent.short_name}.{node.short_name}{node.signature}#{node.cid}"
+                            entry = f"{prefix}{parent.short_name}.{node.short_name}{node.signature}{cid_ref}"
                     else:
                         entry = f"{prefix}{node.short_name}"
                 else:
                     if fidelity == "0":
                         entry = f"{prefix}{node.short_name}"
                     else:
-                        entry = f"{prefix}{node.short_name}{node.signature}#{node.cid}"
+                        entry = f"{prefix}{node.short_name}{node.signature}{cid_ref}"
                 
                 table.append(entry)
+        
+        # Flatten table to single line if enabled
+        if getattr(self, 'lite_flat_table', False):
+            table = [f"T:{' '.join(table)}"]
         
         # Build ultra-dense bodies for edit scope methods
         bodies = []
@@ -690,12 +810,27 @@ class CAI3WaterfallEnhancement:
             try:
                 tree = ast.parse(content)
                 
-                # Create dense FLOW compiler
+                # Create dense FLOW compiler with all flags
                 flow_compiler = FLOWCompiler(
                     name_map=cai3_map.name_map,
                     dense_mode=True,
-                    pool_constants=True
+                    pool_constants=True,
+                    # Pass all feature flags for maximum density
+                    ascii_ops=getattr(self, 'dense_flow_ascii_ops', True),
+                    no_spaces=getattr(self, 'dense_flow_no_spaces', True),
+                    inline_blocks=getattr(self, 'dense_flow_inline_blocks', True),
+                    alias_chains=getattr(self, 'dense_flow_alias_chains', True),
+                    pool_strings_min_len=getattr(self, 'dense_flow_pool_strings_min_len', 3)
                 )
+                
+                # Pass centralized pool map to FLOW compiler
+                if 'pool_map' in cai3_full.compression_stats:
+                    flow_compiler.set_pool_map(cai3_full.compression_stats['pool_map'])
+                elif cai3_full.pools:
+                    # Fallback to old method if pool_map not available
+                    flow_compiler.set_pools(cai3_full.pools)
+                if 'chain_aliases' in cai3_full.compression_stats:
+                    flow_compiler.set_chain_aliases(cai3_full.compression_stats['chain_aliases'])
                 
                 nodes_by_cid = {node.cid: node for node in cai3_full.nodes}
                 
@@ -726,33 +861,187 @@ class CAI3WaterfallEnhancement:
                         try:
                             flow_body = flow_compiler.ast_to_flow(target_ast_node)
                             
-                            # Ultra-compact body format
-                            bodies.append(f"B{cid}:")  # No space after B
+                            # Ultra-compact body format with CID alias
+                            cid_ref = f"#{cid_alias_map[cid]}" if cid in cid_alias_map else f"#{cid}"
+                            bodies.append(f"B{cid_ref}:")  # No space after B
                             
-                            # Compress body lines further
+                            # Compress body lines further (remove unnecessary spaces)
                             for line in flow_body.split('\n'):
                                 if line.strip():
                                     # Remove unnecessary spaces
                                     compressed_line = line.replace(' = ', '=').replace(', ', ',')
                                     bodies.append(compressed_line)
-                            bodies.append("E")  # Single char END
+                            
+                            # Keep E terminator for safety as requested
+                            if getattr(self, 'lite_keep_e_terminator', True):
+                                bodies.append("E")  # Single char END
                             
                         except Exception as e:
-                            self.logger.warning(f"Failed to create dense FLOW bodies: {e}")
+                            self.logger.warning(f"Failed to create dense FLOW for {cid}: {e}")
                             
             except Exception as e:
-                self.logger.warning(f"Failed to generate dense FLOW for {cid}: {e}")
-
-            
+                self.logger.warning(f"Failed to generate dense FLOW bodies: {e}")
         
-        # Create ultra-compact LITE
+        # Scan bodies for referenced pool IDs and filter pool section
+        referenced_pool_ids = set()
+        if bodies:
+            import re
+            # Scan all body text for pool references (p\d+)
+            body_text = '\n'.join(bodies)
+            pool_pattern = r'\bp(\d+)\b'
+            matches = re.findall(pool_pattern, body_text)
+            referenced_pool_ids = {f"p{match}" for match in matches}
+        
+        # Filter pool section to only include referenced pools
+        pool_section = None
+        if cai3_full.pools and referenced_pool_ids:
+            pool_items = []
+            for pool_id, value in cai3_full.pools.items():
+                if pool_id in referenced_pool_ids:
+                    # Ultra-compress pool values for preview
+                    if len(value) > 20:
+                        compressed_val = value[:8] + "..." + value[-8:]
+                    else:
+                        compressed_val = value
+                    pool_items.append(f"{pool_id}={compressed_val}")
+            if pool_items:
+                pool_section = f"P:{';'.join(pool_items)}"
+        
+        # Create ultra-compact LITE with proper section ordering
         return CAI3Lite(
             header=header,
             imports=imports,
+            chain_aliases=chain_aliases_section,
+            cid_aliases=cid_aliases_section,
             config_keys=config_keys,
+            pools=pool_section,
             table=table,
             bodies=bodies
         )
+    
+    def _find_symbols_used_in_bodies(self, cai3_full: CAI3Full, edit_scope_cids: List[str], content: str) -> Set[str]:
+        """
+        Find symbols actually used in method bodies to optimize import inclusion.
+        """
+        used_symbols = set()
+        
+        try:
+            tree = ast.parse(content)
+            nodes_by_cid = {node.cid: node for node in cai3_full.nodes}
+            
+            for cid in edit_scope_cids:
+                node_info = nodes_by_cid.get(cid)
+                if not node_info or not node_info.span:
+                    continue
+                
+                # Find AST node for this method
+                start_line, end_line = node_info.span
+                for ast_node in ast.walk(tree):
+                    if isinstance(ast_node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                        if (hasattr(ast_node, 'lineno') and 
+                            hasattr(ast_node, 'end_lineno') and
+                            ast_node.lineno == start_line and
+                            getattr(ast_node, 'end_lineno', ast_node.lineno) == end_line):
+                            
+                            # Extract symbols used in this method
+                            for subnode in ast.walk(ast_node):
+                                if isinstance(subnode, ast.Name):
+                                    used_symbols.add(subnode.id)
+                                elif isinstance(subnode, ast.Attribute):
+                                    # Extract base name from attribute access
+                                    base = subnode.value
+                                    while isinstance(base, ast.Attribute):
+                                        base = base.value
+                                    if isinstance(base, ast.Name):
+                                        used_symbols.add(base.id)
+                            break
+        except Exception as e:
+            self.logger.warning(f"Failed to extract used symbols: {e}")
+        
+        return used_symbols
+    
+    def _extract_chain_pattern(self, node: ast.AST) -> Optional[str]:
+        """
+        Extract dotted chains and common call patterns from AST nodes.
+        Examples: s.config.get, .items, datetime.now, datetime.now().isoformat
+        """
+        try:
+            # Call chains (obj.method().method()) - handle first for better detection
+            if isinstance(node, ast.Call):
+                if isinstance(node.func, ast.Attribute):
+                    # Extract the function being called
+                    func_chain = self._extract_attribute_chain(node.func)
+                    if func_chain:
+                        # Check for specific patterns that should be shortened
+                        if func_chain == 'datetime.now':
+                            return 'dt.now()'
+                        elif func_chain.endswith('.now'):
+                            return 'dt.now()'
+                        elif func_chain.endswith('.get'):
+                            # Common pattern: config.get() -> c.g()
+                            if 'config' in func_chain:
+                                return 's.c.g()'
+                            else:
+                                return func_chain + '()'
+                        else:
+                            return func_chain + '()'
+            
+            # Attribute chains (obj.attr.attr...)
+            elif isinstance(node, ast.Attribute):
+                return self._extract_attribute_chain(node)
+                        
+        except Exception:
+            pass
+        
+        return None
+    
+    def _extract_attribute_chain(self, node: ast.Attribute) -> Optional[str]:
+        """
+        Extract attribute chain from an AST Attribute node.
+        """
+        try:
+            chain_parts = []
+            current = node
+            while isinstance(current, ast.Attribute):
+                chain_parts.append(current.attr)
+                current = current.value
+            
+            if isinstance(current, ast.Name):
+                chain_parts.append(current.id)
+                chain_parts.reverse()
+                full_chain = '.'.join(chain_parts)
+                
+                # Common patterns we want to capture with improved compression
+                if len(chain_parts) >= 2:
+                    # Specific high-value patterns
+                    if 'config' in full_chain and 'get' in full_chain:
+                        return 's.c.g'  # s.config.get -> saves significant chars
+                    elif full_chain.endswith('.items'):
+                        return 'tv.items'  # typically for dict.items()
+                    elif 'datetime.now' in full_chain:
+                        if full_chain.endswith('.isoformat'):
+                            return 'dt.now().isoformat'  # Let this be a candidate
+                        else:
+                            return 'dt.now'
+                    elif full_chain.endswith('.tr'):
+                        return 's.tr'
+                    elif full_chain.endswith('.vr'):
+                        return 's.vr'
+                    else:
+                        # Only return generic compression if it's worth it (>5 chars savings)
+                        compressed = '.'.join(part[0] for part in chain_parts if part)
+                        if len(compressed) < len(full_chain) and len(full_chain) - len(compressed) >= 5:
+                            return compressed
+                        else:
+                            # Return the full chain as a candidate - let net savings decide
+                            return full_chain
+                            
+                return full_chain if len(full_chain) > 5 else None
+                
+        except Exception:
+            pass
+        
+        return None
     
     def _calculate_complexity(self, node: ast.FunctionDef) -> int:
         """Calculate cyclomatic complexity of a function"""

@@ -52,8 +52,9 @@ class CAI3Translator:
         if not cai3_full or not cai3_map:
             raise ValueError(f"No CAI3 cache found for {source_path}. Ensure compression was run first.")
         
-        # Parse patches from LLM response
+        # Parse patches from LLM response and resolve CID aliases
         patches = CAI3Patch.parse(patch_content)
+        self._resolve_cid_aliases(patches, patch_content, cai3_full)
         
         if not patches:
             self.logger.warning("No valid patches found in response")
@@ -85,7 +86,7 @@ class CAI3Translator:
                 # Apply the patch
                 if patch.operation == "RB":  # Replace Body
                     modified_source = self._replace_body(
-                        patch, modified_source, cai3_map
+                        patch, modified_source, cai3_map, cai3_full
                     )
                     applied_count += 1
                 elif patch.operation == "AM":  # Add Method
@@ -119,6 +120,96 @@ class CAI3Translator:
         
         return modified_source
     
+    def _resolve_cid_aliases(self, patches: List[CAI3Patch], patch_content: str, cai3_full: CAI3Full):
+        """
+        Resolve CID aliases (#k format) to actual CIDs using X: mapping from LITE content.
+        
+        Args:
+            patches: List of patches to resolve aliases for
+            patch_content: Original patch content containing potential X: mapping
+            cai3_full: CAI3Full structure with cached CID information
+        """
+        # Extract X: mapping from patch content if present
+        cid_alias_map = self._extract_cid_aliases(patch_content)
+        
+        # Also check CAI3Full compression_stats for stored aliases
+        if 'cid_aliases' in cai3_full.compression_stats:
+            stored_aliases = cai3_full.compression_stats['cid_aliases']
+            if isinstance(stored_aliases, dict):
+                cid_alias_map.update(stored_aliases)
+        
+        # Resolve aliases in each patch
+        for patch in patches:
+            if patch.target_cid.startswith('#'):
+                # This is an alias reference
+                alias_key = patch.target_cid[1:]  # Remove # prefix
+                
+                if alias_key in cid_alias_map:
+                    # Found alias mapping, replace with actual CID
+                    actual_cid = cid_alias_map[alias_key]
+                    self.logger.debug(f"Resolved CID alias #{alias_key} -> {actual_cid}")
+                    patch.target_cid = actual_cid
+                else:
+                    self.logger.warning(f"CID alias #{alias_key} not found in mapping, trying fallback")
+                    # Fall back to raw mt_... CID for backward compatibility
+                    # Try to find a CID that might match the alias pattern
+                    fallback_cid = self._find_fallback_cid(alias_key, cai3_full)
+                    if fallback_cid:
+                        patch.target_cid = fallback_cid
+                        self.logger.debug(f"Used fallback CID for #{alias_key} -> {fallback_cid}")
+    
+    def _extract_cid_aliases(self, patch_content: str) -> Dict[str, str]:
+        """
+        Extract CID aliases from X: mapping in patch content.
+        
+        Format: X:0=mt_5605|1=mt_961c|...
+        
+        Returns:
+            Dictionary mapping alias keys to actual CIDs
+        """
+        cid_aliases = {}
+        
+        lines = patch_content.split('\n')
+        for line in lines:
+            line = line.strip()
+            if line.startswith('X:'):
+                # Parse X: line
+                alias_content = line[2:]  # Remove 'X:' prefix
+                
+                # Split by | for multiple aliases
+                alias_parts = alias_content.split('|')
+                for part in alias_parts:
+                    if '=' in part:
+                        alias_key, actual_cid = part.split('=', 1)
+                        cid_aliases[alias_key.strip()] = actual_cid.strip()
+                
+                break  # Only process the first X: line found
+        
+        return cid_aliases
+    
+    def _find_fallback_cid(self, alias_key: str, cai3_full: CAI3Full) -> Optional[str]:
+        """
+        Find a fallback CID for an unresolved alias.
+        
+        This is for backward compatibility with raw mt_... CIDs.
+        """
+        # If alias_key looks like a raw CID (mt_xxxx), use it directly
+        if alias_key.startswith(('mt_', 'fn_', 'cl_')):
+            return alias_key
+        
+        # Try to match by position or other heuristics
+        try:
+            # If alias_key is numeric, try to find the nth method
+            if alias_key.isdigit():
+                index = int(alias_key)
+                method_nodes = [node for node in cai3_full.nodes if node.type.value == 'M']
+                if 0 <= index < len(method_nodes):
+                    return method_nodes[index].cid
+        except (ValueError, IndexError):
+            pass
+        
+        return None
+    
     def _validate_context(self, cid: str, cai3_map: CAI3Map, source: str) -> bool:
         """Validate that the context around a cid hasn't changed"""
         if cid not in cai3_map.context_hashes:
@@ -144,12 +235,12 @@ class CAI3Translator:
         
         return actual_hash == expected_hash
     
-    def _replace_body(self, patch: CAI3Patch, source: str, cai3_map: CAI3Map) -> str:
+    def _replace_body(self, patch: CAI3Patch, source: str, cai3_map: CAI3Map, cai3_full: CAI3Full = None) -> str:
         """Replace the body of a function/method"""
         
         if patch.body_fidelity == BodyFidelity.B1:
-            # Convert FLOW to Python AST
-            flow_compiler = FLOWCompiler(cai3_map.name_map)
+            # Convert FLOW to Python AST with enhanced flags
+            flow_compiler = self._create_flow_compiler(cai3_map, cai3_full)
             new_body_stmts = flow_compiler._parse_flow_lines(
                 patch.body_content.split('\n'), 0
             )[0]
@@ -169,6 +260,114 @@ class CAI3Translator:
             return self._replace_body_with_ast(
                 source, start_line, end_line, new_body_stmts
             )
+    
+    def _create_flow_compiler(self, cai3_map: CAI3Map, cai3_full: CAI3Full = None) -> FLOWCompiler:
+        """
+        Create a FLOWCompiler with the same flags used for dense FLOW writing.
+        Ensures consistent parsing back to Python AST.
+        """
+        # Use the same dense flags that were used during compression
+        flow_compiler = FLOWCompiler(
+            name_map=cai3_map.name_map,
+            dense_mode=True,
+            pool_constants=True,
+            ascii_ops=True,
+            no_spaces=True,
+            inline_blocks=True,
+            alias_chains=True,
+            pool_strings_min_len=3
+        )
+        
+        # Set up pools and aliases from CAI3Full if available
+        if cai3_full:
+            # Set pools for p\d+ resolution
+            if cai3_full.pools:
+                flow_compiler.set_pools(cai3_full.pools)
+                # Add hard check validation
+                self._validate_pool_references(cai3_full.pools)
+            
+            # Set chain aliases for g\d+ resolution
+            if 'chain_aliases' in cai3_full.compression_stats:
+                chain_aliases = cai3_full.compression_stats['chain_aliases']
+                if isinstance(chain_aliases, dict):
+                    flow_compiler.set_chain_aliases(chain_aliases)
+                    # Add hard check validation
+                    self._validate_chain_aliases(chain_aliases, cai3_map, cai3_full)
+        
+        return flow_compiler
+    
+    def _validate_pool_references(self, pools: Dict[str, str]):
+        """
+        Hard check that pool references (p\d+) can be resolved.
+        
+        Args:
+            pools: Dictionary of pool_id -> value mappings
+        """
+        for pool_id, value in pools.items():
+            if not pool_id.startswith('p') or not pool_id[1:].isdigit():
+                self.logger.warning(f"Invalid pool ID format: {pool_id}")
+            
+            if not isinstance(value, str):
+                self.logger.warning(f"Pool {pool_id} contains non-string value: {type(value)}")
+        
+        self.logger.debug(f"Validated {len(pools)} pool references")
+    
+    def _validate_chain_aliases(self, chain_aliases: Dict[str, str], cai3_map: CAI3Map, cai3_full: CAI3Full):
+        """
+        Hard check that chain aliases (g\d+) can be resolved via CAI3Map/CAI3Full.
+        
+        Args:
+            chain_aliases: Dictionary of alias -> full_chain mappings
+            cai3_map: CAI3Map for name resolution
+            cai3_full: CAI3Full for additional context
+        """
+        for alias, full_chain in chain_aliases.items():
+            if not alias.startswith('g') or not alias[1:].isdigit():
+                self.logger.warning(f"Invalid chain alias format: {alias}")
+                continue
+            
+            # Validate that the chain can be resolved
+            chain_parts = full_chain.split('.')
+            if not chain_parts:
+                self.logger.warning(f"Empty chain for alias {alias}")
+                continue
+            
+            # Check if the root name exists in the name mapping
+            root_name = chain_parts[0]
+            if root_name not in cai3_map.name_map and root_name not in cai3_map.reverse_name_map:
+                # Check if it's a known builtin or can be resolved
+                if root_name not in ['self', 's', 'cls', 'c'] and not self._is_resolvable_name(root_name, cai3_full):
+                    self.logger.warning(f"Chain alias {alias} -> {full_chain} has unresolvable root: {root_name}")
+        
+        self.logger.debug(f"Validated {len(chain_aliases)} chain aliases")
+    
+    def _is_resolvable_name(self, name: str, cai3_full: CAI3Full) -> bool:
+        """
+        Check if a name can be resolved in the current context.
+        
+        Args:
+            name: Name to check
+            cai3_full: CAI3Full structure for context
+            
+        Returns:
+            True if the name is resolvable
+        """
+        # Check imports
+        for import_stmt in cai3_full.imports:
+            if name in import_stmt:
+                return True
+        
+        # Check if it's a node name
+        for node in cai3_full.nodes:
+            if node.name == name or node.short_name == name:
+                return True
+        
+        # Check common builtins
+        builtins = {'str', 'int', 'float', 'list', 'dict', 'set', 'tuple', 'bool', 'len', 'range', 'enumerate', 'self', 'cls'}
+        if name in builtins:
+            return True
+        
+        return False
     
     def _replace_body_with_libcst(self, source: str, start_line: int, end_line: int,
                                   new_body: List[ast.AST], cid: str) -> str:
@@ -328,7 +527,7 @@ class CAI3Translator:
                 # Update patch with new cid
                 patch.target_cid = new_cid
                 # Retry with new mapping
-                return self._replace_body(patch, source, new_map)
+                return self._replace_body(patch, source, new_map, new_full)
         
         self.logger.error(f"Failed to rebase patch for {patch.target_cid}")
         return source

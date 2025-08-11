@@ -162,11 +162,14 @@ class CAI3Map:
 @dataclass
 class CAI3Lite:
     """Ultra-dense representation for LLM - 70-90% smaller"""
-    header: str  # Ultra-compact: "#C3L v2 p=3.11 f=file.py"
+    header: str  # Ultra-compact: "#C3L v2 py=3.11 f=file.py"
     imports: str  # Ultra-compact: "I:j|dt:dt|t:L"
-    table: List[str]  # Ultra-compact entries: "M:dp.vr" or "M:dp.vr(r)->b#mt_961c"
+    table: List[str]  # Ultra-compact entries: "M:dp.vr" or "M:dp.vr(r)->b#0"
     bodies: List[str]  # Dense FLOW bodies for edited methods only
     config_keys: Optional[str] = None  # "K:rf,tv,fm,ts"
+    chain_aliases: Optional[str] = None  # "D:g0=s.c.g|g1=tv.items|g2=dt.now"
+    cid_aliases: Optional[str] = None  # "X:0=mt_5605|1=mt_961c|..."
+    pools: Optional[str] = None  # "P:p0=value1;p1=value2"
     
     def serialize(self) -> str:
         """Convert to ultra-dense string format for LLM"""
@@ -175,11 +178,17 @@ class CAI3Lite:
         # Ultra-compact header
         lines.append(self.header)
         
-        # Single line imports and config
+        # Imports, aliases, and other metadata in logical order
         if self.imports:
             lines.append(self.imports)
+        if self.chain_aliases:
+            lines.append(self.chain_aliases)
+        if self.cid_aliases:
+            lines.append(self.cid_aliases)
         if self.config_keys:
             lines.append(self.config_keys)
+        if self.pools:
+            lines.append(self.pools)
         
         # No blank lines in dense mode
         
@@ -203,8 +212,14 @@ class CAI3Lite:
         
         if self.imports:
             lines.append(self.imports)
+        if self.chain_aliases:
+            lines.append(self.chain_aliases)
+        if self.cid_aliases:
+            lines.append(self.cid_aliases)
         if self.config_keys:
             lines.append(self.config_keys)
+        if self.pools:
+            lines.append(self.pools)
         
         lines.append("")  # Blank line
         

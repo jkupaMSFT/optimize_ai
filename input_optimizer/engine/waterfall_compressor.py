@@ -70,8 +70,8 @@ class WaterfallCompressor:
         
         # Tier thresholds (updated to match test expectations)
         self.thresholds = {
-            CompressionTier.TINY: (0, 10),            # 0-9 tokens
-            CompressionTier.SMALL: (10, 250),         # 10-249 tokens
+            CompressionTier.TINY: (0, 100),            # 0-99 tokens
+            CompressionTier.SMALL: (100, 250),         # 100-249 tokens
             CompressionTier.MEDIUM: (250, 1000),      # 250-999 tokens
             CompressionTier.LARGE: (1000, 10000),     # 1000-9999 tokens
             CompressionTier.HUGE: (10000, float('inf'))  # 10000+ tokens
@@ -157,25 +157,19 @@ class WaterfallCompressor:
         
         # Apply appropriate compression
         if tier == CompressionTier.TINY:
-            result = self._no_compression(content, original_tokens)
-        elif tier == CompressionTier.SMALL:
-            # For SMALL tier, check if aggressive override is used
-            if override_mode == "aggressive":
-                # Force CAI compression for aggressive override
-                result = self._standard_compression(content, original_tokens, source_path)
-            else:
-                # Use smart compression that chooses between conservative minification and CAI
-                result = self._smart_small_compression(
+            result = self._smart_small_compression(
                     content, 
                     original_tokens, 
                     source_path
                 )
+        elif tier == CompressionTier.SMALL:
+            result = self._standard_compression(content, original_tokens, source_path)
         elif tier == CompressionTier.MEDIUM:
             result = self._standard_compression(content, original_tokens, source_path)
         elif tier == CompressionTier.LARGE:
-            result = self._chunked_compression(content, original_tokens)
+            result = self._standard_compression(content, original_tokens, source_path)
         else:  # HUGE
-            result = self._summarization_compression(content, original_tokens)
+            result = self._standard_compression(content, original_tokens, source_path)
         
         # Calculate compression confidence and apply fallback if needed
         confidence_score = self._calculate_compression_confidence(content, result)

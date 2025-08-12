@@ -457,8 +457,8 @@ def run_comprehensive_samples_demo():
                 print_token_comparison(f"Original {sample_name}", sample_code)
             
             # Compress using waterfall method
-            result = compressor._standard_compression_cai3(sample_code, original_tokens, None)
-            
+            result = compressor.compress(sample_code, original_tokens)
+
             # For the first sample, show the compressed result
             if i == 1:
                 print("COMPRESSED OUTPUT:")

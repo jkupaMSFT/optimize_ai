@@ -1,5 +1,6 @@
 # ===== utils/metrics.py =====
 import logging
+import os
 from typing import Optional
 import tiktoken
 from sentence_transformers import SentenceTransformer, util
@@ -7,6 +8,14 @@ from sentence_transformers import SentenceTransformer, util
 # Set up logging
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
+
+# Optional Claude support
+try:
+    import anthropic
+    ANTHROPIC_AVAILABLE = True
+except ImportError:
+    ANTHROPIC_AVAILABLE = False
+    logger.warning("Anthropic library not available. Claude token counting will be disabled.")
 
 # Cache encoding and model for efficiency
 _encoding: Optional[tiktoken.Encoding] = None
@@ -34,9 +43,9 @@ def get_similarity_model() -> SentenceTransformer:
             raise RuntimeError("Sentence transformer model initialization failed")
     return _model
 
-def count_tokens(text: str, model: str = "gpt-4") -> int:
+def count_tokens_gpt(text: str, model: str = "gpt-4") -> int:
     """
-    Count tokens using tiktoken.
+    Count tokens using tiktoken for GPT models.
     
     Args:
         text: The text to tokenize.
@@ -64,6 +73,66 @@ def count_tokens(text: str, model: str = "gpt-4") -> int:
     except Exception as e:
         logger.error(f"Unexpected error in token counting: {str(e)}")
         raise RuntimeError(f"Token counting failed: {str(e)}")
+
+def count_tokens_claude(text: str, model: str = "claude-sonnet-4-20250514") -> int:
+    """
+    Count tokens using Anthropic API for Claude models.
+    
+    Args:
+        text: The text to tokenize.
+        model: The Claude model to use for tokenization.
+    
+    Returns:
+        Number of tokens.
+    
+    Raises:
+        ValueError: If text is invalid or Anthropic library not available.
+        RuntimeError: If API call fails.
+    """
+    if not isinstance(text, str):
+        raise ValueError("Input must be a string")
+    
+    if not ANTHROPIC_AVAILABLE:
+        raise ValueError("Anthropic library not available. Install with: pip install anthropic")
+    
+    # Get API key from environment variable
+    api_key = os.getenv('ANTHROPIC_API_KEY')
+    if not api_key:
+        # Fallback to hardcoded key for testing (not recommended for production)
+        api_key = "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"
+        logger.warning("Using hardcoded API key. Set ANTHROPIC_API_KEY environment variable for production.")
+    
+    try:
+        client = anthropic.Anthropic(api_key=api_key)
+        response = client.messages.count_tokens(
+            model=model,
+            messages=[{
+                "role": "user",
+                "content": text
+            }],
+        )
+        return response.input_tokens
+    except Exception as e:
+        logger.error(f"Claude token counting failed: {str(e)}")
+        raise RuntimeError(f"Claude token counting failed: {str(e)}")
+
+def count_tokens(text: str, model: str = "gpt-4") -> int:
+    """
+    Count tokens using tiktoken (for backward compatibility).
+    DEPRECATED: Use count_tokens_gpt() or count_tokens_claude() for explicit model support.
+    
+    Args:
+        text: The text to tokenize.
+        model: The model to use for tokenization (for compatibility, ignored in favor of cl100k_base).
+    
+    Returns:
+        Number of tokens.
+    
+    Raises:
+        ValueError: If text is invalid.
+    """
+    logger.warning("count_tokens() is deprecated. Use count_tokens_gpt() or count_tokens_claude() for explicit model support.")
+    return count_tokens_gpt(text, model)
 
 def calculate_similarity(original: str, translated: str) -> float:
     """

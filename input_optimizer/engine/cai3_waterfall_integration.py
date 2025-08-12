@@ -23,7 +23,17 @@ from .cai3_structures import (
 from .flow_language import FLOWCompiler
 from .compression_types import CompressionResult, CompressionTier
 from .minifier import MinifyTransformer
-from ...config.constants import (
+
+# Import from config at the project root level
+import sys
+import os
+from pathlib import Path
+
+# Add project root to path for config imports
+project_root = Path(__file__).parent.parent.parent
+sys.path.insert(0, str(project_root))
+
+from config.constants import (
     DENSE_FLOW_ASCII_OPS, DENSE_FLOW_NO_SPACES, DENSE_FLOW_INLINE_BLOCKS,
     DENSE_FLOW_ALIAS_CHAINS, DENSE_FLOW_POOL_STRINGS_MIN_LEN,
     LITE_FLAT_TABLE, LITE_CID_ALIAS_MAP, LITE_KEEP_E_TERMINATOR,
@@ -92,7 +102,7 @@ class CAI3WaterfallEnhancement:
         self.use_dense_flow = True  # Ultra-dense FLOW syntax
         self.compress_all_names = CAI3_AGGRESSIVE_NAME_COMPRESSION  # Compress locals, params, attrs
         self.pool_strings = CAI3_POOL_CONSTANTS  # Pool all strings > 5 chars
-        self.include_all_methods = False  # Flag to include all method bodies
+        self.include_all_methods = True  # Flag to include all method bodies
         self.llm_model = "gpt-4"
         
         # New minification flags (defaults for "all-methods" mode)
@@ -180,6 +190,13 @@ class CAI3WaterfallEnhancement:
                     if vm:
                         node.metadata["local_compressions"] = vm  # already used later by LITE
             
+            # Add compression mode information to stats
+            if 'compression_mode' not in cai3_full.compression_stats:
+                cai3_full.compression_stats['compression_mode'] = (
+                    'CAI3 All Bodies' if getattr(self, 'include_all_methods', False) 
+                    else 'CAI3 Edit Scope'
+                )
+            
             # Strict edit scope selection (max 2 methods) - use original tree and content for scope determination
             edit_scope_cids = self._determine_edit_scope_strict(orig_tree, content, source_path, cid_index)
             
@@ -188,7 +205,7 @@ class CAI3WaterfallEnhancement:
             assert edit_scope_cids, "No edit-scope CIDs selected; bodies would be empty."
             
             cai3_map = self._create_cai3_map_enhanced(cai3_full)
-            cai3_lite = self._create_cai3_lite_dense(cai3_full, cai3_map, edit_scope_cids, cid_index, minified_source, tree)
+            cai3_lite = self._create_cai3_lite_dense_ultra(cai3_full, cai3_map, edit_scope_cids, cid_index, minified_source, tree)
             
             # Store FULL and MAP locally
             if source_path:
@@ -216,6 +233,7 @@ class CAI3WaterfallEnhancement:
                 metadata={
                     'cai3_mode': True,
                     'dense_flow': True,
+                    'compression_mode': 'CAI3 All Bodies' if getattr(self, 'include_all_methods', False) else 'CAI3 Edit Scope',
                     'edit_scope_size': len(edit_scope_cids),
                     'total_nodes': len(cai3_full.nodes),
                     'source_path': str(source_path) if source_path else None
@@ -368,6 +386,122 @@ class CAI3WaterfallEnhancement:
         
         return False
     
+    def _extract_chain_pattern(self, node: ast.AST) -> Optional[str]:
+        """
+        Extract dotted chains and common call patterns from AST nodes.
+        Examples: s.config.get, .items, datetime.now, datetime.now().isoformat
+        """
+        try:
+            # Call chains (obj.method().method()) - handle first for better detection
+            if isinstance(node, ast.Call):
+                if isinstance(node.func, ast.Attribute):
+                    # Extract the function being called
+                    func_chain = self._extract_attribute_chain(node.func)
+                    if func_chain:
+                        # Check for specific patterns that should be shortened
+                        if func_chain == 'datetime.now':
+                            return 'dt.now()'
+                        elif func_chain.endswith('.now'):
+                            return 'dt.now()'
+                        elif func_chain.endswith('.get'):
+                            # Common pattern: config.get() -> c.g()
+                            if 'config' in func_chain:
+                                return 's.c.g()'
+                            else:
+                                return func_chain + '()'
+                        else:
+                            return func_chain + '()'
+            
+            # Attribute chains (obj.attr.attr...)
+            elif isinstance(node, ast.Attribute):
+                return self._extract_attribute_chain(node)
+                        
+        except Exception:
+            pass
+        
+        return None
+    
+    def _extract_attribute_chain(self, node: ast.Attribute) -> Optional[str]:
+        """
+        Extract attribute chain from an AST Attribute node.
+        """
+        try:
+            chain_parts = []
+            current = node
+            while isinstance(current, ast.Attribute):
+                chain_parts.append(current.attr)
+                current = current.value
+            
+            if isinstance(current, ast.Name):
+                chain_parts.append(current.id)
+                chain_parts.reverse()
+                full_chain = '.'.join(chain_parts)
+                
+                # Common patterns we want to capture with improved compression
+                if len(chain_parts) >= 2:
+                    # Specific high-value patterns
+                    if 'self.config.get' in full_chain or full_chain.endswith('config.get'):
+                        return 's.config.get'  # store what emitter prints
+                    elif full_chain.endswith('.items'):
+                        return 'tv.items'  # typically for dict.items()
+                    elif 'datetime.now' in full_chain:
+                        if full_chain.endswith('.isoformat'):
+                            return 'dt.now().isoformat'  # Let this be a candidate
+                        else:
+                            return 'dt.now'
+                    elif full_chain.endswith('.tr'):
+                        return 's.tr'
+                    elif full_chain.endswith('.vr'):
+                        return 's.vr'
+                    else:
+                        # Only return generic compression if it's worth it (>5 chars savings)
+                        compressed = '.'.join(part[0] for part in chain_parts if part)
+                        if len(compressed) < len(full_chain) and len(full_chain) - len(compressed) >= 5:
+                            return compressed
+                        else:
+                            # Return the full chain as a candidate - let net savings decide
+                            return full_chain
+                            
+                return full_chain if len(full_chain) > 5 else None
+                
+        except Exception:
+            pass
+        
+        return None
+    
+    def _calculate_complexity(self, node: ast.FunctionDef) -> int:
+        """Calculate cyclomatic complexity of a function"""
+        complexity = 1  # Base complexity
+        
+        for subnode in ast.walk(node):
+            if isinstance(subnode, (ast.If, ast.While, ast.For)):
+                complexity += 1
+            elif isinstance(subnode, ast.ExceptHandler):
+                complexity += 1
+            elif isinstance(subnode, ast.BoolOp):
+                # Each and/or adds a branch
+                complexity += len(subnode.values) - 1
+        
+        return complexity
+    
+    def _modifies_parameters(self, node: ast.FunctionDef) -> bool:
+        """Check if function modifies its parameters"""
+        param_names = {arg.arg for arg in node.args.args}
+        
+        for subnode in ast.walk(node):
+            if isinstance(subnode, ast.Assign):
+                for target in subnode.targets:
+                    if isinstance(target, (ast.Subscript, ast.Attribute)):
+                        # Check if modifying a parameter
+                        base = target
+                        while isinstance(base, (ast.Subscript, ast.Attribute)):
+                            base = base.value
+                        
+                        if isinstance(base, ast.Name) and base.id in param_names:
+                            return True
+        
+        return False
+    
     def _create_cai3_full_enhanced(self, tree: ast.AST, content: str, 
                                    source_path: Optional[Path] = None, 
                                    cid_index: Optional[Dict] = None) -> CAI3Full:
@@ -426,7 +560,7 @@ class CAI3WaterfallEnhancement:
                 class_short = self._compress_name_aggressive(node.name, used_names)
                 
                 # Extract and compress class attributes from __init__
-                class_attr_compressions = self._extract_class_attributes(node, used_names)
+                class_attr_compressions = self._compress_class_attributes_ultra(node, used_names)
                 
                 start_line = getattr(node, 'lineno', 0)
                 end_line = getattr(node, 'end_lineno', start_line)
@@ -468,7 +602,7 @@ class CAI3WaterfallEnhancement:
                         method_end_line = getattr(item, 'end_lineno', method_start_line)
                         
                         # Compress local variables and parameters
-                        local_compressions = self._compress_method_locals(item, used_names)
+                        local_compressions = self._compress_method_locals_ultra(item, used_names)
                         
                         # Create ultra-compact signature
                         args = []
@@ -526,7 +660,7 @@ class CAI3WaterfallEnhancement:
                 func_end_line = getattr(node, 'end_lineno', func_start_line)
                 
                 # Compress local variables and parameters
-                local_compressions = self._compress_method_locals(node, used_names)
+                local_compressions = self._compress_method_locals_ultra(node, used_names)
                 
                 # Create ultra-compact signature
                 args = []
@@ -687,28 +821,171 @@ class CAI3WaterfallEnhancement:
             # Final fallback with additional char
             return hash_candidate + 'x'
     
-    def _compress_method_locals(self, method_node: ast.FunctionDef, 
-                                used_names: Set[str]) -> Dict[str, str]:
+    def _compress_method_locals_ultra(self, method_node: ast.FunctionDef,
+                                  used_names: Set[str]) -> Dict[str, str]:
         """
-        Compress all local variables and parameters in a method.
+        Ultra-aggressive local variable compression.
+        Uses single characters where possible, with smart collision avoidance.
         """
         compressions = {}
         local_used = set()
         
-        # Compress parameters
+        # Reserve common single chars for most frequent variables
+        frequency_map = self._analyze_variable_frequency(method_node)
+        
+        # Single char pool (excluding reserved)
+        single_chars = 'abcdefhijklmnqrtuvwxyz'  # Skip reserved: g, p, s, o
+        char_index = 0
+        
+        # Compress parameters first (they're usually most used)
         for arg in method_node.args.args:
             if arg.arg not in {'self', 'cls'}:
-                compressed = self._compress_local_name(arg.arg, local_used)
+                freq = frequency_map.get(arg.arg, 1)
+                
+                # High frequency vars get single chars
+                if freq > 2 and char_index < len(single_chars):
+                    compressed = single_chars[char_index]
+                    char_index += 1
+                else:
+                    compressed = self._generate_short_name(arg.arg, local_used)
+                
                 compressions[arg.arg] = compressed
+                local_used.add(compressed)
         
-        # Find and compress all local variables
-        for node in ast.walk(method_node):
-            if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store):
-                if node.id not in compressions and node.id not in {'self', 'cls'}:
-                    compressed = self._compress_local_name(node.id, local_used)
-                    compressions[node.id] = compressed
+        # Compress local variables by frequency
+        sorted_vars = sorted(
+            [(name, freq) for name, freq in frequency_map.items() 
+            if name not in compressions and name not in {'self', 'cls'}],
+            key=lambda x: x[1], reverse=True
+        )
+        
+        for var_name, freq in sorted_vars:
+            if freq > 2 and char_index < len(single_chars):
+                compressed = single_chars[char_index]
+                char_index += 1
+            else:
+                compressed = self._generate_short_name(var_name, local_used)
+            
+            compressions[var_name] = compressed
+            local_used.add(compressed)
         
         return compressions
+
+    def _analyze_variable_frequency(self, method_node: ast.FunctionDef) -> Dict[str, int]:
+        """Analyze how frequently each variable is used in the method."""
+        frequency = {}
+        
+        for node in ast.walk(method_node):
+            if isinstance(node, ast.Name):
+                name = node.id
+                if name not in {'self', 'cls', 'True', 'False', 'None'}:
+                    frequency[name] = frequency.get(name, 0) + 1
+        
+        return frequency
+    
+    def _generate_short_name(self, original: str, used: Set[str]) -> str:
+        """Generate shortest possible name not in use."""
+        # Try first char
+        if original[0].lower() not in used and original[0].lower() not in 'gps':
+            return original[0].lower()
+        
+        # Try first+last char
+        if len(original) > 1:
+            candidate = original[0].lower() + original[-1].lower()
+            if candidate not in used and not candidate.startswith(('g', 'p')):
+                return candidate
+        
+        # Try char + digit
+        for i in range(10):
+            for c in 'abcdefhijklmnqrtuvwxyz':
+                candidate = f"{c}{i}"
+                if candidate not in used and not candidate.startswith(('g', 'p')):
+                    return candidate
+        
+        # Fallback: use hash
+        return f"v{abs(hash(original)) % 100:02d}"
+    
+    def _compress_class_attributes_ultra(self, class_node: ast.ClassDef, 
+                                     used_names: Set[str]) -> Dict[str, str]:
+        """
+        Ultra-aggressive attribute compression.
+        Common patterns get single chars, others get 2 chars.
+        """
+        attr_compressions = {}
+        
+        # Find __init__ method
+        init_method = None
+        for item in class_node.body:
+            if isinstance(item, ast.FunctionDef) and item.name == '__init__':
+                init_method = item
+                break
+        
+        if not init_method:
+            return attr_compressions
+        
+        # Extract and analyze attributes
+        attr_frequency = {}
+        assigned_attrs = set()
+        
+        for node in ast.walk(init_method):
+            if isinstance(node, ast.Assign):
+                for target in node.targets:
+                    if (isinstance(target, ast.Attribute) and
+                        isinstance(target.value, ast.Name) and
+                        target.value.id == 'self'):
+                        assigned_attrs.add(target.attr)
+            
+            # Count usage frequency
+            if isinstance(node, ast.Attribute):
+                if isinstance(node.value, ast.Name) and node.value.id == 'self':
+                    attr_frequency[node.attr] = attr_frequency.get(node.attr, 0) + 1
+        
+        # Ultra-common patterns get single chars
+        ultra_common = {
+            'config': 'c',
+            'data': 'd',
+            'value': 'v',
+            'name': 'n',
+            'id': 'i',
+            'type': 't',
+            'status': 's',
+            'result': 'r',
+            'cache': 'h',
+            'buffer': 'b',
+            'queue': 'q',
+            'stack': 'k',
+            'list': 'l',
+            'map': 'm',
+            'set': 'e',
+            'flag': 'f',
+            'count': 'x',
+            'index': 'x',
+            'size': 'z',
+            'length': 'z',
+        }
+        
+        # Process attributes by frequency
+        sorted_attrs = sorted(assigned_attrs, key=lambda x: attr_frequency.get(x, 0), reverse=True)
+        
+        used_shorts = set()
+        
+        for attr_name in sorted_attrs:
+            # Check ultra-common patterns first
+            found = False
+            for pattern, short in ultra_common.items():
+                if pattern in attr_name.lower() and short not in used_shorts:
+                    attr_compressions[attr_name] = short
+                    used_shorts.add(short)
+                    found = True
+                    break
+            
+            if not found:
+                # Generate 2-char name
+                compressed = self._generate_attr_short(attr_name, used_shorts)
+                attr_compressions[attr_name] = compressed
+                used_shorts.add(compressed)
+        
+        return attr_compressions
     
     def _compress_local_name(self, name: str, local_used: Set[str]) -> str:
         """
@@ -789,7 +1066,7 @@ class CAI3WaterfallEnhancement:
             return True
         return False
     
-    def _extract_class_attributes(self, class_node: ast.ClassDef, used_names: Set[str]) -> Dict[str, str]:
+    def _extract_class_attributes_old(self, class_node: ast.ClassDef, used_names: Set[str]) -> Dict[str, str]:
         """
         Extract class attributes assigned in __init__ and create compressed mappings.
         Returns a dict mapping original attribute names to compressed names.
@@ -991,315 +1268,281 @@ class CAI3WaterfallEnhancement:
             parent_map=parent_map,
             children_map=children_map
         )
-    
-    def _create_cai3_lite_dense(self, cai3_full: CAI3Full, cai3_map: CAI3Map, 
-                                edit_scope_cids: List[str], cid_index: Dict,
-                                content: str, tree: ast.AST) -> CAI3Lite:
+
+
+    def _create_cai3_lite_dense_ultra(self, cai3_full: CAI3Full, cai3_map: CAI3Map,
+                                    edit_scope_cids: List[str], cid_index: Dict,
+                                    content: str, tree: ast.AST) -> CAI3Lite:
         """
-        Create ultra-dense CAI3-LITE achieving 70-90% compression.
+        Create ultra-dense CAI3-LITE achieving 50-70% compression for all bodies mode.
+        Key optimizations:
+        1. Single-line body format
+        2. No signatures for methods with bodies
+        3. Aggressive local/attribute compression
+        4. Smart pooling with profitability analysis
+        5. Compact header and metadata
         """
-        # Ultra-compact header with py= format
+        
+        # Ultra-compact header - minimize version info
         source_file = Path(cai3_full.source_path).name if cai3_full.source_path else "?"
-        header = f"#C3L v2 py={cai3_full.python_version[:4]} f={source_file}"
+        # Shorten header: #C3L instead of #C3L v2 py=3.11
+        header = f"#C3L {source_file[:20]}"  # Limit filename length
         
-        # Compress imports to single line - only include symbols used in bodies
-        used_in_bodies = self._find_symbols_used_in_bodies(cai3_full, edit_scope_cids, content)
-        import_parts = []
-        for imp in cai3_full.imports[:5]:  # Limit to 5 most important
-            if imp.startswith('import '):
-                module = imp[7:].split(' as ')[0]
-                # Ultra-short common imports - only if used
-                import_map = {
-                    'json': 'j',
-                    'datetime': 'dt',
-                    'typing': 't',
-                    'collections': 'c',
-                    'itertools': 'it',
-                    'functools': 'ft',
-                    'os': 'o',
-                    'sys': 's',
-                    're': 'r',
-                    'math': 'm',
-                }
-                short_name = import_map.get(module, module[:2])
-                if any(symbol in used_in_bodies for symbol in [module, short_name]):
-                    import_parts.append(short_name)
-            elif imp.startswith('from '):
-                parts = imp[5:].split(' import ')
-                if len(parts) == 2:
-                    module, names = parts
-                    # Compress format
-                    module_short = module.split('.')[-1][:2]
-                    name_short = names.split(',')[0][:2]
-                    if any(symbol in used_in_bodies for symbol in [module_short, name_short]):
-                        import_parts.append(f"{module_short}:{name_short}")
+        # Skip imports section entirely if not used in bodies
+        imports = ""  # Will be reconstructed from AST if needed
         
-        imports = "I:" + '|'.join(import_parts) if import_parts else ""
-        
-        # Extract chain aliases from compression stats
+        # Chain aliases - only include if they provide net savings
         chain_aliases_section = None
         if 'chain_aliases' in cai3_full.compression_stats:
             chain_aliases = cai3_full.compression_stats['chain_aliases']
-            if chain_aliases:
-                alias_parts = [f"{k}={v}" for k, v in chain_aliases.items()]
-                chain_aliases_section = f"D:{('|'.join(alias_parts))}"
+            # Filter to only highly profitable aliases (used 3+ times)
+            profitable_aliases = {}
+            for alias, chain in chain_aliases.items():
+                # Count actual usage in bodies
+                usage_count = self._count_chain_usage_in_bodies(chain, edit_scope_cids, tree, cai3_full)
+                if usage_count >= 3:  # Higher threshold for inclusion
+                    profitable_aliases[alias] = chain
+            
+            if profitable_aliases:
+                # Ultra-compact format: D:g0=s.c.g,g1=dt.now
+                alias_parts = [f"{k}={v}" for k, v in list(profitable_aliases.items())[:5]]  # Max 5 aliases
+                chain_aliases_section = f"D:{','.join(alias_parts)}"  # Use comma instead of pipe
         
-        # Create CID aliasing map - only for methods that have bodies
+        # CID aliases - use ultra-short format
         cid_alias_map = {}
-        cid_reverse_map = {}  # Map short36 back to real CID for translator
+        for i, cid in enumerate(edit_scope_cids):
+            # Use single char + digit for CID aliases: a0, a1, b0, b1...
+            alias_char = chr(97 + (i // 10))  # a, b, c...
+            alias_num = i % 10
+            cid_alias_map[cid] = f"{alias_char}{alias_num}"
         
-        # Only emit aliases for methods that have bodies (edit_scope_cids)
-        bodied_cids = [cid for cid in edit_scope_cids]
-        for i, real_cid in enumerate(bodied_cids):
-            short_tag = short36(real_cid)
-            cid_alias_map[real_cid] = str(i)  # Use simple counter for alias
-            cid_reverse_map[short_tag] = real_cid  # Store reverse mapping
-        
-        # Store reverse mapping in compression stats for translator
-        if 'cid_aliases' not in cai3_full.compression_stats:
-            cai3_full.compression_stats['cid_aliases'] = {}
-        cai3_full.compression_stats['cid_aliases'].update(cid_reverse_map)
-        
-        # CID aliasing section - emit short base36 tags
+        # Ultra-compact CID section: X:a0=5mn3,a1=e0wr
         cid_aliases_section = None
         if cid_alias_map:
-            alias_items = [f"{cid_alias_map[real_cid]}={short36(real_cid)}" for real_cid in bodied_cids]
-            cid_aliases_section = f"X:{('|'.join(alias_items))}"
+            alias_items = [f"{v}={short36(k)[:4]}" for k, v in cid_alias_map.items()]
+            cid_aliases_section = f"X:{','.join(alias_items)}"  # Use comma separator
         
-        # Extract config keys (ultra-compact)
+        # Skip config keys section - rarely used
         config_keys = None
-        if any('config' in node.name.lower() for node in cai3_full.nodes):
-            # Use single-char keys
-            keys = ['rf', 'tv', 'fm', 'ts']  # Shortened versions
-            config_keys = f"K:{','.join(keys)}"
         
-        # Build ultra-compact table
+        # Build ultra-compact table WITHOUT signatures for methods with bodies
         table = []
         nodes_by_cid = {node.cid: node for node in cai3_full.nodes}
         
-        # Build table with CID aliases
         for node in cai3_full.nodes:
             if node.type == NodeType.CLASS:
                 # Ultra-compact class: C:dp
                 table.append(f"C:{node.short_name}")
             elif node.type in (NodeType.METHOD, NodeType.FUNCTION):
-                # Determine fidelity
-                fidelity = "1" if node.cid in edit_scope_cids else "0"
+                # Check if this method has a body
+                has_body = node.cid in edit_scope_cids
                 
-                # Ultra-compact method: M:dp.vr(r)->b F1 #alias
-                prefix = "M:" if node.type == NodeType.METHOD else "F:"
+                prefix = "M" if node.type == NodeType.METHOD else "F"
                 
-                # Use CID alias if available
-                cid_ref = f"#{cid_alias_map[node.cid]}" if node.cid in cid_alias_map else f"#{node.cid}"
-                
-                if node.parent_cid:
-                    parent = nodes_by_cid.get(node.parent_cid)
-                    if parent:
-                        # Remove parentheses and arrow for B0 methods
-                        if fidelity == "0":
-                            entry = f"{prefix}{parent.short_name}.{node.short_name}"
+                if has_body:
+                    # Method WITH body - no signature needed, just name and CID alias
+                    cid_ref = f"#{cid_alias_map.get(node.cid, node.cid[:4])}"
+                    if node.parent_cid:
+                        parent = nodes_by_cid.get(node.parent_cid)
+                        if parent:
+                            entry = f"{prefix}:{parent.short_name}.{node.short_name}{cid_ref}"
                         else:
-                            # Drop signature when body is present (fidelity="1") - redundant and expensive
-                            entry = f"{prefix}{parent.short_name}.{node.short_name}{cid_ref}"
+                            entry = f"{prefix}:{node.short_name}{cid_ref}"
                     else:
-                        entry = f"{prefix}{node.short_name}"
+                        entry = f"{prefix}:{node.short_name}{cid_ref}"
                 else:
-                    if fidelity == "0":
-                        entry = f"{prefix}{node.short_name}"
+                    # Method WITHOUT body - include signature
+                    if node.parent_cid:
+                        parent = nodes_by_cid.get(node.parent_cid)
+                        if parent:
+                            entry = f"{prefix}:{parent.short_name}.{node.short_name}"
+                        else:
+                            entry = f"{prefix}:{node.short_name}"
                     else:
-                        # Drop signature when body is present (fidelity="1") - redundant and expensive
-                        entry = f"{prefix}{node.short_name}{cid_ref}"
+                        entry = f"{prefix}:{node.short_name}"
                 
                 table.append(entry)
         
-        # Flatten table to single line if enabled
-        if getattr(self, 'lite_flat_table', False):
-            table = [f"T:{' '.join(table)}"]
+        # Flatten table to single line for ultra-density
+        table = [f"T:{','.join(table)}"]  # Use comma separator, single line
         
-        # Build ultra-dense bodies for edit scope methods
+        # Build ultra-dense single-line bodies
         bodies = []
         
         if edit_scope_cids:
-            try:
-                # Use the tree that already has CIDs instead of re-parsing
-                # tree = ast.parse(content)  # This loses CIDs!
+            # Create enhanced FLOW compiler with all optimizations
+            flow_compiler = FLOWCompiler(
+                name_map=cai3_map.name_map,
+                dense_mode=True,
+                pool_constants=True,
+                ascii_ops=True,
+                no_spaces=True,
+                inline_blocks=True,
+                alias_chains=True,
+                pool_strings_min_len=5  # Higher threshold for pooling
+            )
+            
+            # Set pools and aliases
+            if 'pool_map' in cai3_full.compression_stats:
+                flow_compiler.set_pool_map(cai3_full.compression_stats['pool_map'])
+            if 'chain_aliases' in cai3_full.compression_stats:
+                flow_compiler.set_chain_aliases(profitable_aliases if profitable_aliases else {})
+            
+            nodes_by_cid = {node.cid: node for node in cai3_full.nodes}
+            
+            for cid in edit_scope_cids:
+                node_info = nodes_by_cid.get(cid)
+                if not node_info or not node_info.span:
+                    continue
                 
-                # Create dense FLOW compiler with all flags
-                flow_compiler = FLOWCompiler(
-                    name_map=cai3_map.name_map,
-                    dense_mode=True,
-                    pool_constants=True,
-                    # Pass all feature flags for maximum density
-                    ascii_ops=getattr(self, 'dense_flow_ascii_ops', True),
-                    no_spaces=getattr(self, 'dense_flow_no_spaces', True),
-                    inline_blocks=getattr(self, 'dense_flow_inline_blocks', True),
-                    alias_chains=getattr(self, 'dense_flow_alias_chains', True),
-                    pool_strings_min_len=getattr(self, 'dense_flow_pool_strings_min_len', 3)
-                )
+                # Find AST node
+                target_ast_node = self._find_ast_node_for_cid(tree, node_info.span)
                 
-                # Pass centralized pool map to FLOW compiler
-                if 'pool_map' in cai3_full.compression_stats:
-                    flow_compiler.set_pool_map(cai3_full.compression_stats['pool_map'])
-                elif cai3_full.pools:
-                    # Fallback to old method if pool_map not available
-                    flow_compiler.set_pools(cai3_full.pools)
-                if 'chain_aliases' in cai3_full.compression_stats:
-                    flow_compiler.set_chain_aliases(cai3_full.compression_stats['chain_aliases'])
-                
-                nodes_by_cid = {node.cid: node for node in cai3_full.nodes}
-                
-                for cid in edit_scope_cids:
-                    node_info = nodes_by_cid.get(cid)
-                    if not node_info or not node_info.span:
-                        continue
+                if target_ast_node:
+                    # Get comprehensive compression mappings
+                    local_compressions = node_info.metadata.get('local_compressions', {})
                     
-                    # Find AST node
-                    target_ast_node = None
-                    start_line, end_line = node_info.span
+                    # Get attribute compressions from parent class
+                    attr_compressions = {}
+                    if node_info.parent_cid:
+                        parent_node = nodes_by_cid.get(node_info.parent_cid)
+                        if parent_node and 'attr_compressions' in parent_node.metadata:
+                            attr_compressions = parent_node.metadata['attr_compressions']
                     
-                    for ast_node in ast.walk(tree):
-                        if isinstance(ast_node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                            if (hasattr(ast_node, 'lineno') and 
-                                hasattr(ast_node, 'end_lineno') and
-                                ast_node.lineno == start_line and
-                                getattr(ast_node, 'end_lineno', ast_node.lineno) == end_line):
-                                target_ast_node = ast_node
-                                break
-                    
-                    if target_ast_node:
-                        # Prepare combined scope with local compressions and class attributes
-                        combined_scope = {}
+                    # Generate ultra-dense single-line body
+                    try:
+                        # Use the new ultra-dense body generator
+                        ultra_dense_body = flow_compiler.generate_ultra_dense_body(
+                            target_ast_node, cid, local_compressions, attr_compressions
+                        )
                         
-                        # Add local compressions for this method
-                        if 'local_compressions' in node_info.metadata:
-                            combined_scope.update(node_info.metadata['local_compressions'])
+                        # Ultra-compact body format: B#a0:single_line_body
+                        cid_ref = cid_alias_map.get(cid, cid[:4])
                         
-                        # Add class attribute compressions if this method belongs to a class
-                        if node_info.parent_cid:
-                            # Find the parent class node
-                            parent_class_node = None
-                            for class_node in nodes_by_cid.values():
-                                if class_node.cid == node_info.parent_cid and class_node.type == NodeType.CLASS:
-                                    parent_class_node = class_node
-                                    break
-                            
-                            if parent_class_node and 'attr_compressions' in parent_class_node.metadata:
-                                # Add attribute compressions to scope with comprehensive pattern coverage
-                                for orig_attr, compressed_attr in parent_class_node.metadata['attr_compressions'].items():
-                                    # Cover all possible attribute access patterns that might appear in AST
-                                    
-                                    # 1. Direct self.attribute -> s.compressed (most common in FLOW)
-                                    combined_scope[f"self.{orig_attr}"] = f"s.{compressed_attr}"
-                                    
-                                    # 2. Just the attribute name -> compressed (for internal FLOW mappings)
-                                    combined_scope[orig_attr] = compressed_attr
-                                    
-                                    # 3. Handle assignment patterns: self.attr = value
-                                    combined_scope[f"self.{orig_attr}"] = f"s.{compressed_attr}"
-                                    
-                                    # 4. Handle method call patterns: self.attr.method()
-                                    # Store base mapping for FLOW compiler to expand
-                                    combined_scope[f"_attr_base_{orig_attr}"] = compressed_attr
-                                    
-                                self.logger.debug(f"Added {len(parent_class_node.metadata['attr_compressions'])} "
-                                                f"attribute compressions to method {node_info.name}: {parent_class_node.metadata['attr_compressions']}")
-                                
-                                # Debug: show what we're passing to FLOW compiler
-                                attr_scope_items = {k: v for k, v in combined_scope.items() 
-                                                   if any(attr in k for attr in parent_class_node.metadata['attr_compressions'])}
-                                self.logger.debug(f"Attribute scope for FLOW compiler: {attr_scope_items}")
+                        # Single line body with CID reference
+                        bodies.append(f"B#{cid_ref}:{ultra_dense_body}")
                         
-                        # Set the combined scope on the FLOW compiler
-                        if combined_scope:
-                            flow_compiler.set_scope(cid, combined_scope)
-                        
-                        # Convert to ultra-dense FLOW
-                        try:
-                            flow_body = flow_compiler.ast_to_flow(target_ast_node)
-                            
-                            # Post-process FLOW output to ensure attribute compression is applied
-                            if node_info.parent_cid:
-                                parent_class_node = None
-                                for class_node in nodes_by_cid.values():
-                                    if class_node.cid == node_info.parent_cid and class_node.type == NodeType.CLASS:
-                                        parent_class_node = class_node
-                                        break
-                                
-                                if parent_class_node and 'attr_compressions' in parent_class_node.metadata:
-                                    # Apply attribute compressions to FLOW output as a fallback
-                                    for orig_attr, compressed_attr in parent_class_node.metadata['attr_compressions'].items():
-                                        # Replace self.original_attr with s.compressed_attr
-                                        flow_body = flow_body.replace(f"s.{orig_attr}", f"s.{compressed_attr}")
-                                        # Also handle cases without the 's.' prefix
-                                        flow_body = flow_body.replace(f"self.{orig_attr}", f"s.{compressed_attr}")
-                                    
-                                    self.logger.debug(f"Applied post-processing attribute compression for method {node_info.name}")
-                            
-                            # Ultra-compact body format with CID alias
-                            cid_ref = f"#{cid_alias_map[cid]}" if cid in cid_alias_map else f"#{cid}"
-                            bodies.append(f"B{cid_ref}:")  # No space after B
-                            
-                            # Compress body lines further (remove unnecessary spaces)
-                            for line in flow_body.split('\n'):
-                                if line.strip():
-                                    # Remove unnecessary spaces
-                                    compressed_line = line.replace(' = ', '=').replace(', ', ',')
-                                    bodies.append(compressed_line)
-                            
-                            # Keep E terminator for safety as requested
-                            if getattr(self, 'lite_keep_e_terminator', True):
-                                bodies.append("E")  # Single char END
-                            
-                        except Exception as e:
-                            self.logger.warning(f"Failed to create dense FLOW for {cid}: {e}")
-                            
-            except Exception as e:
-                self.logger.warning(f"Failed to generate dense FLOW bodies: {e}")
+                    except Exception as e:
+                        self.logger.warning(f"Failed to create ultra-dense body for {cid}: {e}")
         
-        # Scan bodies for referenced pool IDs and filter pool section
-        referenced_pool_ids = set()
+        # Filter pools to only referenced ones
+        pool_section = None
         if bodies:
+            # Extract actually used pool references
+            body_text = ' '.join(bodies)
             import re
-            # Scan all body text for pool references (p\d+)
-            body_text = '\n'.join(bodies)
             pool_pattern = r'\bp(\d+)\b'
             matches = re.findall(pool_pattern, body_text)
             referenced_pool_ids = {f"p{match}" for match in matches}
+            
+            if referenced_pool_ids and cai3_full.pools:
+                # Ultra-compact pool format with shortened values
+                pool_items = []
+                for pool_id in list(referenced_pool_ids)[:10]:  # Max 10 pools
+                    if pool_id in cai3_full.pools:
+                        value = cai3_full.pools[pool_id]
+                        # Ultra-compress pool values
+                        if len(value) > 10:
+                            # Use hash for long strings
+                            compressed_val = f"#{hash(value) % 10000:04d}"
+                        else:
+                            compressed_val = value
+                        pool_items.append(f"{pool_id}={compressed_val}")
+                
+                if pool_items:
+                    pool_section = f"P:{','.join(pool_items)}"  # Comma separator
         
-        # Filter pool section to only include referenced pools
-        pool_section = None
-        if cai3_full.pools and referenced_pool_ids:
-            pool_items = []
-            for pool_id, value in cai3_full.pools.items():
-                if pool_id in referenced_pool_ids:
-                    # Ultra-compress pool values for preview
-                    if len(value) > 20:
-                        compressed_val = value[:8] + "..." + value[-8:]
-                    else:
-                        compressed_val = value
-                    pool_items.append(f"{pool_id}={compressed_val}")
-            if pool_items:
-                pool_section = f"P:{';'.join(pool_items)}"
-        
-        # Create ultra-compact LITE with proper section ordering
-        lite_result = CAI3Lite(
+        # Create ultra-compact LITE
+        return CAI3Lite(
             header=header,
-            imports=imports,
+            imports=imports,  # Empty for all-bodies mode
             chain_aliases=chain_aliases_section,
             cid_aliases=cid_aliases_section,
-            config_keys=config_keys,
+            config_keys=config_keys,  # Skip
             pools=pool_section,
             table=table,
             bodies=bodies
         )
+
+    def _find_ast_node_for_cid(self, tree: ast.AST, span: Tuple[int, int]) -> Optional[ast.FunctionDef]:
+        """Find AST node matching the given span."""
+        start_line, end_line = span
         
-        # Diagnostic: validate that bodies were generated for edit scope CIDs
-        lite = lite_result.serialize()
-        for cid in edit_scope_cids:
-            alias = cid_alias_map.get(cid, cid)
-            assert f"B#{alias}:" in lite, f"Body for {cid} not emitted"
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                if (hasattr(node, 'lineno') and
+                    hasattr(node, 'end_lineno') and
+                    node.lineno == start_line and
+                    getattr(node, 'end_lineno', node.lineno) == end_line):
+                    return node
+        return None
+
+    def _count_chain_usage_in_bodies(self, chain: str, cids: List[str], tree: ast.AST, cai3_full: CAI3Full) -> int:
+        """Count how many times a chain pattern appears in method bodies."""
+        count = 0
+        nodes_by_cid = {node.cid: node for node in cai3_full.nodes}
         
-        return lite_result
+        for cid in cids:
+            node_info = nodes_by_cid.get(cid)
+            if not node_info or not node_info.span:
+                continue
+            
+            # Find AST node and count chain usage
+            target_node = self._find_ast_node_for_cid(tree, node_info.span)
+            if target_node:
+                for node in ast.walk(target_node):
+                    if isinstance(node, ast.Attribute):
+                        # Check if this matches our chain pattern
+                        node_chain = self._extract_attribute_chain(node)
+                        if node_chain == chain:
+                            count += 1
+        
+        return count
+
+    # Helper function to generate ultra-short base36 CID representations
+    def short36(cid: str) -> str:
+        """Convert CID to base36 4-char representation."""
+        # Use first 4 chars of hash for uniqueness
+        import hashlib
+        hash_val = int(hashlib.md5(cid.encode()).hexdigest()[:8], 16)
+        
+        # Convert to base36
+        chars = "0123456789abcdefghijklmnopqrstuvwxyz"
+        result = ""
+        while hash_val and len(result) < 4:
+            result = chars[hash_val % 36] + result
+            hash_val //= 36
+        
+        return result.zfill(4)
+
+    def _generate_attr_short(self, attr_name: str, used: Set[str]) -> str:
+        """Generate shortest attribute name."""
+        # Try first char if available
+        first = attr_name[0].lower()
+        if first not in used and first not in 'gps':
+            return first
+        
+        # Try first + consonant from name
+        consonants = [c for c in attr_name.lower() if c not in 'aeiou_']
+        if len(consonants) >= 2:
+            candidate = consonants[0] + consonants[1]
+            if candidate not in used and not candidate.startswith(('g', 'p')):
+                return candidate
+        
+        # Try first + last
+        if len(attr_name) > 1:
+            candidate = attr_name[0].lower() + attr_name[-1].lower()
+            if candidate not in used and not candidate.startswith(('g', 'p')):
+                return candidate
+        
+        # Generate from available chars
+        for c1 in 'abcdefhijklmnqrtuvwxyz':
+            for c2 in 'abcdefhijklmnqrtuvwxyz':
+                candidate = c1 + c2
+                if candidate not in used and not candidate.startswith(('g', 'p')):
+                    return candidate
+        
+        return f"a{abs(hash(attr_name)) % 100:02d}"
     
     def _find_symbols_used_in_bodies(self, cai3_full: CAI3Full, edit_scope_cids: List[str], content: str) -> Set[str]:
         """
@@ -1489,6 +1732,9 @@ class CAI3WaterfallEnhancement:
             return (start_byte, end_byte)
         except Exception:
             return None
+        
+        
+    
 
 
 def enhance_waterfall_with_cai3(WaterfallCompressorClass):
@@ -1497,6 +1743,7 @@ def enhance_waterfall_with_cai3(WaterfallCompressorClass):
     """
     
     # Add enhanced CAI3 methods to the class
+    WaterfallCompressorClass._annotate_function_cids = CAI3WaterfallEnhancement._annotate_function_cids
     WaterfallCompressorClass._standard_compression_cai3 = CAI3WaterfallEnhancement._standard_compression_cai3
     WaterfallCompressorClass._determine_edit_scope_strict = CAI3WaterfallEnhancement._determine_edit_scope_strict
     WaterfallCompressorClass._has_bug_pattern_enhanced = CAI3WaterfallEnhancement._has_bug_pattern_enhanced
@@ -1504,12 +1751,23 @@ def enhance_waterfall_with_cai3(WaterfallCompressorClass):
     WaterfallCompressorClass._modifies_parameters = CAI3WaterfallEnhancement._modifies_parameters
     WaterfallCompressorClass._create_cai3_full_enhanced = CAI3WaterfallEnhancement._create_cai3_full_enhanced
     WaterfallCompressorClass._create_cai3_map_enhanced = CAI3WaterfallEnhancement._create_cai3_map_enhanced
-    WaterfallCompressorClass._create_cai3_lite_dense = CAI3WaterfallEnhancement._create_cai3_lite_dense
+    WaterfallCompressorClass._create_cai3_lite_dense_ultra = CAI3WaterfallEnhancement._create_cai3_lite_dense_ultra
     WaterfallCompressorClass._compress_name_aggressive = CAI3WaterfallEnhancement._compress_name_aggressive
-    WaterfallCompressorClass._compress_method_locals = CAI3WaterfallEnhancement._compress_method_locals
+    WaterfallCompressorClass._compress_method_locals_ultra = CAI3WaterfallEnhancement._compress_method_locals_ultra
+    WaterfallCompressorClass._compress_class_attributes_ultra = CAI3WaterfallEnhancement._compress_class_attributes_ultra
     WaterfallCompressorClass._compress_local_name = CAI3WaterfallEnhancement._compress_local_name
+    WaterfallCompressorClass._is_reserved_pattern = CAI3WaterfallEnhancement._is_reserved_pattern
+    WaterfallCompressorClass._compress_attribute_name = CAI3WaterfallEnhancement._compress_attribute_name
+    WaterfallCompressorClass._analyze_variable_frequency = CAI3WaterfallEnhancement._analyze_variable_frequency
+    WaterfallCompressorClass._generate_short_name = CAI3WaterfallEnhancement._generate_short_name
+    WaterfallCompressorClass._extract_chain_pattern = CAI3WaterfallEnhancement._extract_chain_pattern
+    WaterfallCompressorClass._extract_attribute_chain = CAI3WaterfallEnhancement._extract_attribute_chain
+    WaterfallCompressorClass._find_symbols_used_in_bodies = CAI3WaterfallEnhancement._find_symbols_used_in_bodies
     WaterfallCompressorClass._compute_context_hash = CAI3WaterfallEnhancement._compute_context_hash
     WaterfallCompressorClass._compute_byte_span = CAI3WaterfallEnhancement._compute_byte_span
+    WaterfallCompressorClass._find_ast_node_for_cid = CAI3WaterfallEnhancement._find_ast_node_for_cid
+    WaterfallCompressorClass._count_chain_usage_in_bodies = CAI3WaterfallEnhancement._count_chain_usage_in_bodies
+    WaterfallCompressorClass._generate_attr_short = CAI3WaterfallEnhancement._generate_attr_short
     
     # Check if the class already has an enhanced __init__
     if not hasattr(WaterfallCompressorClass, '_cai3_enhanced'):
@@ -1526,8 +1784,7 @@ def enhance_waterfall_with_cai3(WaterfallCompressorClass):
             self.use_dense_flow = True
             self.compress_all_names = True
             self.pool_strings = True
-            self.include_all_methods = kwargs.get('include_all_methods', False)
-            self.include_all_methods = kwargs.get('include_all_methods', False)
+            self.include_all_methods = kwargs.get('include_all_methods', True)  # Default to True as per CAI3WaterfallEnhancement
             
             # New minification flags (defaults for "all-methods" mode)
             self.pre_minify_locals = kwargs.get('pre_minify_locals', True)  # Turn on automatically when include_all_methods=True

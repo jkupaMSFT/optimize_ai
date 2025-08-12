@@ -20,6 +20,53 @@ os.environ["WATERFALL_TEST_MODE"] = "1"
 
 from input_optimizer.engine.waterfall_compressor import WaterfallCompressor, count_tokens
 
+# Import token counting utilities for multi-model comparison
+try:
+    from utils.metrics import count_tokens_gpt, count_tokens_claude
+    MULTI_MODEL_TOKENS_AVAILABLE = True
+except ImportError:
+    MULTI_MODEL_TOKENS_AVAILABLE = False
+    print("⚠️  Multi-model token counting not available. Using fallback method.")
+
+def count_tokens_both_models(text: str) -> dict:
+    """
+    Count tokens for both GPT and Claude models.
+    
+    Args:
+        text: The text to tokenize.
+    
+    Returns:
+        Dictionary with token counts for both models.
+    """
+    results = {}
+    
+    if MULTI_MODEL_TOKENS_AVAILABLE:
+        # Count GPT tokens
+        try:
+            results['gpt4'] = count_tokens_gpt(text, "gpt-4")
+        except Exception as e:
+            results['gpt4'] = f"Error: {str(e)}"
+        
+        # Count Claude tokens
+        try:
+            results['claude'] = count_tokens_claude(text, "claude-sonnet-4-20250514")
+        except Exception as e:
+            results['claude'] = f"Error: {str(e)}"
+    else:
+        # Fallback to basic token counting
+        fallback_tokens = count_tokens(text)
+        results['gpt4'] = fallback_tokens
+        results['claude'] = f"Fallback: ~{fallback_tokens}"
+    
+    return results
+
+def print_token_comparison(label: str, text: str):
+    """Print token counts for both models."""
+    token_counts = count_tokens_both_models(text)
+    print(f"\n🔢 Token Count Analysis - {label}:")
+    print(f"   GPT-4 tokens: {token_counts['gpt4']}")
+    print(f"   Claude tokens: {token_counts['claude']}")
+
 def extract_samples_from_file(samples_file: Path) -> dict:
     """Extract all individual samples from samples.py file."""
     content = samples_file.read_text(encoding='utf-8')
@@ -193,7 +240,7 @@ def format_code_comparison(original: str, compressed: str, max_lines: int = 8) -
     comparison.append("-" * 70)
     return '\n'.join(comparison)
 
-def create_comprehensive_samples_report(results: list, report_file: Path, compressor) -> None:
+def create_comprehensive_samples_report(results: list, report_file: Path, compressor, token_analysis: dict = None) -> None:
     """Create a comprehensive report for all samples."""
     with open(report_file, 'w', encoding='utf-8') as f:
         f.write("🌊 WATERFALL COMPRESSION - ALL SAMPLES ANALYSIS\n")
@@ -217,6 +264,25 @@ def create_comprehensive_samples_report(results: list, report_file: Path, compre
             f.write(f"Total Token Reduction: {total_reduction:,}\n")
             f.write(f"Average Compression Ratio: {avg_compression:.1f}%\n")
             f.write(f"Average Semantic Similarity: {avg_similarity:.1f}%\n")
+            
+            # Multi-model token analysis
+            if token_analysis and token_analysis.get('samples_analyzed', 0) > 0:
+                f.write(f"\n📊 Multi-Model Token Analysis ({token_analysis['samples_analyzed']} samples):\n")
+                
+                # GPT-4 analysis
+                gpt4_reduction = token_analysis['gpt4_original'] - token_analysis['gpt4_compressed']
+                gpt4_percent = (gpt4_reduction / token_analysis['gpt4_original'] * 100) if token_analysis['gpt4_original'] > 0 else 0
+                f.write(f"  GPT-4: {token_analysis['gpt4_original']:,} → {token_analysis['gpt4_compressed']:,} tokens ({gpt4_percent:.1f}% reduction)\n")
+                
+                # Claude analysis
+                claude_reduction = token_analysis['claude_original'] - token_analysis['claude_compressed']
+                claude_percent = (claude_reduction / token_analysis['claude_original'] * 100) if token_analysis['claude_original'] > 0 else 0
+                f.write(f"  Claude: {token_analysis['claude_original']:,} → {token_analysis['claude_compressed']:,} tokens ({claude_percent:.1f}% reduction)\n")
+                
+                # Model efficiency comparison
+                if token_analysis['gpt4_original'] > 0 and token_analysis['claude_original'] > 0:
+                    gpt4_efficiency = token_analysis['gpt4_original'] / token_analysis['claude_original']
+                    f.write(f"  Model Efficiency: GPT-4 uses {gpt4_efficiency:.2f}x tokens compared to Claude\n")
             
             # Performance distribution
             excellent = sum(1 for r in results if r['compression_ratio'] > 50)
@@ -312,7 +378,15 @@ def create_comprehensive_samples_report(results: list, report_file: Path, compre
             f.write(f"\n{i}. {result['sample_name']} ({result['category']})\n")
             f.write("-" * 50 + "\n")
             f.write(f"Tier: {result['tier'].upper()}, Method: {result['method']}\n")
-            f.write(f"Tokens: {result['original_tokens']:,} → {result['compressed_tokens']:,} ({result['token_reduction']:,})\n")
+            
+            # Multi-model token breakdown if available
+            if 'gpt4_original' in result and result['gpt4_original'] is not None:
+                f.write(f"GPT-4 Tokens: {result['gpt4_original']:,} → {result['gpt4_compressed']:,}\n")
+                if result.get('claude_original') is not None:
+                    f.write(f"Claude Tokens: {result['claude_original']:,} → {result['claude_compressed']:,}\n")
+            else:
+                f.write(f"Tokens: {result['original_tokens']:,} → {result['compressed_tokens']:,} ({result['token_reduction']:,})\n")
+            
             f.write(f"Compression: {result['compression_ratio']:.1f}%, Semantic: {result['semantic_similarity']:.1f}%\n")
         
         f.write(f"\nEnd of Report\n")
@@ -336,25 +410,93 @@ def run_comprehensive_samples_demo():
     
     samples = extract_samples_from_file(samples_file)
     print(f"📊 Found {len(samples)} samples to analyze")
+    
+    # Show token counting capability status
+    if MULTI_MODEL_TOKENS_AVAILABLE:
+        print("🔢 Multi-model token counting: ✅ Available (GPT-4 + Claude)")
+        print("📊 Format: Category | Tier | Compression% | Semantic% ")
+        print("         GPT-4: orig→comp | Claude: orig→comp")
+    else:
+        print("🔢 Multi-model token counting: ❌ Using fallback method")
+        print("📊 Format: Category | Tier | Compression% | Semantic% | Tokens: orig→comp")
+    
     print("-" * 70)
     
     results = []
     
+    # Track token counts for detailed analysis
+    total_token_analysis = {
+        'gpt4_original': 0,
+        'gpt4_compressed': 0,
+        'claude_original': 0,
+        'claude_compressed': 0,
+        'samples_analyzed': 0
+    }
+    
     for i, (sample_name, sample_code) in enumerate(samples.items(), 1):
         print(f"\n[{i:2d}/{len(samples)}] {sample_name}")
+        
+        # Show detailed token analysis for first few samples
+        show_detailed_analysis = i <= 3  # Show for first 3 samples
+        
+        # For the very first sample, show a complete before/after comparison
+        if i == 1:
+            print(f"\n📋 Detailed Analysis for {sample_name}:")
+            print("=" * 50)
+            print("ORIGINAL CODE:")
+            print(sample_code[:200] + "..." if len(sample_code) > 200 else sample_code)
+            print("=" * 50)
         
         try:
             # Analyze sample
             original_tokens = count_tokens(sample_code)
             category = categorize_sample(sample_name, sample_code)
             
+            # Get multi-model token counts for original
+            if show_detailed_analysis:
+                print_token_comparison(f"Original {sample_name}", sample_code)
+            
             # Compress using waterfall method
-            result = compressor.compress_string(sample_code)
+            result = compressor._standard_compression_cai3(sample_code, original_tokens, None)
+            
+            # For the first sample, show the compressed result
+            if i == 1:
+                print("COMPRESSED OUTPUT:")
+                print(result.content[:300] + "..." if len(result.content) > 300 else result.content)
+                print("=" * 50)
+            
+            # Get multi-model token counts for compressed
+            if show_detailed_analysis:
+                print_token_comparison(f"Compressed {sample_name}", result.content)
             
             # Calculate metrics
             compression_ratio = result.compression_ratio
             token_reduction = original_tokens - result.compressed_tokens
             semantic_similarity = calculate_semantic_similarity(sample_code, result.content)
+            
+            # Get individual token counts for this sample
+            sample_gpt4_orig = original_tokens  # Default fallback
+            sample_gpt4_comp = result.compressed_tokens  # Default fallback
+            sample_claude_orig = "N/A"
+            sample_claude_comp = "N/A"
+            
+            if MULTI_MODEL_TOKENS_AVAILABLE:
+                try:
+                    sample_gpt4_orig = count_tokens_gpt(sample_code)
+                    sample_gpt4_comp = count_tokens_gpt(result.content)
+                    sample_claude_orig = count_tokens_claude(sample_code)
+                    sample_claude_comp = count_tokens_claude(result.content)
+                except Exception:
+                    # Keep defaults if token counting fails
+                    pass
+            
+            # Update token analysis tracking (after we have the variables defined)
+            if MULTI_MODEL_TOKENS_AVAILABLE and isinstance(sample_gpt4_orig, int) and isinstance(sample_claude_orig, int):
+                total_token_analysis['gpt4_original'] += sample_gpt4_orig
+                total_token_analysis['gpt4_compressed'] += sample_gpt4_comp
+                total_token_analysis['claude_original'] += sample_claude_orig
+                total_token_analysis['claude_compressed'] += sample_claude_comp
+                total_token_analysis['samples_analyzed'] += 1
             
             # Performance indicator
             if compression_ratio > 50:
@@ -366,10 +508,16 @@ def run_comprehensive_samples_demo():
             else:
                 performance = "🔴"
             
-            print(f"  {performance} {category:<20} | {result.tier_used.value.upper():<6} | {compression_ratio:5.1f}% | {semantic_similarity:5.1f}% | {original_tokens:4d}→{result.compressed_tokens:3d}")
+            # Enhanced output with multi-model token counts
+            if MULTI_MODEL_TOKENS_AVAILABLE and isinstance(sample_claude_orig, int) and isinstance(sample_claude_comp, int):
+                print(f"  {performance} {category:<20} | {result.tier_used.value.upper():<6} | {compression_ratio:5.1f}% | {semantic_similarity:5.1f}%")
+                print(f"     GPT-4: {sample_gpt4_orig:4d}→{sample_gpt4_comp:3d} | Claude: {sample_claude_orig:4d}→{sample_claude_comp:3d}")
+            else:
+                # Fallback format when multi-model tokens aren't available
+                print(f"  {performance} {category:<20} | {result.tier_used.value.upper():<6} | {compression_ratio:5.1f}% | {semantic_similarity:5.1f}% | {original_tokens:4d}→{result.compressed_tokens:3d}")
             
             # Store result
-            results.append({
+            result_data = {
                 'sample_name': sample_name,
                 'category': category,
                 'tier': result.tier_used.value,
@@ -381,7 +529,18 @@ def run_comprehensive_samples_demo():
                 'token_reduction': token_reduction,
                 'original_code': sample_code,
                 'compressed_code': result.content
-            })
+            }
+            
+            # Add multi-model token counts if available
+            if MULTI_MODEL_TOKENS_AVAILABLE and isinstance(sample_gpt4_orig, int):
+                result_data.update({
+                    'gpt4_original': sample_gpt4_orig,
+                    'gpt4_compressed': sample_gpt4_comp,
+                    'claude_original': sample_claude_orig if isinstance(sample_claude_orig, int) else None,
+                    'claude_compressed': sample_claude_comp if isinstance(sample_claude_comp, int) else None
+                })
+            
+            results.append(result_data)
             
         except Exception as e:
             print(f"  ❌ Error processing {sample_name}: {e}")
@@ -400,6 +559,35 @@ def run_comprehensive_samples_demo():
         print(f"Samples Processed: {len(results)}")
         print(f"Total Token Reduction: {total_reduction:,} ({avg_compression:.1f}% average)")
         print(f"Average Semantic Similarity: {avg_similarity:.1f}%")
+        
+        # Multi-model token analysis summary
+        if MULTI_MODEL_TOKENS_AVAILABLE and total_token_analysis['samples_analyzed'] > 0:
+            print(f"\n🔢 Multi-Model Token Analysis ({total_token_analysis['samples_analyzed']} samples):")
+            
+            # GPT-4 analysis
+            gpt4_reduction = total_token_analysis['gpt4_original'] - total_token_analysis['gpt4_compressed']
+            gpt4_percent = (gpt4_reduction / total_token_analysis['gpt4_original'] * 100) if total_token_analysis['gpt4_original'] > 0 else 0
+            print(f"   GPT-4: {total_token_analysis['gpt4_original']:,} → {total_token_analysis['gpt4_compressed']:,} tokens ({gpt4_percent:.1f}% reduction)")
+            
+            # Claude analysis
+            claude_reduction = total_token_analysis['claude_original'] - total_token_analysis['claude_compressed']
+            claude_percent = (claude_reduction / total_token_analysis['claude_original'] * 100) if total_token_analysis['claude_original'] > 0 else 0
+            print(f"   Claude: {total_token_analysis['claude_original']:,} → {total_token_analysis['claude_compressed']:,} tokens ({claude_percent:.1f}% reduction)")
+            
+            # Model efficiency comparison
+            if total_token_analysis['gpt4_original'] > 0 and total_token_analysis['claude_original'] > 0:
+                gpt4_efficiency = total_token_analysis['gpt4_original'] / total_token_analysis['claude_original']
+                print(f"   Model Efficiency: GPT-4 uses {gpt4_efficiency:.2f}x tokens compared to Claude")
+                
+                # Calculate character efficiency if we have sample data
+                if len(results) > 0:
+                    total_chars = sum(len(r['original_code']) for r in results[:total_token_analysis['samples_analyzed']])
+                    if total_chars > 0:
+                        gpt4_chars_per_token = total_chars / total_token_analysis['gpt4_original']
+                        claude_chars_per_token = total_chars / total_token_analysis['claude_original']
+                        print(f"   Tokenization Efficiency:")
+                        print(f"     GPT-4: {gpt4_chars_per_token:.2f} chars/token")
+                        print(f"     Claude: {claude_chars_per_token:.2f} chars/token")
         
         # Performance breakdown
         excellent = sum(1 for r in results if r['compression_ratio'] > 50)
@@ -422,7 +610,7 @@ def run_comprehensive_samples_demo():
             json.dump(results, f, indent=2)
         
         # Create comprehensive report
-        create_comprehensive_samples_report(results, detailed_report_file, compressor)
+        create_comprehensive_samples_report(results, detailed_report_file, compressor, total_token_analysis)
         
         print(f"\n💾 Detailed results: {results_file}")
         print(f"📄 Comprehensive report: {detailed_report_file}")

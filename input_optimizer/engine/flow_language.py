@@ -583,6 +583,19 @@ class FLOWCompiler:
             return f"?{operand}"
         elif isinstance(node, ast.Compare):
             return self._process_condition(node)
+        elif isinstance(node, ast.BoolOp):
+            # Handle boolean operations (and, or)
+            if isinstance(node.op, ast.And):
+                parts = [self._process_value(v) for v in node.values]
+                if self.dense_mode:
+                    return f"({'&'.join(parts)})"
+                return f"({' and '.join(parts)})"
+            elif isinstance(node.op, ast.Or):
+                parts = [self._process_value(v) for v in node.values]
+                if self.dense_mode:
+                    return f"({'|'.join(parts)})"
+                return f"({' or '.join(parts)})"
+            return "?"
         elif isinstance(node, ast.IfExp):
             # Ternary: compact form
             cond = self._process_condition(node.test)
@@ -1567,3 +1580,311 @@ class FLOWCompiler:
         """Parse a complete expression as a statement"""
         expr = self._parse_expression_string(expr_str)
         return ast.Expr(value=expr)
+
+    def generate_ultra_dense_body(self, method_node: ast.FunctionDef, cid: str, 
+                                local_compressions: Dict[str, str],
+                                attr_compressions: Dict[str, str]) -> str:
+        """
+        Generate ultra-dense single-line body representation for maximum compression.
+        Uses semicolon separation and aggressive abbreviation.
+        """
+        body_parts = []
+        
+        for stmt in method_node.body:
+            # Skip docstrings completely in ultra-dense mode
+            if isinstance(stmt, ast.Expr) and isinstance(stmt.value, ast.Constant):
+                if isinstance(stmt.value.value, str):
+                    continue
+            
+            # Convert statement to ultra-compact form
+            compact_stmt = self._stmt_to_ultra_compact(stmt, local_compressions, attr_compressions)
+            if compact_stmt:
+                body_parts.append(compact_stmt)
+        
+        # Join with semicolons for single-line representation
+        return ';'.join(body_parts)
+
+    def _stmt_to_ultra_compact(self, stmt: ast.AST, 
+                            locals_map: Dict[str, str],
+                            attrs_map: Dict[str, str]) -> str:
+        """Convert a statement to ultra-compact inline form."""
+        
+        if isinstance(stmt, ast.Assign):
+            # Ultra-compact assignment: x=v instead of Lx=v
+            target = self._compress_target(stmt.targets[0], locals_map, attrs_map)
+            value = self._compress_value(stmt.value, locals_map, attrs_map)
+            return f"{target}={value}"
+        
+        elif isinstance(stmt, ast.AugAssign):
+            # Compact augmented: x+=1 instead of Sx=x+1
+            target = self._compress_target(stmt.target, locals_map, attrs_map)
+            op_map = {ast.Add: '+', ast.Sub: '-', ast.Mult: '*', ast.Div: '/'}
+            op = op_map.get(type(stmt.op), '?')
+            value = self._compress_value(stmt.value, locals_map, attrs_map)
+            return f"{target}{op}={value}"
+        
+        elif isinstance(stmt, ast.Return):
+            if stmt.value:
+                value = self._compress_value(stmt.value, locals_map, attrs_map)
+                return f"R{value}"  # No space after R
+            return "R"
+        
+        elif isinstance(stmt, ast.If):
+            # Ultra-compact if: (cond?t:f) for ternary, or (cond)t for simple
+            cond = self._compress_condition(stmt.test, locals_map, attrs_map)
+            
+            # Check if this is effectively a ternary
+            if len(stmt.body) == 1 and isinstance(stmt.body[0], ast.Return) and stmt.orelse:
+                if len(stmt.orelse) == 1 and isinstance(stmt.orelse[0], ast.Return):
+                    # Ternary return pattern
+                    true_val = self._compress_value(stmt.body[0].value, locals_map, attrs_map) if stmt.body[0].value else ""
+                    false_val = self._compress_value(stmt.orelse[0].value, locals_map, attrs_map) if stmt.orelse[0].value else ""
+                    return f"R({cond}?{true_val}:{false_val})"
+            
+            # Simple if with single statement
+            if len(stmt.body) == 1 and not stmt.orelse:
+                body_stmt = self._stmt_to_ultra_compact(stmt.body[0], locals_map, attrs_map)
+                return f"({cond}){body_stmt}"
+            
+            # Multi-statement if - use compact block notation
+            then_part = ';'.join(self._stmt_to_ultra_compact(s, locals_map, attrs_map) for s in stmt.body)
+            if stmt.orelse:
+                else_part = ';'.join(self._stmt_to_ultra_compact(s, locals_map, attrs_map) for s in stmt.orelse)
+                return f"({cond}?{{{then_part}}}:{{{else_part}}})"
+            return f"({cond}){{{then_part}}}"
+        
+        elif isinstance(stmt, ast.For):
+            # Ultra-compact for: @x,y{body} for iteration
+            target = self._compress_target(stmt.target, locals_map, attrs_map)
+            iter_val = self._compress_value(stmt.iter, locals_map, attrs_map)
+            body_parts = [self._stmt_to_ultra_compact(s, locals_map, attrs_map) for s in stmt.body]
+            body = ';'.join(filter(None, body_parts))
+            return f"@{target},{iter_val}{{{body}}}"
+        
+        elif isinstance(stmt, ast.Expr):
+            # Expression statement (usually function call)
+            if isinstance(stmt.value, ast.Call):
+                return self._compress_call(stmt.value, locals_map, attrs_map)
+            return self._compress_value(stmt.value, locals_map, attrs_map)
+        
+        elif isinstance(stmt, ast.Try):
+            # Ultra-compact try: T{body}X{handler}
+            body_parts = [self._stmt_to_ultra_compact(s, locals_map, attrs_map) for s in stmt.body]
+            body = ';'.join(filter(None, body_parts))
+            
+            if stmt.handlers:
+                handler = stmt.handlers[0]  # Take first handler
+                handler_parts = [self._stmt_to_ultra_compact(s, locals_map, attrs_map) for s in handler.body]
+                handler_body = ';'.join(filter(None, handler_parts))
+                exc_type = handler.type.id if handler.type and hasattr(handler.type, 'id') else ""
+                if exc_type:
+                    return f"T{{{body}}}X({exc_type}){{{handler_body}}}"
+                return f"T{{{body}}}X{{{handler_body}}}"
+            return f"T{{{body}}}"
+        
+        elif isinstance(stmt, ast.Pass):
+            return "_"  # Single underscore for pass
+        
+        elif isinstance(stmt, ast.Break):
+            return "B"
+        
+        elif isinstance(stmt, ast.Continue):
+            return "K"
+        
+        return ""
+
+    def _compress_target(self, node: ast.AST, locals_map: Dict[str, str], 
+                        attrs_map: Dict[str, str]) -> str:
+        """Compress assignment target with local and attribute mappings."""
+        if isinstance(node, ast.Name):
+            return locals_map.get(node.id, node.id[:1] if len(node.id) > 2 else node.id)
+        elif isinstance(node, ast.Attribute):
+            if isinstance(node.value, ast.Name) and node.value.id == 'self':
+                # Compress self.attr to s.x where x is compressed attr name
+                compressed_attr = attrs_map.get(node.attr, node.attr[:2])
+                return f"s.{compressed_attr}"
+            obj = self._compress_value(node.value, locals_map, attrs_map)
+            attr = attrs_map.get(node.attr, node.attr[:2])
+            return f"{obj}.{attr}"
+        elif isinstance(node, ast.Subscript):
+            obj = self._compress_value(node.value, locals_map, attrs_map)
+            idx = self._compress_value(node.slice, locals_map, attrs_map)
+            return f"{obj}[{idx}]"
+        return "?"
+
+    def _compress_value(self, node: ast.AST, locals_map: Dict[str, str],
+                    attrs_map: Dict[str, str]) -> str:
+        """Compress value with aggressive abbreviation."""
+        if node is None:
+            return "N"
+        elif isinstance(node, ast.Constant):
+            if node.value is True:
+                return "T"
+            elif node.value is False:
+                return "F"
+            elif node.value is None:
+                return "N"
+            elif isinstance(node.value, str):
+                # Check for pool reference
+                pool_id = self._get_pool_id(node.value)
+                if pool_id:
+                    return pool_id
+                # Short strings inline, quoted
+                if len(node.value) <= 3:
+                    return f"'{node.value}'"
+                # Hash longer strings for ultra-compression
+                return f"#{hash(node.value) % 1000:03d}"
+            return str(node.value)
+        elif isinstance(node, ast.Name):
+            if node.id == 'self':
+                return 's'
+            elif node.id == 'True':
+                return 'T'
+            elif node.id == 'False':
+                return 'F'
+            elif node.id == 'None':
+                return 'N'
+            return locals_map.get(node.id, node.id[:1] if len(node.id) > 2 else node.id)
+        elif isinstance(node, ast.Attribute):
+            obj = self._compress_value(node.value, locals_map, attrs_map)
+            attr = attrs_map.get(node.attr, node.attr[:2])
+            # Check for chain alias
+            full_chain = f"{obj}.{attr}"
+            alias = self._maybe_alias(full_chain)
+            return alias if alias else full_chain
+        elif isinstance(node, ast.Call):
+            return self._compress_call(node, locals_map, attrs_map)
+        elif isinstance(node, ast.List):
+            if not node.elts:
+                return "[]"
+            items = [self._compress_value(e, locals_map, attrs_map) for e in node.elts]
+            return f"[{','.join(items)}]"
+        elif isinstance(node, ast.Dict):
+            if not node.keys:
+                return "{}"
+            pairs = []
+            for k, v in zip(node.keys, node.values):
+                key = self._compress_value(k, locals_map, attrs_map) if k else ''
+                val = self._compress_value(v, locals_map, attrs_map)
+                pairs.append(f"{key}:{val}")
+            return f"{{{','.join(pairs)}}}"
+        elif isinstance(node, ast.BinOp):
+            left = self._compress_value(node.left, locals_map, attrs_map)
+            right = self._compress_value(node.right, locals_map, attrs_map)
+            op_map = {ast.Add: '+', ast.Sub: '-', ast.Mult: '*', ast.Div: '/'}
+            op = op_map.get(type(node.op), '?')
+            return f"{left}{op}{right}"
+        elif isinstance(node, ast.Compare):
+            return self._compress_condition(node, locals_map, attrs_map)
+        elif isinstance(node, ast.BoolOp):
+            # Handle boolean operations (and, or)
+            if isinstance(node.op, ast.And):
+                parts = [self._compress_value(v, locals_map, attrs_map) for v in node.values]
+                return f"({'&'.join(parts)})"
+            elif isinstance(node.op, ast.Or):
+                parts = [self._compress_value(v, locals_map, attrs_map) for v in node.values]
+                return f"({'|'.join(parts)})"
+            return "?"
+        elif isinstance(node, ast.UnaryOp):
+            operand = self._compress_value(node.operand, locals_map, attrs_map)
+            if isinstance(node.op, ast.Not):
+                return f"!{operand}"
+            elif isinstance(node.op, ast.USub):
+                return f"-{operand}"
+            return f"?{operand}"
+        elif isinstance(node, ast.Subscript):
+            obj = self._compress_value(node.value, locals_map, attrs_map)
+            idx = self._compress_value(node.slice, locals_map, attrs_map)
+            return f"{obj}[{idx}]"
+        return "?"
+
+    def _compress_call(self, node: ast.Call, locals_map: Dict[str, str],
+                    attrs_map: Dict[str, str]) -> str:
+        """Ultra-compact call notation."""
+        if isinstance(node.func, ast.Attribute):
+            obj = self._compress_value(node.func.value, locals_map, attrs_map)
+            method = attrs_map.get(node.func.attr, node.func.attr[:2])
+            
+            # Special compact patterns
+            if method == 'append' and len(node.args) == 1:
+                arg = self._compress_value(node.args[0], locals_map, attrs_map)
+                return f"{obj}+={arg}"  # Append as +=
+            elif method == 'get' and len(node.args) >= 1:
+                key = self._compress_value(node.args[0], locals_map, attrs_map)
+                if len(node.args) > 1:
+                    default = self._compress_value(node.args[1], locals_map, attrs_map)
+                    return f"{obj}[{key}]|{default}"  # get with default
+                return f"{obj}[{key}]?"  # get without default
+            
+            # General method call
+            args = [self._compress_value(a, locals_map, attrs_map) for a in node.args]
+            if args:
+                return f"{obj}.{method}({','.join(args)})"
+            return f"{obj}.{method}()"
+        elif isinstance(node.func, ast.Name):
+            func = locals_map.get(node.func.id, node.func.id[:2])
+            
+            # Built-in shortcuts
+            builtin_map = {
+                'print': '@',
+                'len': '#',
+                'str': '$',
+                'int': '%',
+                'isinstance': '?',
+            }
+            if node.func.id in builtin_map:
+                func = builtin_map[node.func.id]
+            
+            args = [self._compress_value(a, locals_map, attrs_map) for a in node.args]
+            if func in '@#$%?':
+                # Ultra-compact built-ins
+                return f"{func}{','.join(args)}"
+            return f"{func}({','.join(args)})"
+        return "?()"
+
+    def _compress_condition(self, node: ast.AST, locals_map: Dict[str, str],
+                        attrs_map: Dict[str, str]) -> str:
+        """Ultra-compact condition."""
+        if isinstance(node, ast.Compare):
+            left = self._compress_value(node.left, locals_map, attrs_map)
+            
+            if len(node.ops) == 1 and len(node.comparators) == 1:
+                right = self._compress_value(node.comparators[0], locals_map, attrs_map)
+                op = node.ops[0]
+                
+                # Ultra-compact operators
+                if isinstance(op, ast.Is) and isinstance(node.comparators[0], ast.Constant) and node.comparators[0].value is None:
+                    return f"{left}=N"  # is None
+                elif isinstance(op, ast.IsNot) and isinstance(node.comparators[0], ast.Constant) and node.comparators[0].value is None:
+                    return f"{left}!N"  # is not None
+                elif isinstance(op, ast.Eq):
+                    return f"{left}=={right}"
+                elif isinstance(op, ast.NotEq):
+                    return f"{left}!={right}"
+                elif isinstance(op, ast.In):
+                    return f"{left}in{right}"  # Use in 
+                elif isinstance(op, ast.NotIn):
+                    return f"{left}!in{right}"  # Use !in 
+                elif isinstance(op, ast.Lt):
+                    return f"{left}<{right}"
+                elif isinstance(op, ast.LtE):
+                    return f"{left}<={right}"
+                elif isinstance(op, ast.Gt):
+                    return f"{left}>{right}"
+                elif isinstance(op, ast.GtE):
+                    return f"{left}>={right}"
+
+            return f"{left}?"
+        
+        elif isinstance(node, ast.BoolOp):
+            # Handle boolean operations (and, or)
+            if isinstance(node.op, ast.And):
+                parts = [self._compress_condition(v, locals_map, attrs_map) for v in node.values]
+                return f"({'&'.join(parts)})"
+            elif isinstance(node.op, ast.Or):
+                parts = [self._compress_condition(v, locals_map, attrs_map) for v in node.values]
+                return f"({'|'.join(parts)})"
+            return "?"
+        
+        # Fallback to general value compression
+        return self._compress_value(node, locals_map, attrs_map)

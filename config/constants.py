@@ -23,3 +23,11 @@ CAI3_MAX_EDIT_SCOPE_METHODS = 2  # Maximum methods with full bodies in MEDIUM ti
 CAI3_MIN_BUG_SCORE = 10  # Minimum score threshold for method inclusion
 CAI3_AGGRESSIVE_NAME_COMPRESSION = True  # Use single/double char name compression
 CAI3_POOL_CONSTANTS = True  # Pool repeated constants and strings
+
+# CAI3 Enhanced Compression Settings
+CAI3_ULTRA_DENSE_MODE = True
+CAI3_SINGLE_LINE_BODIES = True
+CAI3_SKIP_SIGNATURES_WITH_BODIES = True
+CAI3_MAX_CHAIN_ALIASES = 5
+CAI3_MAX_POOL_ENTRIES = 10
+CAI3_MIN_CHAIN_USAGE_FOR_ALIAS = 3  # Increased from 2

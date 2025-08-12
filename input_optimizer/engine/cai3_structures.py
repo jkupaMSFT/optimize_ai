@@ -27,6 +27,18 @@ class NodeType(Enum):
     FUNCTION = "F"
     IMPORT = "I"
 
+class PatchOperation(Enum):
+    """CAI3 patch operation types"""
+    # Original operations
+    RB = "RB"  # Replace Body - replaces entire method/function body
+    AM = "AM"  # Add Method - adds a new method to a class
+    DM = "DM"  # Delete Method - removes a method from a class
+    
+    # Surgical edit operations
+    IL = "IL"  # Insert Line(s) at specific position
+    RL = "RL"  # Replace Line(s) at specific position
+    DL = "DL"  # Delete Line(s) at specific position
+
 @dataclass
 class CAI3Node:
     """Enhanced node with compression metadata"""
@@ -239,10 +251,10 @@ class CAI3Lite:
 class CAI3Patch:
     """Patch returned by LLM"""
     target_cid: str  # Target node cid
-    operation: str  # RB (replace body), AM (add method), etc.
+    operation: str  # RB (replace body), AM (add method), DM (delete method), IL (insert lines), RL (replace lines), DL (delete lines)
     body_fidelity: BodyFidelity
     body_content: str  # New dense FLOW content
-    metadata: Dict = field(default_factory=dict)
+    metadata: Dict = field(default_factory=dict)  # Can include line_start, line_end for surgical operations
     
     @classmethod
     def parse(cls, patch_text: str) -> List['CAI3Patch']:
@@ -256,7 +268,7 @@ class CAI3Patch:
                 i += 1
                 continue
                 
-            # Parse patch header (e.g., "1:TGT:cid=fn_1a2c OP:RB F=B1")
+            # Parse patch header (e.g., "1:TGT:cid=fn_1a2c OP:RL F=B1 L=5-7" for line operations)
             if ':TGT:' in lines[i]:
                 header = lines[i]
                 parts = header.split()
@@ -273,8 +285,33 @@ class CAI3Patch:
                 f_part = [p for p in parts if p.startswith('F=')][0]
                 fidelity = BodyFidelity[f_part.split('=')[1]]
                 
-                # Extract body content
+                # Extract metadata (e.g., line ranges for surgical operations)
+                metadata = {}
+                for part in parts:
+                    if part.startswith('L='):  # Line range: L=5-7 or L=5
+                        line_spec = part.split('=')[1]
+                        if '-' in line_spec:
+                            start, end = line_spec.split('-')
+                            metadata['line_start'] = int(start)
+                            metadata['line_end'] = int(end)
+                        else:
+                            metadata['line_start'] = int(line_spec)
+                            metadata['line_end'] = int(line_spec)
+                
+                # Move to next line to check for META or body content
                 i += 1
+                
+                # Check for META line after TGT line
+                if i < len(lines) and lines[i].startswith('META:'):
+                    # Parse metadata for surgical operations
+                    meta_content = lines[i][5:].strip()
+                    for meta_item in meta_content.split(','):
+                        if '=' in meta_item:
+                            key, value = meta_item.split('=', 1)
+                            metadata[key.strip()] = value.strip()
+                    i += 1
+                
+                # Extract body content
                 if i < len(lines) and lines[i].startswith('B:'):
                     i += 1
                     body_lines = []
@@ -288,7 +325,8 @@ class CAI3Patch:
                         target_cid=cid,
                         operation=operation,
                         body_fidelity=fidelity,
-                        body_content=body_content
+                        body_content=body_content,
+                        metadata=metadata
                     ))
             i += 1
         

@@ -132,10 +132,10 @@ def test_string_pooling():
     for pattern, count in sorted(patterns.items(), key=lambda x: x[1], reverse=True):
         print(f"  {pattern}: {count} times")
     
-    # Verify some expected patterns
+    # Verify some expected patterns - updated for our enhanced compression
     assert any('dt.now' in pattern for pattern in patterns), "Should detect datetime.now patterns"
     assert any('.items' in pattern for pattern in patterns), "Should detect .items() patterns"
-    assert any('.get' in pattern for pattern in patterns), "Should detect .get() patterns"
+    assert any('s.c.g' in pattern for pattern in patterns), "Should detect config.get patterns (compressed as s.c.g)"
     
     print("✓ String pooling test passed!")
 

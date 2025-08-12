@@ -122,7 +122,7 @@ class DataProcessor:
         return results
 '''
 
-TEST_SOURCE = "def fibonacci_sequence(max_value=None, max_count=None):\n    '''Generate Fibonacci sequence with optional limits.'''\n    a, b = 0, 1\n    count = 0\n    \n    while True:\n        if max_count and count >= max_count:\n            break\n        if max_value and a > max_value:\n            break\n            \n        yield a\n        a, b = b, a + b\n        count += 1\n\ndef prime_fibonacci(limit=1000):\n    '''Generate prime numbers from Fibonacci sequence.'''\n    def is_prime(n):\n        if n < 2:\n            return False\n        for i in range(2, int(n ** 0.5) + 1):\n            if n % i == 0:\n                return False\n        return True\n    \n    for fib in fibonacci_sequence(max_value=limit):\n        if is_prime(fib):\n            yield fib"
+#TEST_SOURCE = "def fibonacci_sequence(max_value=None, max_count=None):\n    '''Generate Fibonacci sequence with optional limits.'''\n    a, b = 0, 1\n    count = 0\n    \n    while True:\n        if max_count and count >= max_count:\n            break\n        if max_value and a > max_value:\n            break\n            \n        yield a\n        a, b = b, a + b\n        count += 1\n\ndef prime_fibonacci(limit=1000):\n    '''Generate prime numbers from Fibonacci sequence.'''\n    def is_prime(n):\n        if n < 2:\n            return False\n        for i in range(2, int(n ** 0.5) + 1):\n            if n % i == 0:\n                return False\n        return True\n    \n    for fib in fibonacci_sequence(max_value=limit):\n        if is_prime(fib):\n            yield fib"
 
 def test_enhanced_compression():
     """Test the enhanced CAI3 compression"""

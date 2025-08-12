@@ -763,7 +763,8 @@ class CAI3WaterfallEnhancement:
                 'pool_map': pool_map,  # Store centralized pool map
                 'chain_aliases': chain_aliases,  # Store chain aliases in metadata
                 'string_frequency': string_frequency,
-                'chain_frequency': chain_patterns
+                'chain_frequency': chain_patterns,
+                'cid_aliases': {}  # Will be populated during LITE creation
             }
         )
         
@@ -1244,12 +1245,21 @@ class CAI3WaterfallEnhancement:
             # Span and byte mappings
             if node.span:
                 span_map[node.cid] = node.span
+                # Also add short36 version for alias resolution
+                short_cid = short36(node.cid)[:4]
+                span_map[short_cid] = node.span
             if node.byte_span:
                 byte_map[node.cid] = node.byte_span
+                # Also add short36 version
+                short_cid = short36(node.cid)[:4]
+                byte_map[short_cid] = node.byte_span
             
             # Context hashes
             if node.context_hash:
                 context_hashes[node.cid] = node.context_hash
+                # Also add short36 version
+                short_cid = short36(node.cid)[:4]
+                context_hashes[short_cid] = node.context_hash
             
             # Parent-child relationships
             if node.parent_cid:
@@ -1315,6 +1325,10 @@ class CAI3WaterfallEnhancement:
             alias_char = chr(97 + (i // 10))  # a, b, c...
             alias_num = i % 10
             cid_alias_map[cid] = f"{alias_char}{alias_num}"
+        
+        # Store CID aliases in CAI3Full for translator access
+        if cid_alias_map:
+            cai3_full.compression_stats['cid_aliases'] = cid_alias_map
         
         # Ultra-compact CID section: X:a0=5mn3,a1=e0wr
         cid_aliases_section = None

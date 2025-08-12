@@ -112,9 +112,14 @@ class FLOWCompiler:
         """Set centralized pool map (value -> pool_id) directly"""
         self.constant_pool = pool_map.copy()
     
+    def set_pools(self, pools: Dict[str, Any]):
+        """Set pools for p\d+ resolution"""
+        self.pools = pools if pools else {}
+    
     def set_chain_aliases(self, chain_aliases: Dict[str, str]):
-        """Set chain aliases from external source (e.g., g0=s.c.g)"""
-        # Reverse the mapping for lookup: full_chain -> alias
+        """Set chain aliases from external source (e.g., g1=s.config.get)"""
+        self.chain_aliases = chain_aliases if chain_aliases else {}
+        # Also reverse the mapping for lookup: full_chain -> alias
         for alias, full_chain in chain_aliases.items():
             self.alias_chains_dict[full_chain] = alias
     
@@ -980,6 +985,37 @@ class FLOWCompiler:
             elif macro == 'C':
                 return self._parse_call(line), 1
         
+        # Add handling for compressed for loop: @f,r{...}
+        elif line.startswith('@') and ',' in line and '{' in line:
+            # Handle compressed for loop: @variable,iterable{body}
+            # Extract parts: @variable,iterable{body}
+            at_idx = line.index('@')
+            comma_idx = line.index(',')
+            brace_idx = line.index('{')
+            
+            target_str = line[at_idx+1:comma_idx]
+            iter_str = line[comma_idx+1:brace_idx]
+            body_str = line[brace_idx+1:line.rindex('}')]
+            
+            # Parse target and iterator
+            target = ast.Name(id=self._expand_compressed_name(target_str), ctx=ast.Store())
+            iter_expr = self._parse_expression_string(iter_str)
+            
+            # Parse body statements
+            body_stmts = []
+            for stmt_str in body_str.split(';'):
+                if stmt_str.strip():
+                    stmt, _ = self._parse_flow_statement([stmt_str.strip()], 0)
+                    if stmt:
+                        body_stmts.append(stmt)
+            
+            return ast.For(target=target, iter=iter_expr, body=body_stmts or [ast.Pass()], orelse=[]), 1
+        
+        # Check for assignment without L prefix (e.g., "r=g1(...)")
+        if '=' in line and not any(op in line for op in ['==', '!=', '<=', '>=']):
+            # This is likely an assignment without L prefix
+            return self._parse_assignment(line), 1
+        
         # If we can't parse it, treat as expression
         try:
             return self._parse_expression(line), 1
@@ -1006,12 +1042,23 @@ class FLOWCompiler:
                     stmt_str = stmt_str.strip()
                     if stmt_str:
                         # Parse individual statement
-                        if stmt_str.startswith('L') and '=' in stmt_str:
+                        if '=' in stmt_str and not any(op in stmt_str for op in ['==', '!=', '<=', '>=']):
+                            # Assignment (with or without L prefix)
                             stmt = self._parse_assignment(stmt_str)
-                        elif stmt_str == 'R':
+                        elif stmt_str == 'RF':
+                            # Return False
+                            stmt = ast.Return(value=ast.Constant(value=False))
+                        elif stmt_str == 'RT':
+                            # Return True  
+                            stmt = ast.Return(value=ast.Constant(value=True))
+                        elif stmt_str == 'RN':
+                            # Return None
                             stmt = ast.Return(value=None)
                         elif stmt_str.startswith('R') and len(stmt_str) > 1:
-                            stmt = self._parse_return(stmt_str)
+                            # Return with value
+                            value_str = stmt_str[1:]
+                            value = self._parse_expression_string(value_str)
+                            stmt = ast.Return(value=value)
                         elif stmt_str == '_':
                             stmt = ast.Pass()
                         elif stmt_str == 'B':
@@ -1020,25 +1067,25 @@ class FLOWCompiler:
                             stmt = ast.Continue()
                         elif stmt_str.startswith('@'):
                             stmt = self._parse_print(stmt_str)
-                        elif stmt_str.startswith('A '):
-                            # Parse append operation: A list,item
-                            parts = stmt_str[2:].split(',', 1)
-                            if len(parts) == 2:
-                                list_name = parts[0].strip()
-                                item_expr = self._parse_expression_string(parts[1].strip())
-                                list_obj = ast.Name(id=list_name, ctx=ast.Load())
-                                append_call = ast.Call(
-                                    func=ast.Attribute(value=list_obj, attr='append', ctx=ast.Load()),
-                                    args=[item_expr],
-                                    keywords=[]
-                                )
-                                stmt = ast.Expr(value=append_call)
-                            else:
-                                stmt = ast.Pass()
+                        elif stmt_str.endswith('+=1') or stmt_str.endswith('+= 1'):
+                            # Increment operation: x+=1
+                            target_str = stmt_str.split('+=')[0].strip()
+                            target_name = self._expand_compressed_name(target_str)
+                            if target_name in self.reverse_map:
+                                target_name = self.reverse_map[target_name]
+                            target = ast.Name(id=target_name, ctx=ast.Store())
+                            value = ast.BinOp(
+                                left=ast.Name(id=target_name, ctx=ast.Load()),
+                                op=ast.Add(),
+                                right=ast.Constant(value=1)
+                            )
+                            stmt = ast.Assign(targets=[target], value=value)
                         else:
-                            # Try parsing as expression
-                            stmt, _ = self._parse_flow_statement([stmt_str], 0)
-                            if not stmt:
+                            # Try parsing as expression statement
+                            try:
+                                expr_ast = self._parse_expression_string(stmt_str)
+                                stmt = ast.Expr(value=expr_ast)
+                            except:
                                 stmt = ast.Pass()
                         
                         if stmt:
@@ -1063,10 +1110,20 @@ class FLOWCompiler:
                         # Parse individual statement
                         if stmt_str.startswith('L') and '=' in stmt_str:
                             stmt = self._parse_assignment(stmt_str)
-                        elif stmt_str == 'R':
+                        elif stmt_str == 'RF':
+                            # Return False
+                            stmt = ast.Return(value=ast.Constant(value=False))
+                        elif stmt_str == 'RT':
+                            # Return True  
+                            stmt = ast.Return(value=ast.Constant(value=True))
+                        elif stmt_str == 'RN':
+                            # Return None
                             stmt = ast.Return(value=None)
                         elif stmt_str.startswith('R') and len(stmt_str) > 1:
-                            stmt = self._parse_return(stmt_str)
+                            # Return with value
+                            value_str = stmt_str[1:]
+                            value = self._parse_expression_string(value_str)
+                            stmt = ast.Return(value=value)
                         elif stmt_str == '_':
                             stmt = ast.Pass()
                         elif stmt_str == 'B':
@@ -1111,10 +1168,20 @@ class FLOWCompiler:
                         # Parse individual statement
                         if stmt_str.startswith('L') and '=' in stmt_str:
                             stmt = self._parse_assignment(stmt_str)
-                        elif stmt_str == 'R':
+                        elif stmt_str == 'RF':
+                            # Return False
+                            stmt = ast.Return(value=ast.Constant(value=False))
+                        elif stmt_str == 'RT':
+                            # Return True  
+                            stmt = ast.Return(value=ast.Constant(value=True))
+                        elif stmt_str == 'RN':
+                            # Return None
                             stmt = ast.Return(value=None)
                         elif stmt_str.startswith('R') and len(stmt_str) > 1:
-                            stmt = self._parse_return(stmt_str)
+                            # Return with value
+                            value_str = stmt_str[1:]
+                            value = self._parse_expression_string(value_str)
+                            stmt = ast.Return(value=value)
                         elif stmt_str == '_':
                             stmt = ast.Pass()
                         elif stmt_str == 'B':
@@ -1153,13 +1220,24 @@ class FLOWCompiler:
         return ast.Pass()
     
     def _parse_assignment(self, line: str) -> ast.AST:
-        """Parse assignment: Lx=value"""
-        # Remove L prefix
-        assign_str = line[1:]
+        """Parse assignment: Lx=value or x=value"""
+        # Remove L prefix if present
+        if line.startswith('L'):
+            assign_str = line[1:]
+        else:
+            assign_str = line
         
         if '=' in assign_str:
             target_str, value_str = assign_str.split('=', 1)
-            target = ast.Name(id=target_str.strip(), ctx=ast.Store())
+            target_name = target_str.strip()
+            
+            # Apply name mapping for target
+            if target_name in self.reverse_map:
+                target_name = self.reverse_map[target_name]
+            elif target_name in self.name_map:
+                target_name = self.name_map[target_name]
+            
+            target = ast.Name(id=target_name, ctx=ast.Store())
             value = self._parse_expression_string(value_str.strip())
             return ast.Assign(targets=[target], value=value)
         
@@ -1447,14 +1525,26 @@ class FLOWCompiler:
             var = ast.Name(id=var_str, ctx=ast.Load())
             return ast.Compare(left=var, ops=[ast.IsNot()], comparators=[ast.Constant(value=None)])
         
-        # Handle binary operators with ASCII
+        # Handle compressed "not in" pattern: f!ina -> f not in a
+        if '!' in condition_str and 'in' in condition_str:
+            # Look for pattern like "f!ina" which should be "f not in a"
+            exclamation_idx = condition_str.index('!')
+            if exclamation_idx > 0 and condition_str[exclamation_idx:exclamation_idx+3] == '!in':
+                # Split at the exclamation mark
+                left_str = condition_str[:exclamation_idx]
+                right_str = condition_str[exclamation_idx+3:]  # Skip "!in"
+                left = self._parse_expression_string(left_str.strip())
+                right = self._parse_expression_string(right_str.strip())
+                return ast.Compare(left=left, ops=[ast.NotIn()], comparators=[right])
+        
+        # Handle binary operators with ASCII - order matters!
         for op_text, op_class in [
-            ('!in', ast.NotIn),
-            ('in', ast.In),
             ('!=', ast.NotEq),
             ('==', ast.Eq),
             ('<=', ast.LtE),
             ('>=', ast.GtE),
+            ('!in', ast.NotIn),  # This should come after the compressed pattern above
+            ('in', ast.In),
             ('<', ast.Lt),
             ('>', ast.Gt),
         ]:
@@ -1471,30 +1561,61 @@ class FLOWCompiler:
         """Parse an expression string, handling dense notation"""
         expr_str = expr_str.strip()
         
-        # Handle pooled constants
+        # Handle pooled constants first
         if expr_str.startswith('p') and expr_str[1:].isdigit():
             # Pool reference
             pool_id = expr_str
-            if pool_id in self.constant_pool:
+            if hasattr(self, 'pools') and pool_id in self.pools:
+                return ast.Constant(value=self.pools[pool_id])
+            elif pool_id in self.constant_pool:
                 # Find the original value
                 for value, pid in self.constant_pool.items():
                     if pid == pool_id:
                         return ast.Constant(value=value)
             return ast.Constant(value=f"POOL_{pool_id}")
         
-        # Handle chain aliases (gN)
-        if expr_str.startswith('g') and expr_str[1:].isdigit():
-            # Chain alias reference
-            alias_id = expr_str
-            if alias_id in self.alias_chains_dict:
-                chain = self.alias_chains_dict[alias_id]
-                return self._parse_expression_string(chain)
-            return ast.Name(id=f"ALIAS_{alias_id}", ctx=ast.Load())
+        # Handle chain aliases (gN) - including function calls
+        if expr_str.startswith('g') and len(expr_str) > 1:
+            # Check if it's a function call like g1(...)
+            if '(' in expr_str:
+                paren_idx = expr_str.index('(')
+                alias_id = expr_str[:paren_idx]
+                args_part = expr_str[paren_idx:]
+                
+                # Resolve the alias
+                if hasattr(self, 'chain_aliases') and alias_id in self.chain_aliases:
+                    chain = self.chain_aliases[alias_id]
+                    # Handle the special case where chain already includes parentheses
+                    if chain.endswith('()'):
+                        chain = chain[:-2]  # Remove the () from the chain
+                    return self._parse_expression_string(chain + args_part)
+            else:
+                # Non-function alias
+                alias_id = expr_str
+                if hasattr(self, 'chain_aliases') and alias_id in self.chain_aliases:
+                    chain = self.chain_aliases[alias_id]
+                    return self._parse_expression_string(chain)
+            
+            # Fallback to existing logic for backward compatibility
+            if expr_str[1:].isdigit():
+                alias_id = expr_str
+                if alias_id in self.alias_chains_dict:
+                    chain = self.alias_chains_dict[alias_id]
+                    return self._parse_expression_string(chain)
+                return ast.Name(id=f"ALIAS_{alias_id}", ctx=ast.Load())
+        
+        # Handle method calls with arguments: obj.method(args)
+        if '(' in expr_str and ')' in expr_str:
+            return self._parse_call_with_args(expr_str)
+        
+        # Handle attribute access: obj.attr
+        if '.' in expr_str and not self._is_number(expr_str):
+            return self._parse_attribute_access(expr_str)
         
         # Handle dense builtins
         dense_builtins = {
             'T': 'True',
-            'F': 'False',
+            'F': 'False', 
             'N': 'None',
             's': 'self',
             'c': 'cls',
@@ -1522,38 +1643,188 @@ class FLOWCompiler:
                 return ast.List(elts=items, ctx=ast.Load())
         
         # Handle string literals
-        if expr_str.startswith("'") and expr_str.endswith("'"):
+        if (expr_str.startswith('"') and expr_str.endswith('"')) or (expr_str.startswith("'") and expr_str.endswith("'")):
             return ast.Constant(value=expr_str[1:-1])
         
         # Handle numbers
         try:
-            if '.' in expr_str:
+            if '.' in expr_str and self._is_number(expr_str):
                 return ast.Constant(value=float(expr_str))
-            else:
+            elif expr_str.isdigit() or (expr_str.startswith('-') and expr_str[1:].isdigit()):
                 return ast.Constant(value=int(expr_str))
         except ValueError:
             pass
         
         # Handle binary operations
         for op_char, op_class in [
-            ('+', ast.Add),
-            ('-', ast.Sub),
-            ('*', ast.Mult),
-            ('/', ast.Div),
+            ('==', ast.Eq), ('!=', ast.NotEq), ('<=', ast.LtE), ('>=', ast.GtE),
+            ('<', ast.Lt), ('>', ast.Gt), ('!in', ast.NotIn), ('in', ast.In),
+            ('+', ast.Add), ('-', ast.Sub), ('*', ast.Mult), ('/', ast.Div),
         ]:
             if op_char in expr_str:
                 parts = expr_str.split(op_char, 1)
                 if len(parts) == 2:
                     left = self._parse_expression_string(parts[0].strip())
                     right = self._parse_expression_string(parts[1].strip())
-                    return ast.BinOp(left=left, op=op_class(), right=right)
+                    if op_char in ['==', '!=', '<=', '>=', '<', '>', 'in', '!in']:
+                        op_map = {
+                            '==': ast.Eq(), '!=': ast.NotEq(), '<=': ast.LtE(), '>=': ast.GtE(),
+                            '<': ast.Lt(), '>': ast.Gt(), 'in': ast.In(), '!in': ast.NotIn()
+                        }
+                        return ast.Compare(left=left, ops=[op_map[op_char]], comparators=[right])
+                    else:
+                        return ast.BinOp(left=left, op=op_class(), right=right)
         
-        # Default: treat as variable name
         # Apply name mapping if available
         if expr_str in self.reverse_map:
             expr_str = self.reverse_map[expr_str]
+        elif expr_str in self.name_map:
+            expr_str = self.name_map[expr_str]
         
+        # Default: treat as variable name
         return ast.Name(id=expr_str, ctx=ast.Load())
+    
+    def _is_number(self, s: str) -> bool:
+        """Check if string represents a number"""
+        try:
+            float(s)
+            return True
+        except ValueError:
+            return False
+    
+    def _parse_call_with_args(self, expr_str: str) -> ast.AST:
+        """Parse method call with arguments: obj.method(args) or g1(args)"""
+        # Find the function part and args part
+        paren_idx = expr_str.index('(')
+        func_part = expr_str[:paren_idx]
+        args_part = expr_str[paren_idx+1:-1]  # Remove ( and )
+        
+        # Check if func_part is a chain alias first (gN)
+        if func_part.startswith('g') and func_part[1:].isdigit():
+            alias_id = func_part
+            if hasattr(self, 'chain_aliases') and alias_id in self.chain_aliases:
+                chain = self.chain_aliases[alias_id]
+                # Parse the chain as an attribute access
+                func_ast = self._parse_expression_string(chain)
+            elif alias_id in self.alias_chains_dict:
+                chain = self.alias_chains_dict[alias_id]
+                # Parse the chain as an attribute access
+                func_ast = self._parse_expression_string(chain)
+            else:
+                # Fallback to treating as a regular name
+                func_ast = ast.Name(id=f"ALIAS_{alias_id}", ctx=ast.Load())
+        else:
+            # Parse the function (could be an attribute access)
+            func_ast = self._parse_attribute_access(func_part)
+        
+        # Parse arguments
+        args = []
+        if args_part.strip():
+            # Split by commas, but handle nested structures
+            arg_strs = self._split_args(args_part)
+            for arg_str in arg_strs:
+                if arg_str.strip():
+                    args.append(self._parse_expression_string(arg_str.strip()))
+        
+        return ast.Call(func=func_ast, args=args, keywords=[])
+    
+    def _parse_attribute_access(self, expr_str: str) -> ast.AST:
+        """Parse attribute access: obj.attr or s.c.ge"""
+        parts = expr_str.split('.')
+        
+        # Start with the first part
+        result = self._parse_simple_name(parts[0])
+        
+        # Build the attribute chain
+        for attr in parts[1:]:
+            # Expand compressed attribute names
+            attr = self._expand_compressed_name(attr)
+            result = ast.Attribute(value=result, attr=attr, ctx=ast.Load())
+        
+        return result
+    
+    def _parse_simple_name(self, name: str) -> ast.AST:
+        """Parse a simple name, applying mappings"""
+        # Apply reverse name mapping
+        if name in self.reverse_map:
+            name = self.reverse_map[name]
+        elif name in self.name_map:
+            name = self.name_map[name]
+        
+        # Handle dense builtins
+        dense_builtins = {
+            'T': 'True', 'F': 'False', 'N': 'None',
+            's': 'self', 'c': 'cls'
+        }
+        if name in dense_builtins:
+            expanded = dense_builtins[name]
+            if expanded in ['True', 'False', 'None']:
+                return ast.Constant(value=eval(expanded))
+            return ast.Name(id=expanded, ctx=ast.Load())
+        
+        return ast.Name(id=name, ctx=ast.Load())
+    
+    def _expand_compressed_name(self, name: str) -> str:
+        """Expand compressed attribute names"""
+        # Common compression mappings
+        attr_expansions = {
+            'c': 'config',
+            'ge': 'get',
+            'se': 'set', 
+            'it': 'items',
+            'no': 'now',
+            'lo': 'loads',
+            'x': 'processed_count',
+            'e': 'error_count', 
+            'd': 'data_buffer'
+        }
+        
+        # Apply reverse name mapping first
+        if name in self.reverse_map:
+            return self.reverse_map[name]
+        elif name in self.name_map:
+            return self.name_map[name]
+        
+        # Apply common expansions
+        return attr_expansions.get(name, name)
+    
+    def _split_args(self, args_str: str) -> List[str]:
+        """Split argument string by commas, respecting nested structures"""
+        args = []
+        current_arg = ""
+        paren_depth = 0
+        bracket_depth = 0
+        in_quotes = False
+        quote_char = None
+        
+        for char in args_str:
+            if char in ['"', "'"]:
+                if not in_quotes:
+                    in_quotes = True
+                    quote_char = char
+                elif char == quote_char:
+                    in_quotes = False
+                    quote_char = None
+            elif not in_quotes:
+                if char == '(':
+                    paren_depth += 1
+                elif char == ')':
+                    paren_depth -= 1
+                elif char == '[':
+                    bracket_depth += 1
+                elif char == ']':
+                    bracket_depth -= 1
+                elif char == ',' and paren_depth == 0 and bracket_depth == 0:
+                    args.append(current_arg)
+                    current_arg = ""
+                    continue
+            
+            current_arg += char
+        
+        if current_arg:
+            args.append(current_arg)
+        
+        return args
     
     def _parse_call_expression(self, call_str: str) -> ast.AST:
         """Parse a function call expression: C(func,args)"""
@@ -1797,6 +2068,30 @@ class FLOWCompiler:
             idx = self._compress_value(node.slice, locals_map, attrs_map)
             return f"{obj}[{idx}]"
         return "?"
+
+    def _expand_name(self, name: str) -> str:
+        """Expand compressed names using all available mappings."""
+        # Check dense builtins first
+        dense_builtins = {
+            's': 'self',
+            'c': 'cls',
+            'T': 'True',
+            'F': 'False',
+            'N': 'None',
+        }
+        if name in dense_builtins:
+            return dense_builtins[name]
+        
+        # Check reverse name map
+        if name in self.reverse_map:
+            return self.reverse_map[name]
+        
+        # Check name map (shouldn't normally happen but for safety)
+        if name in self.name_map:
+            return self.name_map[name]
+        
+        # Return as-is if no mapping found
+        return name
 
     def _compress_call(self, node: ast.Call, locals_map: Dict[str, str],
                     attrs_map: Dict[str, str]) -> str:

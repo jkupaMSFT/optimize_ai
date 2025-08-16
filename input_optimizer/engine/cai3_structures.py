@@ -12,6 +12,7 @@ from typing import Dict, List, Optional, Tuple, Set
 from enum import Enum
 import hashlib
 import json
+import logging
 from pathlib import Path
 
 class BodyFidelity(Enum):
@@ -67,6 +68,7 @@ class CAI3Full:
     python_version: str = "3.11"
     file_hash: str = ""  # Hash of original file
     compression_stats: Dict = field(default_factory=dict)
+    hash_to_value: Dict[str, str] = field(default_factory=dict)  # Hash reference mapping (e.g., "#911" -> "database_url")
     
     def to_json(self) -> str:
         """Serialize to JSON for caching"""
@@ -92,6 +94,7 @@ class CAI3Full:
             'pools': self.pools,
             'bound_hashes': self.bound_hashes,
             'span_hashes': self.span_hashes,
+            'hash_to_value': self.hash_to_value,
             'source_path': self.source_path,
             'python_version': self.python_version,
             'file_hash': self.file_hash,
@@ -125,6 +128,7 @@ class CAI3Full:
             pools=data['pools'],
             bound_hashes=data['bound_hashes'],
             span_hashes=data['span_hashes'],
+            hash_to_value=data.get('hash_to_value', {}),
             source_path=data['source_path'],
             python_version=data.get('python_version', '3.11'),
             file_hash=data.get('file_hash', ''),
@@ -142,6 +146,7 @@ class CAI3Map:
     context_hashes: Dict[str, str]  # cid -> context hash for validation
     parent_map: Dict[str, str]  # cid -> parent_cid
     children_map: Dict[str, List[str]]  # parent_cid -> [child_cids]
+    minified_source: Optional[str] = None  # Minified source used for context hash computation
     
     def to_json(self) -> str:
         """Serialize to JSON for caching"""
@@ -153,7 +158,8 @@ class CAI3Map:
             'ast_paths': self.ast_paths,
             'context_hashes': self.context_hashes,
             'parent_map': self.parent_map,
-            'children_map': self.children_map
+            'children_map': self.children_map,
+            'minified_source': self.minified_source
         }, indent=2)
     
     @classmethod
@@ -168,7 +174,8 @@ class CAI3Map:
             ast_paths=data['ast_paths'],
             context_hashes=data['context_hashes'],
             parent_map=data['parent_map'],
-            children_map=data['children_map']
+            children_map=data['children_map'],
+            minified_source=data.get('minified_source')  # Optional for backward compatibility
         )
 
 @dataclass
@@ -273,17 +280,40 @@ class CAI3Patch:
                 header = lines[i]
                 parts = header.split()
                 
-                # Extract cid
-                cid_part = [p for p in parts if p.startswith('cid=')][0]
-                cid = cid_part.split('=')[1]
+                # Extract cid - make it robust
+                cid_parts = [p for p in parts if 'cid=' in p]
+                if not cid_parts:
+                    logging.warning(f"No CID found in patch header: {header}")
+                    i += 1
+                    continue
+                # Extract the CID value after 'cid='
+                cid_part = cid_parts[0]
+                if 'cid=' in cid_part:
+                    cid = cid_part.split('cid=')[1]
+                else:
+                    logging.warning(f"Invalid CID format in patch header: {header}")
+                    i += 1
+                    continue
                 
-                # Extract operation
-                op_part = [p for p in parts if p.startswith('OP:')][0]
-                operation = op_part.split(':')[1]
+                # Extract operation - make it robust
+                op_parts = [p for p in parts if p.startswith('OP:')]
+                if not op_parts:
+                    logging.warning(f"No operation found in patch header: {header}")
+                    i += 1
+                    continue
+                operation = op_parts[0].split(':')[1]
                 
-                # Extract fidelity
-                f_part = [p for p in parts if p.startswith('F=')][0]
-                fidelity = BodyFidelity[f_part.split('=')[1]]
+                # Extract fidelity - make it robust with default
+                f_parts = [p for p in parts if p.startswith('F=')]
+                if f_parts:
+                    try:
+                        fidelity = BodyFidelity[f_parts[0].split('=')[1]]
+                    except KeyError:
+                        logging.warning(f"Unknown fidelity type, using B1: {f_parts[0]}")
+                        fidelity = BodyFidelity.B1
+                else:
+                    logging.warning(f"No fidelity found in patch header, using B1: {header}")
+                    fidelity = BodyFidelity.B1
                 
                 # Extract metadata (e.g., line ranges for surgical operations)
                 metadata = {}

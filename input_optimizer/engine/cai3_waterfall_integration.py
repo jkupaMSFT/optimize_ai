@@ -204,7 +204,7 @@ class CAI3WaterfallEnhancement:
             self.logger.debug("Edit scope CIDs: %s", edit_scope_cids)
             assert edit_scope_cids, "No edit-scope CIDs selected; bodies would be empty."
             
-            cai3_map = self._create_cai3_map_enhanced(cai3_full)
+            cai3_map = self._create_cai3_map_enhanced(cai3_full, minified_source)
             cai3_lite = self._create_cai3_lite_dense_ultra(cai3_full, cai3_map, edit_scope_cids, cid_index, minified_source, tree)
             
             # Store FULL and MAP locally
@@ -1207,7 +1207,7 @@ class CAI3WaterfallEnhancement:
         # Final fallback
         return attr_name[:3].lower()
     
-    def _create_cai3_map_enhanced(self, cai3_full: CAI3Full) -> CAI3Map:
+    def _create_cai3_map_enhanced(self, cai3_full: CAI3Full, minified_source: str = None) -> CAI3Map:
         """Create enhanced mapping with local compressions"""
         name_map = {}
         reverse_name_map = {}
@@ -1276,7 +1276,8 @@ class CAI3WaterfallEnhancement:
             ast_paths=ast_paths,
             context_hashes=context_hashes,
             parent_map=parent_map,
-            children_map=children_map
+            children_map=children_map,
+            minified_source=minified_source
         )
 
 
@@ -1328,7 +1329,18 @@ class CAI3WaterfallEnhancement:
         
         # Store CID aliases in CAI3Full for translator access
         if cid_alias_map:
-            cai3_full.compression_stats['cid_aliases'] = cid_alias_map
+            # Store the REVERSE mapping for proper resolution
+            cid_alias_reverse = {}
+            for cid, alias in cid_alias_map.items():
+                # Store alias -> full CID for resolution
+                cid_alias_reverse[alias] = cid
+                # Also store short hash -> full CID
+                short_hash = short36(cid)[:4]
+                cid_alias_reverse[short_hash] = cid
+            
+            # Store BOTH mappings
+            cai3_full.compression_stats['cid_aliases'] = cid_alias_reverse
+            cai3_full.compression_stats['cid_to_alias'] = cid_alias_map
         
         # Ultra-compact CID section: X:a0=5mn3,a1=e0wr
         cid_aliases_section = None
@@ -1439,6 +1451,16 @@ class CAI3WaterfallEnhancement:
                     except Exception as e:
                         self.logger.warning(f"Failed to create ultra-dense body for {cid}: {e}")
         
+            # Transfer hash mappings from flow compiler to CAI3Full
+            if hasattr(flow_compiler, 'hash_to_value') and flow_compiler.hash_to_value:
+                if not hasattr(cai3_full, 'hash_to_value') or cai3_full.hash_to_value is None:
+                    cai3_full.hash_to_value = {}
+                
+                # Convert to legacy format for CAI3Full compatibility
+                legacy_mapping = flow_compiler.get_legacy_hash_mapping() if hasattr(flow_compiler, 'get_legacy_hash_mapping') else flow_compiler.hash_to_value
+                cai3_full.hash_to_value.update(legacy_mapping)
+                self.logger.debug(f"Transferred {len(legacy_mapping)} hash mappings to CAI3Full")
+        
         # Filter pools to only referenced ones
         pool_section = None
         if bodies:
@@ -1458,7 +1480,12 @@ class CAI3WaterfallEnhancement:
                         # Ultra-compress pool values
                         if len(value) > 10:
                             # Use hash for long strings
-                            compressed_val = f"#{hash(value) % 10000:04d}"
+                            hash_val = hash(value) % 10000
+                            compressed_val = f"#{hash_val:04d}"
+                            # Store the mapping for later resolution
+                            if not hasattr(cai3_full, 'hash_to_value'):
+                                cai3_full.hash_to_value = {}
+                            cai3_full.hash_to_value[compressed_val] = value
                         else:
                             compressed_val = value
                         pool_items.append(f"{pool_id}={compressed_val}")

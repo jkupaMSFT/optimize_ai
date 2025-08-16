@@ -15,8 +15,11 @@ from datetime import datetime
 
 # Import existing Optimize AI components
 sys.path.append(str(Path(__file__).parent.parent.parent))
+from input_optimizer.engine.cai3_waterfall_integration import CAI3WaterfallEnhancement
 from input_optimizer.engine.waterfall_compressor import WaterfallCompressor, count_tokens
 from output_translator.core.translator import CAIToPythonTranslator
+from input_optimizer.engine.cai3_translator import CAI3Translator
+from input_optimizer.engine.cai3_structures import CAI3Patch, CAI3Cache
 from core.session_manager import SecureSessionManager
 from utils.logger import setup_logger
 
@@ -38,10 +41,19 @@ class ClaudeCodeProxy:
             cache_dir: Directory for caching compressed results
         """
         self.enable_compression = enable_compression
-        self.compressor = WaterfallCompressor(
-            llm_model=llm_model,
-            llm_token_limit=128000
-        )
+        # self.compressor = WaterfallCompressor(
+        #     llm_model=llm_model,
+        #     llm_token_limit=128000
+        # )
+        
+        self.llm_model = llm_model
+        
+        # Initialize CAI3 components
+        self.cai3_enhancer = CAI3WaterfallEnhancement()
+        self.cai3_enhancer.include_all_methods = True  # All bodies mode for better context
+        self.cai3_translator = CAI3Translator(cache_dir)
+        self.cai3_cache = CAI3Cache(cache_dir) if cache_dir else CAI3Cache()
+        
         self.translator = CAIToPythonTranslator()
         self.session_manager = SecureSessionManager()
         self.logger = setup_logger(__name__)
@@ -53,174 +65,368 @@ class ClaudeCodeProxy:
         # Track current session
         self.current_session_id = None
         self.compression_metadata = {}
+        self.source_path = None  # Track current file being processed
         
     def process_input(self, prompt: str, file_path: Optional[str] = None) -> Tuple[str, Dict[str, Any]]:
         """
-        Process and compress input before sending to Claude
-        
-        Args:
-            prompt: The user prompt/code to compress
-            file_path: Optional path to source file
-            
-        Returns:
-            Tuple of (processed_prompt, metadata)
+        Process and compress input using CAI3 compression
         """
         if not self.enable_compression:
             return prompt, {"compressed": False}
-            
+        
         try:
-            # Create session for tracking
+            # Store source path for later translation
+            self.source_path = Path(file_path) if file_path else None
+            
+            # Create session
             self.current_session_id = self.session_manager.create_session(
-                file_path=Path(file_path) if file_path else Path("direct_input"),
+                file_path=self.source_path or Path("direct_input"),
                 agent="claude_code",
-                compressed_content="",  # Will be updated with compressed content
+                compressed_content="",
                 metadata={"original_content": prompt}
             )
             
-            # Compress file content separately to get better structural analysis
+            # Read file content if provided
             file_content = None
-            compression_result = None
-            
             if file_path and Path(file_path).exists():
-                try:
-                    file_content = Path(file_path).read_text()
-                    # Use proper compression dispatch instead of forcing _standard_compression
-                    compression_result = self.compressor.compress_string(
-                        content=file_content,
-                        source_path=Path(file_path)
-                    )
-                except Exception as e:
-                    self.logger.warning(f"Could not read file {file_path}: {e}")
-            
-            # If no file or compression failed, compress the prompt
-            if compression_result is None:
-                compression_result = self.compressor.compress_string(
-                    content=prompt,
-                    source_path=None
-                )
-            
-            # Build full prompt after compression
-            if file_content:
-                full_prompt = f"{prompt}\n\nFile: {Path(file_path).name}\n```{Path(file_path).suffix[1:]}\n{file_content}\n```"
+                file_content = Path(file_path).read_text()
             else:
-                full_prompt = prompt
+                file_content = prompt  # Use prompt as content if no file
             
-            # Update session with compressed content
-            self.session_manager.update_session(
-                self.current_session_id,
-                {
-                    "compressed_content": compression_result.compressed_content,
-                    "original_prompt": prompt,
-                    "full_prompt": full_prompt
-                }
+            # Count original tokens
+            original_tokens = count_tokens(file_content, self.llm_model)
+            
+            # Use CAI3 compression
+            compression_result = self.cai3_enhancer._standard_compression_cai3(
+                content=file_content,
+                original_tokens=original_tokens,
+                source_path=self.source_path
             )
             
-            # Build metadata for later decompression
+            # Build metadata
             metadata = {
                 "compressed": True,
-                "original_tokens": compression_result.original_tokens,
+                "compression_type": "CAI3",
+                "original_tokens": original_tokens,
                 "compressed_tokens": compression_result.compressed_tokens,
                 "compression_ratio": compression_result.compression_ratio,
                 "tier": compression_result.tier_used.value,
                 "session_id": self.current_session_id,
                 "timestamp": datetime.now().isoformat(),
-                "original_prompt_length": len(prompt),
-                "full_prompt_length": len(full_prompt)
+                "source_path": str(self.source_path) if self.source_path else None,
+                "tokens_saved": original_tokens - compression_result.compressed_tokens,
+                "potential_cost_savings": self._calculate_cost_savings(
+                    original_tokens - compression_result.compressed_tokens
+                ),
+                "original_source": file_content,  # PRESERVE ORIGINAL SOURCE FOR CONTEXT VALIDATION
+                "cai3_cache": True
             }
             
-            # Add instruction wrapper for Claude to understand CAI format
-            wrapped_prompt = self._wrap_compressed_prompt(
-                compression_result.compressed_content,
-                metadata
+            # Store metadata for later use
+            self.compression_metadata[self.current_session_id] = metadata
+            
+            # Wrap CAI3 content with instructions
+            wrapped_prompt = self._wrap_cai3_prompt(
+                compression_result.content,
+                metadata,
+                prompt
             )
             
-            # Cache the compression mapping
-            self._cache_compression_data(metadata, compression_result)
-            
-            self.logger.info(f"Compressed {metadata['original_tokens']} → {metadata['compressed_tokens']} tokens")
+            self.logger.info(
+                f"🗜️ CAI3 Compression: {original_tokens} → {compression_result.compressed_tokens} tokens "
+                f"({compression_result.compression_ratio:.1f}% reduction)"
+            )
             
             return wrapped_prompt, metadata
             
         except Exception as e:
-            self.logger.error(f"Compression failed: {e}")
-            # Fallback to original prompt
+            self.logger.error(f"CAI3 compression failed: {e}")
             return prompt, {"compressed": False, "error": str(e)}
-    
-    def _wrap_compressed_prompt(self, cai_content: str, metadata: Dict) -> str:
+
+    def _wrap_cai3_prompt(self, cai3_content: str, metadata: Dict, user_prompt: str) -> str:
         """
-        Wrap CAI content with instructions for Claude
+        Wrap CAI3 content with clear instructions for Claude
         """
-        return f"""[CAI COMPRESSED INPUT - Session: {metadata['session_id']}]
-[Compression Ratio: {metadata['compression_ratio']:.1f}% | Tier: {metadata['tier']}]
+        return f"""[CAI3 COMPRESSED CODE - Session: {metadata['session_id']}]
+    [Saved {metadata['tokens_saved']} tokens ({metadata['compression_ratio']:.1f}% reduction)]
 
-INSTRUCTIONS: The following code is in CAI (Compressed AI) format:
-- F[name(args) → {{body}}] represents functions
-- C[ClassName → {{methods}}] represents classes  
-- M[Class.method(args) → body] represents methods
-- I[import statement] represents imports
-- V[var = value] represents variables
+    INSTRUCTIONS: The following code is in CAI3 ultra-dense format:
+    - #C3L header indicates CAI3-LITE format
+    - Single letters are method/variable compressions (see mappings)
+    - FLOW syntax: L=assign, R=return, I=if, F=for, etc.
+    - Pool references: p0, p1... are string constants
+    - Chain aliases: g0, g1... are method chains
+    - CID aliases: a0, a1... are method identifiers
 
-Please understand this compressed format and respond accordingly.
+    When editing, maintain CAI3 format and use #C3-PATCH format for changes:
+    1:TGT:cid=<method_id> OP:RB F=B1
+    B:
+    <new_body_in_FLOW>
+    E
 
----CAI CODE START---
-{cai_content}
----CAI CODE END---
+    User request: {user_prompt}
 
-When providing code in your response, you may use either standard Python or CAI format.
-"""
+    ---CAI3 CODE START---
+    {cai3_content}
+    ---CAI3 CODE END---"""
+
+    def _calculate_cost_savings(self, tokens_saved: int) -> float:
+        """Calculate approximate cost savings based on token reduction"""
+        # Rough estimates: $0.01 per 1K tokens for GPT-4
+        cost_per_1k = 0.01
+        return (tokens_saved / 1000) * cost_per_1k
     
     def process_output(self, claude_output: str, metadata: Dict[str, Any]) -> str:
         """
-        Process and decompress Claude's output
-        
-        Args:
-            claude_output: Raw output from Claude Code
-            metadata: Compression metadata from input processing
-            
-        Returns:
-            Processed output (translated from CAI if needed)
+        Enhanced output processing for both patches and full CAI3 code.
         """
         if not metadata.get("compressed", False):
             return claude_output
-            
+        
         try:
-            # Check if output contains CAI format
-            if self._contains_cai_format(claude_output):
-                self.logger.info("Detected CAI format in output, translating...")
+            # Check what type of CAI3 output we have
+            if "#C3-PATCH" in claude_output:
+                # Handle patch format
+                return self._process_patch_output(claude_output, metadata)
+            elif "#C3L" in claude_output or self._contains_full_cai3(claude_output):
+                # Handle full CAI3-LITE output
+                return self._process_full_cai3_output(claude_output, metadata)
+            else:
+                # No CAI3 content, return as-is
+                return claude_output
                 
-                # Extract CAI code blocks
-                cai_blocks = self._extract_cai_blocks(claude_output)
-                
-                for cai_code in cai_blocks:
-                    # Translate each CAI block back to Python
-                    translation_result = self.translator.translate(
-                        session_id=metadata.get("session_id", "unknown"),
-                        cai_code=cai_code,
-                        original_py=None  # Claude's output is new code
-                    )
-                    
-                    if translation_result.success:
-                        # Replace CAI block with Python code
-                        claude_output = claude_output.replace(
-                            cai_code,
-                            translation_result.python_code
-                        )
-                        self.logger.info(f"Successfully translated CAI block")
-                    else:
-                        self.logger.warning(f"Translation failed: {translation_result.error}")
-            
-            # Update session with results
-            if metadata.get("session_id"):
-                self.session_manager.update_session(
-                    metadata["session_id"],
-                    {"output": claude_output, "processed_at": datetime.now().isoformat()}
-                )
-            
-            return claude_output
-            
         except Exception as e:
             self.logger.error(f"Output processing failed: {e}")
+            return self._format_error_output(claude_output, e, metadata)
+
+    def _contains_full_cai3(self, text: str) -> bool:
+        """Check if output contains full CAI3-LITE format."""
+        cai3_indicators = [
+            'X:',  # CID aliases
+            'D:',  # Chain aliases  
+            'T:',  # Table section
+            'B#',  # Body sections
+            'C:',  # Class definitions
+            'M:',  # Method definitions
+            'F:'   # Function definitions
+        ]
+        
+        # Count how many indicators are present
+        indicator_count = sum(1 for indicator in cai3_indicators if indicator in text)
+        return indicator_count >= 3  # Need multiple indicators for full CAI3
+
+    def _process_full_cai3_output(self, claude_output: str, metadata: Dict) -> str:
+        """Process full CAI3-LITE output from Claude."""
+        self.logger.info("🔄 Processing full CAI3-LITE output...")
+        
+        # Extract CAI3-LITE content
+        cai3_content = self._extract_cai3_content(claude_output)
+        
+        if not cai3_content or not self.source_path:
             return claude_output
+        
+        try:
+            # Translate full CAI3-LITE to Python
+            python_code = self.cai3_translator.translate_lite_to_python(
+                cai3_lite_content=cai3_content,
+                source_path=self.source_path
+            )
+            
+            # Format the output
+            return self._format_full_translation_output(
+                claude_output=claude_output,
+                python_code=python_code,
+                metadata=metadata
+            )
+            
+        except Exception as e:
+            self.logger.error(f"Failed to translate CAI3-LITE: {e}")
+            return f"⚠️ Translation failed: {e}\n\nOriginal CAI3 output:\n{claude_output}"
+
+    def _extract_cai3_content(self, text: str) -> Optional[str]:
+        """Extract CAI3 content from Claude's response."""
+        import re
+        
+        # Try to find CAI3 block markers
+        pattern = r'---CAI3.*?START---(.*?)---CAI3.*?END---'
+        match = re.search(pattern, text, re.DOTALL)
+        
+        if match:
+            return match.group(1).strip()
+        
+        # Try to find content after header
+        if '#C3L' in text:
+            # Extract everything after the header
+            start_idx = text.index('#C3L')
+            # Find the end (usually before explanation text)
+            end_markers = ['\n\n---', '\n\nThe', '\n\nThis', '\n\nI', '\n\nNote']
+            end_idx = len(text)
+            for marker in end_markers:
+                if marker in text[start_idx:]:
+                    end_idx = text.index(marker, start_idx)
+                    break
+            
+            return text[start_idx:end_idx].strip()
+        
+        return None
+
+    def _process_patch_output(self, claude_output: str, metadata: Dict) -> str:
+        """Process CAI3 patch output from Claude."""
+        self.logger.info("🔄 Processing CAI3 patch...")
+        
+        # Extract patch content
+        patch_content = self._extract_patch_content(claude_output)
+        
+        if not patch_content or not self.source_path:
+            return claude_output
+        
+        try:
+            # Get the original source that was used for compression (if available)
+            original_source = metadata.get('original_source')
+            
+            if original_source:
+                self.logger.debug(f"Using preserved original source for patch application:")
+                self.logger.debug(f"  Length: {len(original_source)}")
+                self.logger.debug(f"  Repr: {repr(original_source)}")
+                self.logger.debug(f"  Lines: {original_source.count(chr(10)) + 1}")
+            
+            # Apply the patch using CAI3Translator.apply_patch
+            if original_source:
+                # Use the same source that was compressed to avoid context mismatch
+                patched_code = self.cai3_translator.apply_patch(
+                    patch_content=patch_content,
+                    source_path=self.source_path,
+                    original_source=original_source
+                )
+            else:
+                # Fallback to reading from file
+                patched_code = self.cai3_translator.apply_patch(
+                    patch_content=patch_content,
+                    source_path=self.source_path
+                )
+            
+            # Format the output
+            return self._format_patch_output(
+                claude_output=claude_output,
+                patched_code=patched_code,
+                metadata=metadata
+            )
+            
+        except Exception as e:
+            self.logger.error(f"Failed to apply CAI3 patch: {e}")
+            return f"⚠️ Patch application failed: {e}\n\nOriginal patch output:\n{claude_output}"
+
+    def _extract_patch_content(self, text: str) -> Optional[str]:
+        """Extract CAI3 patch content from Claude's response."""
+        import re
+        
+        # Look for #C3-PATCH blocks
+        pattern = r'#C3-PATCH\s*(.*?)(?=\n\n|\Z)'
+        match = re.search(pattern, text, re.DOTALL)
+        
+        if match:
+            return match.group(1).strip()
+        
+        return None
+
+    def _format_patch_output(self, claude_output: str, patched_code: str, 
+                           metadata: Dict) -> str:
+        """Format output for CAI3 patch application."""
+        # Extract Claude's explanation
+        explanation = self._extract_explanation(claude_output)
+        
+        return f"""✅ CAI3 Patch Processed
+    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    📊 Compression Analytics:
+    • Original: {metadata['original_tokens']:,} tokens
+    • Compressed: {metadata['compressed_tokens']:,} tokens
+    • Net Savings: {metadata['tokens_saved']:,} tokens ({metadata['compression_ratio']:.1f}%)
+    • Est. Cost Saved: ${metadata['potential_cost_savings']:.3f}
+
+    📝 Claude's Analysis:
+    {explanation}
+
+    📄 Patched Python Code:
+    ```python
+    {patched_code}
+    ```
+
+    💾 Patch processed successfully
+    """
+
+    def _extract_explanation(self, claude_output: str) -> str:
+        """Extract Claude's explanation from the output."""
+        # Remove CAI3 code blocks and patches to get the explanation
+        import re
+        
+        # Remove CAI3 code blocks
+        text = re.sub(r'---CAI3.*?START---(.*?)---CAI3.*?END---', '', claude_output, flags=re.DOTALL)
+        
+        # Remove patch blocks
+        text = re.sub(r'#C3-PATCH\s*(.*?)(?=\n\n|\Z)', '', text, flags=re.DOTALL)
+        
+        # Clean up and extract meaningful explanation
+        lines = text.strip().split('\n')
+        explanation_lines = []
+        
+        for line in lines:
+            line = line.strip()
+            if line and not line.startswith('#') and not line.startswith('---'):
+                explanation_lines.append(line)
+        
+        explanation = '\n'.join(explanation_lines).strip()
+        
+        # If no explanation found, provide a default
+        if not explanation or len(explanation) < 10:
+            explanation = "Code processed successfully with CAI3 compression."
+        
+        return explanation
+
+    def _format_full_translation_output(self, claude_output: str, python_code: str, 
+                                    metadata: Dict) -> str:
+        """Format output for full CAI3 translation."""
+        # Extract Claude's explanation
+        explanation = self._extract_explanation(claude_output)
+        
+        # Calculate effective compression
+        patched_tokens = count_tokens(python_code, self.llm_model)
+        
+        return f"""✅ CAI3 Patch Applied
+    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    📊 Compression Analytics:
+    • Original: {metadata['original_tokens']:,} tokens
+    • Compressed: {metadata['compressed_tokens']:,} tokens
+    • Patched: {patched_tokens:,} tokens
+    • Net Savings: {metadata['tokens_saved']:,} tokens ({metadata['compression_ratio']:.1f}%)
+    • Est. Cost Saved: ${metadata['potential_cost_savings']:.3f}
+
+    📝 Claude's Analysis:
+    {explanation}
+
+    📄 Patched Python Code:
+    ```python
+    {python_code}
+    ```
+    💾 Patch applied successfully
+    """
+    
+    def _format_error_output(self, claude_output: str, error: Exception, metadata: Dict) -> str:
+        """Format error output with helpful context."""
+        return f"""⚠️ CAI3 Processing Error
+        ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        Error: {error}
+        📊 Session Info:
+        • Session ID: {metadata.get('session_id', 'unknown')}
+        • Compression Type: {metadata.get('compression_type', 'unknown')}
+        • Source Path: {metadata.get('source_path', 'unknown')}
+        💡 Suggestions:
+        • Check if the CAI3 output format is valid
+        • Ensure the cache files exist for this session
+        • Try running with --verbose for more details
+        📄 Original Claude Output:
+        {claude_output[:500]}{'...' if len(claude_output) > 500 else ''}
+        """
+
     
     def _contains_cai_format(self, text: str) -> bool:
         """Check if text contains CAI format patterns"""

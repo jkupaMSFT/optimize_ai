@@ -7,6 +7,9 @@ Achieves 60-70% token reduction through single-char macros and compressed syntax
 import ast
 from typing import Any, Dict, List, Optional, Union, Set, Tuple
 import re
+import logging
+
+logger = logging.getLogger(__name__)
 
 class FLOWCompiler:
     """Converts Python AST to dense FLOW representation and back"""
@@ -42,6 +45,35 @@ class FLOWCompiler:
         'S': 'setattr/item',         # SET → S
     }
     
+    # Method abbreviation map for attribute expansion
+    METHOD_ABBREVIATIONS = {
+        'ap': 'append',
+        'ex': 'extend', 
+        'ge': 'get',
+        'se': 'set',
+        'up': 'update',
+        'po': 'pop',
+        'pu': 'push',
+        'cl': 'clear',
+        'co': 'copy',
+        're': 'remove',
+        'in': 'insert',
+        'it': 'items',
+        'ke': 'keys',
+        'va': 'values',
+        'sp': 'split',
+        'jo': 'join',
+        'st': 'strip',
+        'lo': 'lower',
+        'up': 'upper',
+        'fi': 'find',
+        'no': 'now',
+        'ld': 'loads',  # Changed from 'lo' to 'ld' to avoid conflict
+        'du': 'dumps',
+        'pa': 'path',    # Added missing path abbreviation
+        'is': 'is_directory'  # Added missing is_directory abbreviation
+    }
+    
     # Operator shortcuts - ASCII only, no Unicode
     OPERATOR_MAP = {
         '!=': '!=',
@@ -53,6 +85,17 @@ class FLOWCompiler:
         'or': '|',
         'not': '!',
         # Keep == unchanged to avoid equality/assignment ambiguity
+    }
+    
+    # Reverse mapping for decompression
+    REVERSE_OPERATOR_MAP = {
+        '!in': ' not in ',
+        '!': 'not ',
+        '&': ' and ',
+        '|': ' or ',
+        '!=': ' != ',
+        '<=': ' <= ',
+        '>=': ' >= ',
     }
     
     def __init__(self, name_map: Optional[Dict[str, str]] = None, 
@@ -96,6 +139,10 @@ class FLOWCompiler:
         
         # Alias chain tracking for D: dictionary
         self.alias_chains_dict = {}  # full_chain -> alias
+        self.chain_aliases = {}  # alias -> full_chain
+        
+        # Hash to value mapping for resolving #xxxx references
+        self.hash_to_value = {}  # #xxxx -> original_value
     
     def set_scope(self, scope_id: str, local_map: Dict[str, str]):
         """Set local variable compressions for current scope"""
@@ -122,6 +169,72 @@ class FLOWCompiler:
         # Also reverse the mapping for lookup: full_chain -> alias
         for alias, full_chain in chain_aliases.items():
             self.alias_chains_dict[full_chain] = alias
+
+    def set_hash_mapping(self, hash_to_value: Dict[str, str]):
+        """Set hash-to-value mapping for resolving #xxxx references"""
+        if hash_to_value:
+            # Convert external string format to internal metadata format
+            self.hash_to_value = {}
+            for hash_ref, value in hash_to_value.items():
+                if isinstance(value, str):
+                    # Convert to metadata format for internal use
+                    self.hash_to_value[hash_ref] = {
+                        'value': value,
+                        'type': 'string',
+                        'needs_quotes': True
+                    }
+                else:
+                    # For non-string values, store directly (backward compatibility)
+                    self.hash_to_value[hash_ref] = value
+        else:
+            self.hash_to_value = {}
+    
+    def get_hash_value(self, hash_ref: str):
+        """Get hash value with backward compatibility for both old and new formats"""
+        if hash_ref not in self.hash_to_value:
+            return None
+        
+        hash_entry = self.hash_to_value[hash_ref]
+        if isinstance(hash_entry, dict):
+            return hash_entry['value']  # Extract value from metadata
+        else:
+            return hash_entry  # Old format, return directly
+    
+    def get_hash_metadata(self, hash_ref: str):
+        """Get full hash metadata (new format only)"""
+        if hash_ref not in self.hash_to_value:
+            return None
+        
+        hash_entry = self.hash_to_value[hash_ref]
+        if isinstance(hash_entry, dict):
+            return hash_entry
+        else:
+            # Convert old format to metadata format
+            return {
+                'value': hash_entry,
+                'type': 'string' if isinstance(hash_entry, str) else 'other',
+                'needs_quotes': isinstance(hash_entry, str)
+            }
+    
+    def get_hash_value_for_compatibility(self, hash_ref: str):
+        """
+        Get hash value in old format for external compatibility.
+        This ensures that external code still receives the raw string value.
+        """
+        return self.get_hash_value(hash_ref)
+    
+    def get_legacy_hash_mapping(self):
+        """
+        Get hash mapping in legacy format (hash_ref -> raw_value) for external compatibility.
+        Used when transferring to CAI3Full or other external systems.
+        """
+        legacy_mapping = {}
+        for hash_ref, hash_entry in self.hash_to_value.items():
+            if isinstance(hash_entry, dict):
+                legacy_mapping[hash_ref] = hash_entry['value']
+            else:
+                legacy_mapping[hash_ref] = hash_entry
+        return legacy_mapping
     
     def _get_pool_id(self, value: Any) -> str:
         """Get pool ID for a constant from centralized pool"""
@@ -360,13 +473,42 @@ class FLOWCompiler:
             return '\n'.join(lines)
         
         elif isinstance(node, ast.Try):
-            # Dense try: T:{body}X(E):{handler} or T:body X(E):handler
+            # Dense try: T{body}X{handler} (ultra-dense) or T:{body} X(E):{handler} (standard dense)
             lines = []
             macro_try = 'T' if self.dense_mode else 'TRY'
             macro_except = 'X' if self.dense_mode else 'CATCH'
             
+            # Check if we can use ultra-dense format (both try body and all handlers can be inlined)
+            can_inline_try_body = self._can_inline_block(node.body)
+            all_handlers_can_inline = all(self._can_inline_block(handler.body) for handler in node.handlers)
+            
+            if self.dense_mode and can_inline_try_body and all_handlers_can_inline and len(node.handlers) == 1:
+                # Ultra-dense format: T{body}X{handler}
+                try_inline_body = self._inline_statements(node.body)
+                handler = node.handlers[0]
+                exc_type = handler.type.id if handler.type and hasattr(handler.type, 'id') else 'E'
+                exc_name = handler.name if handler.name else '_'
+                
+                if handler.type and isinstance(handler.type, ast.Tuple):
+                    exc_types = [self._get_name(e) for e in handler.type.elts]
+                    exc_type = f"({','.join(exc_types)})"
+                
+                handler_inline_body = self._inline_statements(handler.body)
+                
+                # Generate ultra-dense format: T{body}X{(exception_type)handler_body}
+                if exc_name == '_' and exc_type != 'E':
+                    # With exception type: T{body}X{(ValueError)_}
+                    return f"{indent_str}{macro_try}{{{try_inline_body}}}{macro_except}{{({exc_type}){handler_inline_body}}}"
+                elif exc_type != 'E':
+                    # With exception type and name: T{body}X{(ValueError)e:handler_body}
+                    return f"{indent_str}{macro_try}{{{try_inline_body}}}{macro_except}{{({exc_type}){exc_name}:{handler_inline_body}}}"
+                else:
+                    # Generic exception: T{body}X{handler_body}
+                    return f"{indent_str}{macro_try}{{{try_inline_body}}}{macro_except}{{{handler_inline_body}}}"
+            
+            # Standard dense or multiline format
             # Check if we can inline the try body
-            if self._can_inline_block(node.body):
+            if can_inline_try_body:
                 try_inline_body = self._inline_statements(node.body)
                 lines.append(f"{indent_str}{macro_try}:{{{try_inline_body}}}")
             else:
@@ -882,6 +1024,43 @@ class FLOWCompiler:
     
     # ===== PARSER METHODS FOR READING DENSE FLOW BACK TO AST =====
     
+    def _safe_parse_statement(self, stmt_str: str) -> ast.AST:
+        """Safely parse a statement with fallback to Pass if parsing fails."""
+        try:
+            # Clean the statement string
+            stmt_str = stmt_str.strip()
+            if not stmt_str:
+                return self._fix_ast_node_attributes(ast.Pass())
+            
+            # Quick validation: check for obviously invalid characters
+            if any(char in stmt_str for char in ['#@$%', '{}{}', '][[']):
+                logger.warning(f"Statement contains invalid characters: '{stmt_str}'")
+                return self._fix_ast_node_attributes(ast.Pass())
+            
+            # Try normal parsing
+            stmt, _ = self._parse_flow_statement([stmt_str], 0)
+            if stmt is None:
+                logger.warning(f"Parsing returned None for statement '{stmt_str}', using Pass")
+                return self._fix_ast_node_attributes(ast.Pass())
+            
+            # Validate the parsed statement by trying to compile it
+            try:
+                import ast as ast_module
+                # Fix AST attributes before validation
+                stmt = self._fix_ast_node_attributes(stmt)
+                # Create a module to test compilation
+                module = ast_module.Module(body=[stmt], type_ignores=[])
+                compile(module, '<string>', 'exec')
+                return stmt
+            except Exception as validation_error:
+                logger.warning(f"Statement validation failed for '{stmt_str}': {validation_error}")
+                return self._fix_ast_node_attributes(ast.Pass())
+                
+        except Exception as e:
+            logger.warning(f"Failed to parse statement '{stmt_str}': {e}")
+            # Return a Pass statement as fallback
+            return self._fix_ast_node_attributes(ast.Pass())
+    
     def _parse_flow_lines(self, lines: List[str], indent_level: int = 0) -> Tuple[List[ast.AST], int]:
         """
         Parse FLOW lines back to Python AST statements.
@@ -1019,9 +1198,12 @@ class FLOWCompiler:
         # If we can't parse it, treat as expression
         try:
             return self._parse_expression(line), 1
-        except:
-            # Fallback: create a pass statement
-            return ast.Pass(), 1
+        except Exception as parse_error:
+            # Enhanced fallback: log the error and create a safer pass statement
+            logger.warning(f"Failed to parse line '{line}': {parse_error}")
+            # Fallback: create a pass statement with proper AST attributes
+            pass_stmt = ast.Pass()
+            return self._fix_ast_node_attributes(pass_stmt), 1
     
     def _parse_inline_statement(self, line: str) -> ast.AST:
         """Parse an inline statement with braces"""
@@ -1080,6 +1262,9 @@ class FLOWCompiler:
                                 right=ast.Constant(value=1)
                             )
                             stmt = ast.Assign(targets=[target], value=value)
+                            # Add required AST attributes
+                            stmt.lineno = 1
+                            stmt.col_offset = 0
                         else:
                             # Try parsing as expression statement
                             try:
@@ -1159,7 +1344,12 @@ class FLOWCompiler:
                 return ast.For(target=target, iter=iter_expr, body=body_stmts, orelse=[])
             
             elif main_part.startswith('T'):
-                # Inline try: T:{body}
+                # Check for ultra-dense try-except format T{body}X{handler}
+                if '}X{' in line:
+                    # Use the new ultra-dense parser
+                    return self._parse_ultra_dense_try_except(line)
+                
+                # Inline try: T:{body} (old format)
                 # Parse inline body
                 body_stmts = []
                 for stmt_str in inline_body.split(';'):
@@ -1220,28 +1410,64 @@ class FLOWCompiler:
         return ast.Pass()
     
     def _parse_assignment(self, line: str) -> ast.AST:
-        """Parse assignment: Lx=value or x=value"""
-        # Remove L prefix if present
-        if line.startswith('L'):
-            assign_str = line[1:]
-        else:
-            assign_str = line
-        
-        if '=' in assign_str:
-            target_str, value_str = assign_str.split('=', 1)
-            target_name = target_str.strip()
+        """Parse assignment: Lx=value or x=value with enhanced error handling"""
+        try:
+            # Remove L prefix if present
+            if line.startswith('L'):
+                assign_str = line[1:]
+            else:
+                assign_str = line
             
-            # Apply name mapping for target
-            if target_name in self.reverse_map:
-                target_name = self.reverse_map[target_name]
-            elif target_name in self.name_map:
-                target_name = self.name_map[target_name]
+            if '=' in assign_str:
+                target_str, value_str = assign_str.split('=', 1)
+                target_name = target_str.strip()
+                
+                # Validate target name
+                if not target_name or not target_name.replace('_', '').replace('.', '').replace('[', '').replace(']', '').isalnum():
+                    logger.warning(f"Invalid target name in assignment: '{target_name}'")
+                    return self._fix_ast_node_attributes(ast.Pass())
+                
+                # Apply name mapping for target
+                if target_name in self.reverse_map:
+                    target_name = self.reverse_map[target_name]
+                elif target_name in self.name_map:
+                    target_name = self.name_map[target_name]
+                
+                # Handle different target types (name, attribute, subscript)
+                if '.' in target_name:
+                    # Attribute assignment
+                    target = self._parse_attribute_access(target_name)
+                    target.ctx = ast.Store()
+                elif '[' in target_name and ']' in target_name:
+                    # Subscript assignment
+                    obj_name = target_name[:target_name.index('[')]
+                    index_str = target_name[target_name.index('[')+1:target_name.rindex(']')]
+                    obj = ast.Name(id=obj_name, ctx=ast.Load())
+                    index = self._parse_expression_string(index_str)
+                    target = ast.Subscript(value=obj, slice=index, ctx=ast.Store())
+                else:
+                    # Simple name assignment
+                    target = ast.Name(id=target_name, ctx=ast.Store())
+                
+                # Parse value with error handling
+                try:
+                    value = self._parse_expression_string(value_str.strip())
+                except Exception as value_error:
+                    logger.warning(f"Failed to parse assignment value '{value_str}': {value_error}")
+                    # Use None as fallback value
+                    value = ast.Constant(value=None)
+                
+                assign_node = ast.Assign(targets=[target], value=value)
+                # Add required AST attributes
+                return self._fix_ast_node_attributes(assign_node)
             
-            target = ast.Name(id=target_name, ctx=ast.Store())
-            value = self._parse_expression_string(value_str.strip())
-            return ast.Assign(targets=[target], value=value)
-        
-        return ast.Pass()
+            # If no = found, return Pass
+            logger.warning(f"No assignment operator found in: '{line}'")
+            return self._fix_ast_node_attributes(ast.Pass())
+            
+        except Exception as e:
+            logger.warning(f"Failed to parse assignment '{line}': {e}")
+            return self._fix_ast_node_attributes(ast.Pass())
     
     def _parse_for_loop(self, lines: List[str], indent_level: int) -> Tuple[ast.AST, int]:
         """Parse for loop: Fxiniter: or Fxiniter:{inline}"""
@@ -1315,8 +1541,14 @@ class FLOWCompiler:
         return ast.Pass(), 1
     
     def _parse_try_statement(self, lines: List[str], indent_level: int) -> Tuple[ast.AST, int]:
-        """Parse try statement: T: or T:{inline}"""
+        """Parse try statement: T: or T:{inline} or T{body}X{handler}"""
         line = lines[0].strip()
+        
+        # Check for ultra-dense try-except format T{body}X{handler}
+        if line.startswith('T{') and '}X{' in line:
+            result = self._parse_ultra_dense_try_except(line)
+            if result:
+                return result, 1
         
         # Check for inline body
         if '{' in line:
@@ -1411,9 +1643,9 @@ class FLOWCompiler:
         if len(line) > 1:
             value_str = line[1:]
             value = self._parse_expression_string(value_str)
-            return ast.Return(value=value)
+            return self._fix_ast_node_attributes(ast.Return(value=value))
         else:
-            return ast.Return(value=None)
+            return self._fix_ast_node_attributes(ast.Return(value=None))
     
     def _parse_delete(self, line: str) -> ast.AST:
         """Parse delete statement: Dtargets"""
@@ -1447,7 +1679,11 @@ class FLOWCompiler:
             target_str = line[1:]
             target = ast.Name(id=target_str, ctx=ast.Store())
             value = ast.BinOp(left=ast.Name(id=target_str, ctx=ast.Load()), op=ast.Add(), right=ast.Constant(value=1))
-            return ast.Assign(targets=[target], value=value)
+            assign_node = ast.Assign(targets=[target], value=value)
+            # Add required AST attributes
+            assign_node.lineno = 1
+            assign_node.col_offset = 0
+            return assign_node
         return ast.Pass()
     
     def _parse_decrement(self, line: str) -> ast.AST:
@@ -1456,7 +1692,11 @@ class FLOWCompiler:
             target_str = line[1:]
             target = ast.Name(id=target_str, ctx=ast.Store())
             value = ast.BinOp(left=ast.Name(id=target_str, ctx=ast.Load()), op=ast.Sub(), right=ast.Constant(value=1))
-            return ast.Assign(targets=[target], value=value)
+            assign_node = ast.Assign(targets=[target], value=value)
+            # Add required AST attributes
+            assign_node.lineno = 1
+            assign_node.col_offset = 0
+            return assign_node
         return ast.Pass()
     
     def _parse_setattr(self, line: str) -> ast.AST:
@@ -1479,12 +1719,20 @@ class FLOWCompiler:
                     op = op_map.get(op_char, ast.Add())
                     
                     value = ast.BinOp(left=left, op=op, right=right)
-                    return ast.Assign(targets=[target], value=value)
+                    assign_node = ast.Assign(targets=[target], value=value)
+                    # Add required AST attributes
+                    assign_node.lineno = 1
+                    assign_node.col_offset = 0
+                    return assign_node
             
             # Regular assignment
             target = ast.Name(id=target_str.strip(), ctx=ast.Store())
             value = self._parse_expression_string(value_str.strip())
-            return ast.Assign(targets=[target], value=value)
+            assign_node = ast.Assign(targets=[target], value=value)
+            # Add required AST attributes
+            assign_node.lineno = 1
+            assign_node.col_offset = 0
+            return assign_node
         
         return ast.Pass()
     
@@ -1509,9 +1757,208 @@ class FLOWCompiler:
                 return ast.Expr(value=ast.Call(func=func, args=[], keywords=[]))
         
         return ast.Pass()
-    
+
+    def expand_compressed_operators(self, expr: str) -> str:
+        """Expand compressed operators back to Python syntax."""
+        result = expr
+        
+        # Handle operators in order of specificity (most specific first)
+        # This prevents conflicts like != being affected by standalone !
+        
+        import re
+        
+        # FIRST: Handle FLOW syntax patterns like @i,ran(10){pri(i)}
+        # Pattern: @variable,iterable{body} -> for variable in iterable: body
+        for_loop_pattern = r'@([^,]+),([^{]+)\{([^}]*)\}'
+        for_matches = list(re.finditer(for_loop_pattern, result))
+        
+        # Process matches in reverse to maintain string positions
+        for match in reversed(for_matches):
+            target = match.group(1).strip()
+            iterable = match.group(2).strip()
+            body = match.group(3).strip()
+            
+            # Convert FLOW for-loop to Python syntax
+            start, end = match.span()
+            if body:
+                # Simple body - convert to Python for-loop syntax
+                if ';' in body:
+                    # Multiple statements in body
+                    body_parts = [stmt.strip() for stmt in body.split(';') if stmt.strip()]
+                    body_python = '; '.join(body_parts)
+                else:
+                    body_python = body
+                
+                python_for = f'for {target} in {iterable}: {body_python}'
+            else:
+                python_for = f'for {target} in {iterable}: pass'
+            
+            result = result[:start] + python_for + result[end:]
+
+        # SECOND: Handle try-except patterns T{...}X{...}
+        # Pattern: T{try_body}X{except_body} -> try: try_body except: except_body
+        try_except_pattern = r'T\{([^}]*)\}X\{([^}]*)\}'
+        try_matches = list(re.finditer(try_except_pattern, result))
+        
+        # Process matches in reverse to maintain string positions
+        for match in reversed(try_matches):
+            try_body = match.group(1).strip()
+            except_body = match.group(2).strip()
+            
+            # Convert FLOW try-except to Python syntax
+            start, end = match.span()
+            
+            # Handle try body
+            if try_body:
+                if ';' in try_body:
+                    # Multiple statements in try body
+                    try_parts = [stmt.strip() for stmt in try_body.split(';') if stmt.strip()]
+                    try_python = '; '.join(try_parts)
+                else:
+                    try_python = try_body
+            else:
+                try_python = 'pass'
+            
+            # Handle except body
+            if except_body:
+                if except_body.startswith('@'):
+                    # Exception variable pattern like @e
+                    except_var = except_body[1:] if len(except_body) > 1 else 'e'
+                    except_python = f'Exception as {except_var}: pass'
+                elif ';' in except_body:
+                    # Multiple statements in except body
+                    except_parts = [stmt.strip() for stmt in except_body.split(';') if stmt.strip()]
+                    except_python = '; '.join(except_parts)
+                else:
+                    except_python = except_body if except_body else 'pass'
+            else:
+                except_python = 'pass'
+            
+            # Build the Python try-except
+            if except_body.startswith('@'):
+                python_try = f'try: {try_python} except {except_python}'
+            else:
+                python_try = f'try: {try_python} except: {except_python}'
+            
+            result = result[:start] + python_try + result[end:]
+
+        # Enhanced: Handle multiple !?var,container patterns with better boundary detection
+        # Use a more precise pattern that handles complex containers better
+        # Updated pattern to be more flexible and handle edge cases including spaces and word boundaries
+        not_in_patterns = list(re.finditer(r'!\?([^,\s]+?),\s*([^\s&|)}\],]+)', result))
+
+        # Process matches in reverse to maintain string positions
+        for match in reversed(not_in_patterns):
+            var_part = match.group(1).strip()
+            container_part = match.group(2).strip()
+            
+            # Clean up container_part - remove trailing punctuation that shouldn't be part of the container
+            container_part = re.sub(r'[,\s]*$', '', container_part)
+            
+            # Special handling for placeholder containers
+            if container_part == '?':
+                # Try to infer the container from context if possible
+                # For now, keep the placeholder but mark it for later resolution
+                container_part = '?'  # Will be resolved in next phase
+            
+            # Replace this specific match, preserving surrounding content
+            start, end = match.span()
+            result = result[:start] + f'{var_part} not in {container_part}' + result[end:]
+
+        # Second pass: Clean up any remaining standalone !? that might have been missed
+        # This handles edge cases where the pattern might be malformed
+        result = re.sub(r'!\?(?![^,]*,)', 'not ', result)
+        
+        # First: Multi-character operators
+        if '!in' in result:
+            result = result.replace('!in', ' not in ')
+        
+        if '!=' in result:
+            result = result.replace('!=', ' != ')
+            
+        if '<=' in result:
+            result = result.replace('<=', ' <= ')
+            
+        if '>=' in result:
+            result = result.replace('>=', ' >= ')
+        
+        # FIX: Handle == operator with proper spacing
+        if '==' in result:
+            # Use regex to add spaces around == if not already present
+            result = re.sub(r'(\S)==(\S)', r'\1 == \2', result)
+            # Clean up multiple spaces
+            result = re.sub(r' +== +', ' == ', result)
+        
+        # Then: Single character operators (but not already handled)
+        if '&' in result:
+            result = result.replace('&', ' and ')
+            
+        if '|' in result:
+            result = result.replace('|', ' or ')
+        
+        # Finally: Standalone ! (but not those already in !=, !in, or !?)
+        # Use regex to only replace ! that's not part of !=, !in, or !?
+        result = re.sub(r'!(?![=in?])', 'not ', result)
+        
+        return result
+
+    def _fix_ambiguous_names(self, text: str) -> str:
+        """Fix ambiguous name expansions in context."""
+        # Fix os.st -> os.stat in os module context
+        import re
+        
+        # Pattern: os.st( -> os.stat(
+        text = re.sub(r'\bos\.st\(', 'os.stat(', text)
+        
+        # Pattern: os.st(var).st_something -> os.stat(var).st_something  
+        text = re.sub(r'\bos\.st\(([^)]+)\)\.st_', r'os.stat(\1).st_', text)
+        
+        # Fix common stat attributes that might get truncated
+        text = re.sub(r'\.st_siz\b', '.st_size', text)
+        text = re.sub(r'\.st_si\b', '.st_size', text)
+        text = re.sub(r'\.st_mti\b', '.st_mtime', text)
+        text = re.sub(r'\.st_cti\b', '.st_ctime', text)
+        
+        return text
+
     def _parse_condition_string(self, condition_str: str) -> ast.AST:
-        """Parse a condition string with ASCII operators"""
+        """Parse a condition string with proper operator expansion."""
+        condition_str = condition_str.strip()
+        
+        # CRITICAL: Expand compressed operators FIRST
+        condition_str = self.expand_compressed_operators(condition_str)
+        
+        # Handle chain alias in compressed operators BEFORE existing !in check
+        # Pattern: x!ing0 -> x not in self.config (where g0 -> s.c)
+        import re
+        chain_pattern = r'(\w+)!in(g\d+)'
+        match = re.match(chain_pattern, condition_str)
+        if match:
+            left_var = match.group(1)
+            chain_alias = match.group(2)
+            
+            # Resolve chain alias
+            if hasattr(self, 'chain_aliases') and chain_alias in self.chain_aliases:
+                chain = self.chain_aliases[chain_alias]
+                # Parse left side
+                left = self._parse_expression_string(left_var)
+                # Parse right side (the chain)
+                right = self._parse_literal_attribute_chain(chain)
+                return ast.Compare(left=left, ops=[ast.NotIn()], comparators=[right])
+        
+        # CRITICAL: Handle compressed "not in" pattern: d!inb -> d not in b
+        if '!in' in condition_str:
+            # Find the position of !in
+            not_in_idx = condition_str.index('!in')
+            left_str = condition_str[:not_in_idx].strip()
+            right_str = condition_str[not_in_idx+3:].strip()  # Skip the "!in"
+            
+            # Parse left and right expressions
+            left = self._parse_expression_string(left_str)
+            right = self._parse_expression_string(right_str)
+            
+            return ast.Compare(left=left, ops=[ast.NotIn()], comparators=[right])
+        
         # Handle special dense conditions
         if condition_str.startswith('N(') and condition_str.endswith(')'):
             # is None check: N(var)
@@ -1529,21 +1976,31 @@ class FLOWCompiler:
         if '!' in condition_str and 'in' in condition_str:
             # Look for pattern like "f!ina" which should be "f not in a"
             exclamation_idx = condition_str.index('!')
-            if exclamation_idx > 0 and condition_str[exclamation_idx:exclamation_idx+3] == '!in':
-                # Split at the exclamation mark
-                left_str = condition_str[:exclamation_idx]
-                right_str = condition_str[exclamation_idx+3:]  # Skip "!in"
-                left = self._parse_expression_string(left_str.strip())
-                right = self._parse_expression_string(right_str.strip())
-                return ast.Compare(left=left, ops=[ast.NotIn()], comparators=[right])
+            if exclamation_idx > 0:
+                if condition_str[exclamation_idx:exclamation_idx+3] == '!in':
+                    # Split at the exclamation mark
+                    left_str = condition_str[:exclamation_idx]
+                    right_str = condition_str[exclamation_idx+3:]  # Skip "!in"
+                    left = self._parse_expression_string(left_str.strip())
+                    right = self._parse_expression_string(right_str.strip())
+                    return ast.Compare(left=left, ops=[ast.NotIn()], comparators=[right])
+                elif condition_str[exclamation_idx:exclamation_idx+4] == '!ins':
+                    # Special case: "!ins" means "!in s" (not in s/self)
+                    left_str = condition_str[:exclamation_idx]
+                    right_str = 's' + condition_str[exclamation_idx+4:]  # Replace "!ins" with "s"
+                    left = self._parse_expression_string(left_str.strip())
+                    right = self._parse_expression_string(right_str.strip())
+                    return ast.Compare(left=left, ops=[ast.NotIn()], comparators=[right])
         
         # Handle binary operators with ASCII - order matters!
+        # CRITICAL: Check for 'not in' before 'in' to avoid incorrect splitting
         for op_text, op_class in [
             ('!=', ast.NotEq),
             ('==', ast.Eq),
             ('<=', ast.LtE),
             ('>=', ast.GtE),
-            ('!in', ast.NotIn),  # This should come after the compressed pattern above
+            ('not in', ast.NotIn),  # Check 'not in' before 'in'
+            ('!in', ast.NotIn),     # This should come after the compressed pattern above
             ('in', ast.In),
             ('<', ast.Lt),
             ('>', ast.Gt),
@@ -1561,6 +2018,25 @@ class FLOWCompiler:
         """Parse an expression string, handling dense notation"""
         expr_str = expr_str.strip()
         
+        # Pre-process to fix known ambiguous expansions
+        expr_str = self._fix_ambiguous_names(expr_str)
+        
+        # Handle braced expressions FIRST - distinguish between dictionaries, statement blocks, and expressions
+        # This must come before attribute access parsing to prevent misinterpretation
+        if expr_str.startswith('{') and expr_str.endswith('}'):
+            inner_content = expr_str[1:-1].strip()
+            
+            # Check if this is a statement block (contains assignments or statements)
+            if self._is_statement_block(inner_content):
+                # This is a statement block, parse as assignment or statement
+                return self._parse_statement_block(inner_content)
+            elif self._is_dictionary_literal(inner_content):
+                # This is a dictionary literal with key:value pairs
+                return self._parse_ultra_dense_dict(expr_str)
+            else:
+                # This is just an expression wrapped in braces - unwrap and parse as expression
+                return self._parse_expression_string(inner_content)
+        
         # Handle pooled constants first
         if expr_str.startswith('p') and expr_str[1:].isdigit():
             # Pool reference
@@ -1574,6 +2050,28 @@ class FLOWCompiler:
                         return ast.Constant(value=value)
             return ast.Constant(value=f"POOL_{pool_id}")
         
+        # Handle hash references like #911, #495
+        if expr_str.startswith('#') and len(expr_str) > 1:
+            # Hash reference - resolve to original value with metadata support
+            if hasattr(self, 'hash_to_value') and expr_str in self.hash_to_value:
+                hash_entry = self.hash_to_value[expr_str]
+                
+                # Handle both old format (direct string) and new format (metadata dict)
+                if isinstance(hash_entry, dict):
+                    original_value = hash_entry['value']
+                    # Context will determine quoting - store raw value for now
+                    return ast.Constant(value=original_value)
+                else:
+                    # Backward compatibility: old format with direct string storage
+                    return ast.Constant(value=hash_entry)
+            # Fallback: try to parse as number if it looks like one
+            try:
+                if expr_str[1:].isdigit():
+                    return ast.Constant(value=int(expr_str[1:]))
+            except ValueError:
+                pass
+            return ast.Constant(value=expr_str)  # Keep as-is if can't resolve
+        
         # Handle chain aliases (gN) - including function calls
         if expr_str.startswith('g') and len(expr_str) > 1:
             # Check if it's a function call like g1(...)
@@ -1585,16 +2083,21 @@ class FLOWCompiler:
                 # Resolve the alias
                 if hasattr(self, 'chain_aliases') and alias_id in self.chain_aliases:
                     chain = self.chain_aliases[alias_id]
-                    # Handle the special case where chain already includes parentheses
+                    # IMPORTANT: Don't apply CID resolution to the chain components
+                    # The chain should be treated as literal attribute access
+                    # Remove trailing () if present in the stored chain
                     if chain.endswith('()'):
-                        chain = chain[:-2]  # Remove the () from the chain
-                    return self._parse_expression_string(chain + args_part)
+                        chain = chain[:-2]
+                    # Parse the full expression with args using literal chain expansion
+                    return self._parse_literal_chain_with_args(chain, args_part)
             else:
                 # Non-function alias
                 alias_id = expr_str
                 if hasattr(self, 'chain_aliases') and alias_id in self.chain_aliases:
                     chain = self.chain_aliases[alias_id]
-                    return self._parse_expression_string(chain)
+                    # IMPORTANT: Don't apply CID resolution to the chain components
+                    # Parse as literal attribute chain without name mapping
+                    return self._parse_literal_attribute_chain(chain)
             
             # Fallback to existing logic for backward compatibility
             if expr_str[1:].isdigit():
@@ -1604,6 +2107,31 @@ class FLOWCompiler:
                     return self._parse_expression_string(chain)
                 return ast.Name(id=f"ALIAS_{alias_id}", ctx=ast.Load())
         
+        # Handle compressed patterns first
+        if '!ins' in expr_str:
+            expr_str = expr_str.replace('!ins', '!in s')
+        
+        # Handle binary operations BEFORE method calls to catch expressions like method()+1
+        for op_char, op_class in [
+            ('==', ast.Eq), ('!=', ast.NotEq), ('<=', ast.LtE), ('>=', ast.GtE),
+            ('<', ast.Lt), ('>', ast.Gt), ('!in', ast.NotIn), ('in', ast.In),
+            ('+', ast.Add), ('-', ast.Sub), ('*', ast.Mult), ('/', ast.Div),
+        ]:
+            if op_char in expr_str:
+                # Split by the operator, but be careful with parentheses
+                parts = self._split_by_operator(expr_str, op_char)
+                if len(parts) == 2:
+                    left = self._parse_expression_string(parts[0].strip())
+                    right = self._parse_expression_string(parts[1].strip())
+                    if op_char in ['==', '!=', '<=', '>=', '<', '>', 'in', '!in']:
+                        op_map = {
+                            '==': ast.Eq(), '!=': ast.NotEq(), '<=': ast.LtE(), '>=': ast.GtE(),
+                            '<': ast.Lt(), '>': ast.Gt(), 'in': ast.In(), '!in': ast.NotIn()
+                        }
+                        return ast.Compare(left=left, ops=[op_map[op_char]], comparators=[right])
+                    else:
+                        return ast.BinOp(left=left, op=op_class(), right=right)
+        
         # Handle method calls with arguments: obj.method(args)
         if '(' in expr_str and ')' in expr_str:
             return self._parse_call_with_args(expr_str)
@@ -1611,6 +2139,21 @@ class FLOWCompiler:
         # Handle attribute access: obj.attr
         if '.' in expr_str and not self._is_number(expr_str):
             return self._parse_attribute_access(expr_str)
+        
+        # Handle placeholder with better context resolution
+        if expr_str == '?':
+            # Check if we're in a 'not in' context and can infer the container
+            # This is a common pattern in validation loops
+            if hasattr(self, 'current_loop_iterator'):
+                # Use the loop iterator as the container (common pattern)
+                return ast.Name(id=self.current_loop_iterator, ctx=ast.Load())
+            elif hasattr(self, 'last_defined_list'):
+                # Use the most recently defined list/container
+                return ast.Name(id=self.last_defined_list, ctx=ast.Load())
+            else:
+                # As a last resort, check for common validation patterns
+                # In validation contexts, it's often 'required_fields' or similar
+                return ast.Name(id='_container', ctx=ast.Load())
         
         # Handle dense builtins
         dense_builtins = {
@@ -1625,6 +2168,10 @@ class FLOWCompiler:
             if name in ['True', 'False', 'None']:
                 return ast.Constant(value=eval(name))
             return ast.Name(id=name, ctx=ast.Load())
+        
+        # Handle literal Python constants
+        if expr_str in ['True', 'False', 'None']:
+            return ast.Constant(value=eval(expr_str))
         
         # Handle function calls
         if expr_str.startswith('C(') and expr_str.endswith(')'):
@@ -1655,34 +2202,321 @@ class FLOWCompiler:
         except ValueError:
             pass
         
-        # Handle binary operations
-        for op_char, op_class in [
-            ('==', ast.Eq), ('!=', ast.NotEq), ('<=', ast.LtE), ('>=', ast.GtE),
-            ('<', ast.Lt), ('>', ast.Gt), ('!in', ast.NotIn), ('in', ast.In),
-            ('+', ast.Add), ('-', ast.Sub), ('*', ast.Mult), ('/', ast.Div),
-        ]:
-            if op_char in expr_str:
-                parts = expr_str.split(op_char, 1)
-                if len(parts) == 2:
-                    left = self._parse_expression_string(parts[0].strip())
-                    right = self._parse_expression_string(parts[1].strip())
-                    if op_char in ['==', '!=', '<=', '>=', '<', '>', 'in', '!in']:
-                        op_map = {
-                            '==': ast.Eq(), '!=': ast.NotEq(), '<=': ast.LtE(), '>=': ast.GtE(),
-                            '<': ast.Lt(), '>': ast.Gt(), 'in': ast.In(), '!in': ast.NotIn()
-                        }
-                        return ast.Compare(left=left, ops=[op_map[op_char]], comparators=[right])
-                    else:
-                        return ast.BinOp(left=left, op=op_class(), right=right)
+        # Handle subscripts: obj[index]
+        if '[' in expr_str and ']' in expr_str and not self._is_number(expr_str):
+            bracket_start = expr_str.index('[')
+            bracket_end = expr_str.rindex(']')
+            if bracket_end > bracket_start:
+                obj_str = expr_str[:bracket_start]
+                index_str = expr_str[bracket_start+1:bracket_end]
+                
+                # Parse the object and index
+                obj = self._parse_expression_string(obj_str.strip())
+                index = self._parse_expression_string(index_str.strip())
+                
+                return ast.Subscript(value=obj, slice=index, ctx=ast.Load())
         
-        # Apply name mapping if available
+        # Handle compressed patterns first
+        if '!ins' in expr_str:
+            expr_str = expr_str.replace('!ins', '!in s')
+        
+        # Apply name mapping if available, but with context awareness
         if expr_str in self.reverse_map:
             expr_str = self.reverse_map[expr_str]
         elif expr_str in self.name_map:
-            expr_str = self.name_map[expr_str]
+            # Context-aware expansion for ambiguous cases
+            if expr_str == 'st' and hasattr(self, '_current_context'):
+                # If we're in an os module context, prefer 'stat' over 'strip'
+                if self._current_context and 'os.' in self._current_context:
+                    expr_str = 'stat'
+                else:
+                    expr_str = self.name_map[expr_str]
+            else:
+                expr_str = self.name_map[expr_str]
         
         # Default: treat as variable name
         return ast.Name(id=expr_str, ctx=ast.Load())
+    
+    def _parse_ultra_dense_dict(self, dict_str: str) -> ast.AST:
+        """
+        Parse ultra-dense dictionary: {p2:#466,#758:F,p0:100,p1:30}
+        """
+        if not dict_str.startswith('{') or not dict_str.endswith('}'):
+            return ast.Dict(keys=[], values=[])
+        
+        inner = dict_str[1:-1]  # Remove braces
+        if not inner:
+            return ast.Dict(keys=[], values=[])
+        
+        keys = []
+        values = []
+        
+        # Split by comma, but handle nested structures
+        pairs = self._split_dict_pairs(inner)
+        
+        for pair in pairs:
+            if ':' in pair:
+                key_str, val_str = pair.split(':', 1)
+                
+                # Parse key
+                if key_str.startswith('p') and key_str[1:].isdigit():
+                    # Pool reference as key
+                    if hasattr(self, 'pools') and key_str in self.pools:
+                        key = ast.Constant(value=self.pools[key_str])
+                    else:
+                        key = ast.Constant(value=key_str)  # Fallback
+                elif key_str.startswith('#'):
+                    # Hash reference - need to resolve
+                    key = ast.Constant(value=key_str)  # Placeholder
+                else:
+                    key = self._parse_expression_string(key_str)
+                
+                # Parse value
+                value = self._parse_expression_string(val_str)
+                
+                keys.append(key)
+                values.append(value)
+        
+        return ast.Dict(keys=keys, values=values)
+
+    def _is_statement_block(self, content: str) -> bool:
+        """
+        Determine if braced content represents a statement block vs dictionary.
+        
+        Args:
+            content: Inner content of braces (without { })
+            
+        Returns:
+            True if this is a statement block, False if dictionary
+        """
+        if not content.strip():
+            return False
+        
+        # Check for statement keywords that indicate this is code, not data
+        statement_indicators = ['return', 'break', 'continue', 'pass', 'if ', 'for ', 
+                               'while ', 'try', 'except', '@', 'R', 'B', 'K', '_']
+        for indicator in statement_indicators:
+            if content.startswith(indicator) or f';{indicator}' in content:
+                return True
+        
+        # Check for semicolon-separated statements (common in CAI3)
+        if ';' in content:
+            return True
+        
+        # Check for assignment operators (excluding comparison operators)
+        # This regex matches '=' but not '==', '!=', '<=', '>='
+        assignment_pattern = r'(?<![!<>=])=(?!=)'
+        has_assignment = re.search(assignment_pattern, content)
+        
+        if has_assignment:
+            # For mixed content, analyze the structure more carefully
+            # Split by comma to check individual parts
+            parts = [part.strip() for part in content.split(',')]
+            
+            assignment_parts = 0
+            dict_parts = 0
+            
+            for part in parts:
+                if re.search(assignment_pattern, part):
+                    # Check if this looks like key = value vs key: value
+                    if ':' in part and part.find(':') < part.find('='):
+                        # Format like "key: x = y" - likely dictionary with assignment value
+                        dict_parts += 1
+                    else:
+                        # Format like "x = y" or "x = y: z" - likely assignment
+                        assignment_parts += 1
+                elif ':' in part and '=' not in part:
+                    # Pure key:value - dictionary part
+                    dict_parts += 1
+                else:
+                    # Ambiguous, but if it contains assignment, lean towards statement
+                    if '=' in part:
+                        assignment_parts += 1
+                    else:
+                        dict_parts += 1
+            
+            # If more assignment-like parts than dictionary parts, it's a statement block
+            # For ties (equal parts), if there are any assignments, lean towards statement
+            return assignment_parts >= dict_parts
+        
+        # If it looks like key:value pairs, it's likely a dictionary
+        if ':' in content and '=' not in content:
+            return False
+        
+        # Default to False to preserve existing behavior for actual dictionaries
+        return False
+
+    def _is_dictionary_literal(self, content: str) -> bool:
+        """
+        Determine if braced content represents a dictionary literal vs expression.
+        
+        Args:
+            content: Inner content of braces (without { })
+            
+        Returns:
+            True if this is a dictionary literal, False otherwise
+        """
+        if not content.strip():
+            return True  # Empty braces = empty dictionary
+        
+        # Check for clear dictionary patterns: key:value pairs
+        if ':' in content and '=' not in content:
+            # Likely dictionary if it has colons but no assignments
+            return True
+        
+        # Check for mixed key:value and key=value patterns
+        if ':' in content and '=' in content:
+            # Need to analyze more carefully - this could be a complex dictionary
+            # or a statement with both types of syntax
+            parts = [part.strip() for part in content.split(',')]
+            dict_parts = 0
+            
+            for part in parts:
+                if ':' in part and part.find(':') < part.find('=') if '=' in part else True:
+                    dict_parts += 1
+            
+            # If more than half the parts look like dictionary entries, treat as dictionary
+            return dict_parts > len(parts) / 2
+        
+        # Default to False - this is likely an expression or statement
+        return False
+
+    def _parse_statement_block(self, content: str) -> ast.AST:
+        """
+        Parse braced content as a statement block instead of dictionary.
+        
+        Args:
+            content: Inner content of braces (without { })
+            
+        Returns:
+            AST node representing the statement(s)
+        """
+        content = content.strip()
+        
+        if not content or content == '_':
+            return self._fix_ast_node_attributes(ast.Pass())
+        
+        # For CAI3 translation context, we need to parse this as an assignment
+        # Check if this is an assignment pattern
+        assignment_pattern = r'(?<![!<>=])=(?!=)'
+        if re.search(assignment_pattern, content):
+            # This is an assignment statement
+            equals_match = re.search(assignment_pattern, content)
+            if equals_match:
+                equals_pos = equals_match.start()
+                target_str = content[:equals_pos].strip()
+                value_str = content[equals_pos + 1:].strip()
+                
+                try:
+                    # For statement blocks, try using Python's built-in AST parser first
+                    # This avoids the compressed name expansion issues
+                    try:
+                        # Try parsing the full assignment as standard Python
+                        full_assignment = f"{target_str} = {value_str}"
+                        parsed = ast.parse(full_assignment, mode='exec')
+                        if parsed.body and isinstance(parsed.body[0], ast.Assign):
+                            assign_node = parsed.body[0]
+                            
+                            # Special handling for CAI3: if value is a set with single element,
+                            # extract the element (since {expr} in CAI3 means expr, not set)
+                            if (isinstance(assign_node.value, ast.Set) and 
+                                len(assign_node.value.elts) == 1 and
+                                value_str.startswith('{') and value_str.endswith('}')):
+                                # Extract the single expression from the set
+                                assign_node.value = assign_node.value.elts[0]
+                            
+                            return self._fix_ast_node_attributes(assign_node)
+                    except SyntaxError:
+                        # Fall back to custom parsing if standard Python fails
+                        pass
+                    
+                    # Parse target (left side of assignment)
+                    target = self._parse_expression_string(target_str)
+                    
+                    # Parse value (right side of assignment)
+                    # IMPORTANT: If value starts with '{', parse it recursively
+                    if value_str.startswith('{') and value_str.endswith('}'):
+                        # This might be a nested expression
+                        inner_content = value_str[1:-1].strip()
+                        
+                        # For CAI3 context, always try to parse braced content as expression first
+                        # since {expression} is common notation for computed values
+                        try:
+                            # Try parsing the inner content as a Python expression
+                            parsed_inner = ast.parse(inner_content, mode='eval')
+                            value = parsed_inner.body
+                        except SyntaxError:
+                            # If that fails, check if it's a statement block or dictionary
+                            if self._is_statement_block(inner_content):
+                                # Fall back to custom parsing for statement block
+                                value = self._parse_expression_string(inner_content)
+                            else:
+                                # It's a dictionary value
+                                value = self._parse_ultra_dense_dict(value_str)
+                    else:
+                        # Try Python AST parsing for the value first
+                        try:
+                            parsed_value = ast.parse(value_str, mode='eval')
+                            value = parsed_value.body
+                        except SyntaxError:
+                            # Fall back to custom parsing
+                            value = self._parse_expression_string(value_str)
+                    
+                    # Set proper context for assignment target
+                    if isinstance(target, ast.Name):
+                        target.ctx = ast.Store()
+                    elif isinstance(target, (ast.Attribute, ast.Subscript)):
+                        target.ctx = ast.Store()
+                    
+                    assign_node = ast.Assign(targets=[target], value=value)
+                    return self._fix_ast_node_attributes(assign_node)
+                    
+                except Exception as e:
+                    logger.warning(f"Failed to parse assignment in statement block '{content}': {e}")
+                    return self._fix_ast_node_attributes(ast.Pass())
+        
+        # Handle multiple semicolon-separated statements
+        if ';' in content:
+            # For now, parse the first statement
+            first_stmt = content.split(';')[0].strip()
+            if first_stmt:
+                return self._parse_statement_block(first_stmt)
+        
+        # Try to parse as a simple expression
+        try:
+            # Try Python AST parsing first
+            parsed = ast.parse(content, mode='eval')
+            expr = parsed.body
+            return self._fix_ast_node_attributes(ast.Expr(value=expr))
+        except SyntaxError:
+            # Fall back to custom parsing
+            try:
+                expr = self._parse_expression_string(content)
+                return self._fix_ast_node_attributes(ast.Expr(value=expr))
+            except:
+                return self._fix_ast_node_attributes(ast.Pass())
+
+    def _split_dict_pairs(self, inner: str) -> List[str]:
+        """Split dictionary pairs respecting nested structures."""
+        pairs = []
+        current = ""
+        depth = 0
+        
+        for char in inner:
+            if char in '{[(':
+                depth += 1
+            elif char in '}])':
+                depth -= 1
+            elif char == ',' and depth == 0:
+                pairs.append(current.strip())
+                current = ""
+                continue
+            current += char
+        
+        if current.strip():
+            pairs.append(current.strip())
+        
+        return pairs
     
     def _is_number(self, s: str) -> bool:
         """Check if string represents a number"""
@@ -1697,7 +2531,26 @@ class FLOWCompiler:
         # Find the function part and args part
         paren_idx = expr_str.index('(')
         func_part = expr_str[:paren_idx]
-        args_part = expr_str[paren_idx+1:-1]  # Remove ( and )
+        
+        # Find the matching closing parenthesis for the first opening parenthesis
+        paren_count = 0
+        closing_paren_idx = -1
+        for i in range(paren_idx, len(expr_str)):
+            if expr_str[i] == '(':
+                paren_count += 1
+            elif expr_str[i] == ')':
+                paren_count -= 1
+                if paren_count == 0:
+                    closing_paren_idx = i
+                    break
+        
+        if closing_paren_idx == -1:
+            # Fallback to old behavior if no matching parenthesis found
+            args_part = expr_str[paren_idx+1:-1]  # Remove ( and )
+            remainder = ""
+        else:
+            args_part = expr_str[paren_idx+1:closing_paren_idx]  # Arguments between matching parentheses
+            remainder = expr_str[closing_paren_idx+1:]  # Everything after the closing parenthesis
         
         # Check if func_part is a chain alias first (gN)
         if func_part.startswith('g') and func_part[1:].isdigit():
@@ -1726,22 +2579,214 @@ class FLOWCompiler:
                 if arg_str.strip():
                     args.append(self._parse_expression_string(arg_str.strip()))
         
-        return ast.Call(func=func_ast, args=args, keywords=[])
+        # Create the function call
+        call_ast = ast.Call(func=func_ast, args=args, keywords=[])
+        
+        # Handle remainder (like [1].lo() after the function call)
+        if remainder:
+            remainder = remainder.strip()
+            if remainder:
+                # Parse the remainder as additional operations on the call result
+                # For now, create a composite expression by recursively parsing
+                full_expr = f"_temp{remainder}"
+                remainder_ast = self._parse_expression_string(full_expr)
+                
+                # Replace the _temp with our call_ast
+                if isinstance(remainder_ast, ast.Attribute) and isinstance(remainder_ast.value, ast.Name) and remainder_ast.value.id == '_temp':
+                    remainder_ast.value = call_ast
+                    return remainder_ast
+                elif isinstance(remainder_ast, ast.Subscript) and isinstance(remainder_ast.value, ast.Name) and remainder_ast.value.id == '_temp':
+                    remainder_ast.value = call_ast
+                    return remainder_ast
+                elif isinstance(remainder_ast, ast.Call) and hasattr(remainder_ast.func, 'value') and isinstance(remainder_ast.func.value, ast.Name) and remainder_ast.func.value.id == '_temp':
+                    remainder_ast.func.value = call_ast
+                    return remainder_ast
+                else:
+                    # Fallback: try to parse manually
+                    return self._handle_chained_operations(call_ast, remainder)
+        
+        return call_ast
+    
+    def _handle_chained_operations(self, base_ast: ast.AST, remainder: str) -> ast.AST:
+        """Handle chained operations like [1].method() after a function call"""
+        current = base_ast
+        remainder = remainder.strip()
+        
+        # Process the remainder step by step
+        i = 0
+        while i < len(remainder):
+            if remainder[i] == '[':
+                # Handle subscript like [1]
+                closing_bracket = remainder.find(']', i)
+                if closing_bracket == -1:
+                    break
+                index_str = remainder[i+1:closing_bracket]
+                index_ast = self._parse_expression_string(index_str)
+                current = ast.Subscript(value=current, slice=index_ast, ctx=ast.Load())
+                i = closing_bracket + 1
+            elif remainder[i] == '.':
+                # Handle attribute access or method call
+                i += 1  # Skip the dot
+                # Find the end of the attribute/method name
+                attr_start = i
+                while i < len(remainder) and (remainder[i].isalnum() or remainder[i] == '_'):
+                    i += 1
+                attr_name = remainder[attr_start:i]
+                
+                # Expand abbreviations
+                expanded_attr = self.METHOD_ABBREVIATIONS.get(attr_name, attr_name)
+                if expanded_attr == attr_name:
+                    expanded_attr = self._expand_compressed_name(attr_name)
+                
+                # Check if this is a method call
+                if i < len(remainder) and remainder[i] == '(':
+                    # This is a method call
+                    paren_count = 0
+                    args_start = i + 1
+                    for j in range(i, len(remainder)):
+                        if remainder[j] == '(':
+                            paren_count += 1
+                        elif remainder[j] == ')':
+                            paren_count -= 1
+                            if paren_count == 0:
+                                args_end = j
+                                args_str = remainder[args_start:args_end]
+                                # Parse arguments
+                                args = []
+                                if args_str.strip():
+                                    arg_strs = self._split_args(args_str)
+                                    for arg_str in arg_strs:
+                                        if arg_str.strip():
+                                            args.append(self._parse_expression_string(arg_str.strip()))
+                                
+                                func_ast = ast.Attribute(value=current, attr=expanded_attr, ctx=ast.Load())
+                                current = ast.Call(func=func_ast, args=args, keywords=[])
+                                i = j + 1
+                                break
+                else:
+                    # This is just an attribute access
+                    current = ast.Attribute(value=current, attr=expanded_attr, ctx=ast.Load())
+            else:
+                # Skip unknown characters
+                i += 1
+        
+        return current
+    
+    def _split_by_operator(self, expr_str: str, operator: str) -> List[str]:
+        """Split expression by operator, respecting parentheses and brackets"""
+        parts = []
+        current_part = ""
+        paren_depth = 0
+        bracket_depth = 0
+        i = 0
+        
+        while i < len(expr_str):
+            if expr_str[i] == '(':
+                paren_depth += 1
+                current_part += expr_str[i]
+            elif expr_str[i] == ')':
+                paren_depth -= 1
+                current_part += expr_str[i]
+            elif expr_str[i] == '[':
+                bracket_depth += 1
+                current_part += expr_str[i]
+            elif expr_str[i] == ']':
+                bracket_depth -= 1
+                current_part += expr_str[i]
+            elif (paren_depth == 0 and bracket_depth == 0 and 
+                  expr_str[i:i+len(operator)] == operator):
+                # Found the operator at the top level
+                parts.append(current_part)
+                current_part = ""
+                i += len(operator) - 1  # Skip the operator
+            else:
+                current_part += expr_str[i]
+            i += 1
+        
+        if current_part:
+            parts.append(current_part)
+        
+        return parts
     
     def _parse_attribute_access(self, expr_str: str) -> ast.AST:
         """Parse attribute access: obj.attr or s.c.ge"""
         parts = expr_str.split('.')
         
-        # Start with the first part
-        result = self._parse_simple_name(parts[0])
+        # Start with the first part (might include subscripts)
+        result = self._parse_name_with_subscripts(parts[0])
         
         # Build the attribute chain
         for attr in parts[1:]:
-            # Expand compressed attribute names
-            attr = self._expand_compressed_name(attr)
-            result = ast.Attribute(value=result, attr=attr, ctx=ast.Load())
+            # Check if this attribute has subscripts (like e[l])
+            if '[' in attr and ']' in attr:
+                # Split the attribute and subscript
+                bracket_idx = attr.index('[')
+                attr_name = attr[:bracket_idx]
+                subscript_part = attr[bracket_idx:]
+                
+                # First apply attribute access
+                expanded_attr = self.METHOD_ABBREVIATIONS.get(attr_name, attr_name)
+                if expanded_attr == attr_name:
+                    expanded_attr = self._expand_compressed_name(attr_name)
+                
+                result = ast.Attribute(value=result, attr=expanded_attr, ctx=ast.Load())
+                
+                # Then handle subscripts
+                result = self._apply_subscripts(result, subscript_part)
+            else:
+                # Regular attribute access
+                expanded_attr = self.METHOD_ABBREVIATIONS.get(attr, attr)
+                if expanded_attr == attr:
+                    expanded_attr = self._expand_compressed_name(attr)
+                
+                result = ast.Attribute(value=result, attr=expanded_attr, ctx=ast.Load())
         
         return result
+    
+    def _parse_name_with_subscripts(self, name_expr: str) -> ast.AST:
+        """Parse a name that might have subscripts like 'arr[0]' or just 'name'"""
+        if '[' not in name_expr:
+            return self._parse_simple_name(name_expr)
+        
+        # Split name and subscripts
+        bracket_idx = name_expr.index('[')
+        name = name_expr[:bracket_idx]
+        subscript_part = name_expr[bracket_idx:]
+        
+        # Parse the base name
+        result = self._parse_simple_name(name)
+        
+        # Apply subscripts
+        return self._apply_subscripts(result, subscript_part)
+    
+    def _apply_subscripts(self, base_ast: ast.AST, subscript_part: str) -> ast.AST:
+        """Apply subscripts like [0][1] to a base AST node"""
+        current = base_ast
+        i = 0
+        
+        while i < len(subscript_part):
+            if subscript_part[i] == '[':
+                # Find the matching closing bracket
+                bracket_count = 0
+                start = i + 1
+                for j in range(i, len(subscript_part)):
+                    if subscript_part[j] == '[':
+                        bracket_count += 1
+                    elif subscript_part[j] == ']':
+                        bracket_count -= 1
+                        if bracket_count == 0:
+                            index_str = subscript_part[start:j]
+                            index_ast = self._parse_expression_string(index_str)
+                            current = ast.Subscript(value=current, slice=index_ast, ctx=ast.Load())
+                            i = j + 1
+                            break
+                else:
+                    # No matching bracket found
+                    break
+            else:
+                i += 1
+        
+        return current
     
     def _parse_simple_name(self, name: str) -> ast.AST:
         """Parse a simple name, applying mappings"""
@@ -1788,6 +2833,65 @@ class FLOWCompiler:
         # Apply common expansions
         return attr_expansions.get(name, name)
     
+    def _parse_literal_attribute_chain(self, chain: str) -> ast.AST:
+        """
+        Parse an attribute chain literally without applying CID resolution.
+        This is used for chain aliases to preserve the original attribute names.
+        """
+        parts = chain.split('.')
+        
+        # Start with the first part - only apply basic builtins, no CID resolution
+        first_part = parts[0]
+        dense_builtins = {
+            'T': 'True', 'F': 'False', 'N': 'None',
+            's': 'self', 'c': 'cls'
+        }
+        
+        if first_part in dense_builtins:
+            expanded = dense_builtins[first_part]
+            if expanded in ['True', 'False', 'None']:
+                result = ast.Constant(value=eval(expanded))
+            else:
+                result = ast.Name(id=expanded, ctx=ast.Load())
+        else:
+            result = ast.Name(id=first_part, ctx=ast.Load())
+        
+        # Build the attribute chain - use literal attribute names
+        for attr in parts[1:]:
+            # For chain aliases, preserve the literal attribute name without compression
+            # Only apply basic expansions for known compressed forms
+            attr_expansions = {
+                'c': 'config',
+                'ge': 'get',
+                'se': 'set', 
+                'it': 'items',
+                'no': 'now',
+                'lo': 'loads'
+            }
+            # Apply expansion but don't use CID resolution
+            literal_attr = attr_expansions.get(attr, attr)
+            result = ast.Attribute(value=result, attr=literal_attr, ctx=ast.Load())
+        
+        return result
+    
+    def _parse_literal_chain_with_args(self, chain: str, args_part: str) -> ast.AST:
+        """
+        Parse a chain alias with function call arguments, treating the chain literally.
+        """
+        # Parse the chain without CID resolution
+        func_ast = self._parse_literal_attribute_chain(chain)
+        
+        # Parse arguments normally
+        args_str = args_part[1:-1]  # Remove ( and )
+        args = []
+        if args_str.strip():
+            arg_strings = self._split_args(args_str)
+            for arg_str in arg_strings:
+                if arg_str.strip():
+                    args.append(self._parse_expression_string(arg_str.strip()))
+        
+        return ast.Call(func=func_ast, args=args, keywords=[])
+
     def _split_args(self, args_str: str) -> List[str]:
         """Split argument string by commas, respecting nested structures"""
         args = []
@@ -1940,8 +3044,7 @@ class FLOWCompiler:
         
         elif isinstance(stmt, ast.Try):
             # Ultra-compact try: T{body}X{handler}
-            body_parts = [self._stmt_to_ultra_compact(s, locals_map, attrs_map) for s in stmt.body]
-            body = ';'.join(filter(None, body_parts))
+            body = self._generate_ultra_dense_try_body(stmt, locals_map, attrs_map)
             
             if stmt.handlers:
                 handler = stmt.handlers[0]  # Take first handler
@@ -2003,8 +3106,17 @@ class FLOWCompiler:
                 # Short strings inline, quoted
                 if len(node.value) <= 3:
                     return f"'{node.value}'"
-                # Hash longer strings for ultra-compression
-                return f"#{hash(node.value) % 1000:03d}"
+                # Hash longer strings for ultra-compression with context metadata
+                hash_ref = f"#{hash(node.value) % 10000:04d}"
+                
+                # Store with metadata about original context
+                # The resolution logic will add quotes based on context
+                self.hash_to_value[hash_ref] = {
+                    'value': node.value,
+                    'type': 'string',
+                    'needs_quotes': True  # Flag for resolution logic
+                }
+                return hash_ref
             return str(node.value)
         elif isinstance(node, ast.Name):
             if node.id == 'self':
@@ -2183,3 +3295,396 @@ class FLOWCompiler:
         
         # Fallback to general value compression
         return self._compress_value(node, locals_map, attrs_map)
+
+    def _generate_ultra_dense_try_body(self, try_node: ast.Try, locals_map: Dict[str, str], attrs_map: Dict[str, str]) -> str:
+        """Generate properly formatted ultra-dense try body."""
+        body_parts = []
+        
+        for stmt in try_node.body:
+            if isinstance(stmt, ast.For):
+                # Special handling for for-loops in try blocks
+                target = self._compress_target(stmt.target, locals_map, attrs_map)
+                iter_val = self._compress_value(stmt.iter, locals_map, attrs_map)
+                
+                # Generate for-loop body parts
+                loop_body_parts = []
+                for loop_stmt in stmt.body:
+                    loop_part = self._stmt_to_ultra_compact(loop_stmt, locals_map, attrs_map)
+                    if loop_part:
+                        loop_body_parts.append(loop_part)
+                
+                # CRITICAL: Ensure proper bracket structure
+                # Format: @target,iter{body} NOT @target,iter{) = ...
+                loop_body = ';'.join(loop_body_parts)
+                body_parts.append(f"@{target},{iter_val}{{{loop_body}}}")
+            else:
+                # Regular statement handling
+                compact_stmt = self._stmt_to_ultra_compact(stmt, locals_map, attrs_map)
+                if compact_stmt:
+                    body_parts.append(compact_stmt)
+        
+        return ';'.join(body_parts)
+
+    def _parse_literal_chain_with_args(self, chain: str, args_part: str) -> ast.AST:
+        """
+        Parse a chain like 's.config.get' with args like '(arg1, arg2)' 
+        without applying CID resolution to the chain components.
+        This preserves literal attribute names for chain aliases.
+        """
+        # Parse the chain into attribute access
+        chain_ast = self._parse_literal_attribute_chain(chain)
+        
+        # Parse arguments from the args_part
+        if args_part.startswith('(') and args_part.endswith(')'):
+            args_str = args_part[1:-1]  # Remove parentheses
+            args = []
+            
+            if args_str.strip():
+                # Split arguments carefully, respecting nested structures
+                arg_strings = self._split_args(args_str)
+                for arg_str in arg_strings:
+                    arg_str = arg_str.strip()
+                    if arg_str:
+                        arg_ast = self._parse_expression_string(arg_str)
+                        args.append(arg_ast)
+            
+            # Create function call
+            call_node = ast.Call(func=chain_ast, args=args, keywords=[])
+            return self._fix_ast_node_attributes(call_node)
+        
+        return chain_ast
+
+    def _parse_literal_attribute_chain(self, chain: str) -> ast.AST:
+        """
+        Parse a chain like 's.config.get' into AST attribute access
+        without applying name mapping to preserve literal chains.
+        This is critical for chain aliases to work correctly.
+        """
+        parts = chain.split('.')
+        
+        # Handle the first part - expand common abbreviations
+        first_part = parts[0]
+        if first_part == 's':
+            result = ast.Name(id='self', ctx=ast.Load())
+        elif first_part == 'c':
+            result = ast.Name(id='cls', ctx=ast.Load())
+        else:
+            result = ast.Name(id=first_part, ctx=ast.Load())
+        
+        # Build the attribute chain
+        for part in parts[1:]:
+            # DON'T apply name mapping here - keep literal attribute names
+            result = ast.Attribute(value=result, attr=part, ctx=ast.Load())
+        
+        return self._fix_ast_node_attributes(result)
+
+    def _parse_ultra_dense_try_except(self, stmt_str: str) -> ast.AST:
+        """
+        Parse T{body}X{handler} format with improved bracket matching and for-loop handling.
+        """
+        logger.debug(f"Parsing ultra-dense try-except: {stmt_str}")
+        
+        try:
+            if not stmt_str.startswith('T{'):
+                return self._fix_ast_node_attributes(ast.Pass())
+            
+            # Improved brace matching that handles nested for-loops
+            brace_depth = 0
+            try_body_end = -1
+            in_for_loop = False
+            
+            i = 2  # Start after 'T{'
+            while i < len(stmt_str):
+                char = stmt_str[i]
+                
+                # Check for for-loop pattern @
+                if char == '@' and i + 1 < len(stmt_str):
+                    # This might be a for-loop
+                    in_for_loop = True
+                
+                if char == '{':
+                    brace_depth += 1
+                elif char == '}':
+                    if brace_depth == 0:
+                        # This is the closing brace for the try block
+                        try_body_end = i
+                        break
+                    brace_depth -= 1
+                
+                i += 1
+            
+            if try_body_end == -1:
+                self.logger.warning("Could not find end of try body")
+                return self._fix_ast_node_attributes(ast.Pass())
+            
+            # Extract and parse try body
+            body_str = stmt_str[2:try_body_end]
+            
+            # Special handling for for-loops in try blocks
+            if '@' in body_str and ',' in body_str and '{' in body_str:
+                # This is a for-loop, parse it specially
+                body_stmts = [self._parse_for_loop_statement(body_str)]
+            else:
+                body_stmts = self._parse_block_statements(body_str)
+            
+            # Check for except handler
+            if try_body_end + 1 < len(stmt_str) and stmt_str[try_body_end + 1] == 'X':
+                # Parse except handler
+                handler_start = try_body_end + 1
+                handler = self._parse_except_handler_safe(stmt_str[handler_start:])
+                handlers = [handler] if handler else []
+            else:
+                handlers = []
+            
+            return self._fix_ast_node_attributes(
+                ast.Try(body=body_stmts or [ast.Pass()], 
+                       handlers=handlers, 
+                       orelse=[], 
+                       finalbody=[])
+            )
+            
+        except Exception as e:
+            self.logger.error(f"Error parsing try-except: {e}")
+            return self._fix_ast_node_attributes(ast.Pass())
+
+    def _parse_except_handler_safe(self, handler_str: str) -> ast.ExceptHandler:
+        """
+        Safely parse an except handler from X{...} format.
+        
+        Args:
+            handler_str: Handler string starting with 'X'
+            
+        Returns:
+            AST ExceptHandler node
+        """
+        logger.debug(f"Parsing except handler: {handler_str}")
+        
+        try:
+            if not handler_str.startswith('X'):
+                return None
+            
+            # Determine handler pattern: X{body} or X(exception_type){body}
+            has_exc_type = (len(handler_str) > 1 and handler_str[1] == '(')
+            
+            if has_exc_type:
+                # Pattern: X(exception_type){handler_body}
+                handler_start = 2  # Skip X(
+                # Find the closing ) for exception type
+                paren_end = handler_str.find(')', handler_start)
+                if paren_end == -1:
+                    logger.warning("Malformed exception type specification")
+                    return ast.ExceptHandler(type=None, name=None, body=[ast.Pass()])
+                
+                exc_type_str = handler_str[handler_start:paren_end]
+                exc_type = ast.Name(id=exc_type_str, ctx=ast.Load()) if exc_type_str.strip() else None
+                
+                # Find handler body after ){
+                brace_start = handler_str.find('{', paren_end)
+                if brace_start == -1:
+                    logger.warning("Missing { after exception type")
+                    return ast.ExceptHandler(type=exc_type, name=None, body=[ast.Pass()])
+                
+                # Find the handler body end by tracking nested braces
+                brace_depth = 0
+                handler_body_end = -1
+                
+                for i, char in enumerate(handler_str[brace_start + 1:], brace_start + 1):
+                    if char == '{':
+                        brace_depth += 1
+                    elif char == '}':
+                        if brace_depth == 0:
+                            handler_body_end = i
+                            break
+                        brace_depth -= 1
+                
+                if handler_body_end == -1:
+                    handler_body_end = len(handler_str) - 1
+                
+                handler_body_str = handler_str[brace_start+1:handler_body_end]
+                logger.debug(f"Exception type: {exc_type_str}, handler body: {handler_body_str}")
+            else:
+                # Pattern: X{handler_body}
+                handler_start = 2  # Skip X{
+                
+                # Find the handler body end by tracking nested braces
+                brace_depth = 0
+                handler_body_end = -1
+                
+                for i, char in enumerate(handler_str[handler_start:], handler_start):
+                    if char == '{':
+                        brace_depth += 1
+                    elif char == '}':
+                        if brace_depth == 0:
+                            handler_body_end = i
+                            break
+                        brace_depth -= 1
+                
+                if handler_body_end == -1:
+                    handler_body_end = len(handler_str) - 1
+                
+                handler_body_str = handler_str[handler_start:handler_body_end]
+                exc_type = None
+                logger.debug(f"No exception type specified, handler body: {handler_body_str}")
+            
+            # Parse handler body statements
+            handler_stmts = self._parse_block_statements(handler_body_str) if handler_body_str.strip() else [ast.Pass()]
+            
+            return ast.ExceptHandler(
+                type=exc_type,
+                name=None,
+                body=handler_stmts or [ast.Pass()]
+            )
+            
+        except Exception as e:
+            logger.error(f"Error parsing except handler: {e}")
+            return ast.ExceptHandler(type=None, name=None, body=[ast.Pass()])
+
+    def _parse_block_statements(self, block_str: str) -> List[ast.AST]:
+        """Parse semicolon-separated statements in a block with support for nested structures."""
+        logger.debug(f"Parsing block statements: {block_str}")
+        stmts = []
+        
+        # Split statements respecting nested structures
+        stmt_parts = []
+        current_stmt = ""
+        brace_depth = 0
+        paren_depth = 0
+        
+        i = 0
+        while i < len(block_str):
+            char = block_str[i]
+            current_stmt += char
+            
+            if char == '{':
+                brace_depth += 1
+            elif char == '}':
+                brace_depth -= 1
+            elif char == '(':
+                paren_depth += 1
+            elif char == ')':
+                paren_depth -= 1
+            elif char == ';' and brace_depth == 0 and paren_depth == 0:
+                # Found a statement separator at top level
+                stmt_parts.append(current_stmt[:-1])  # Remove the semicolon
+                current_stmt = ""
+            i += 1
+        
+        # Add the last statement if any
+        if current_stmt.strip():
+            stmt_parts.append(current_stmt)
+        
+        for stmt_str in stmt_parts:
+            stmt_str = stmt_str.strip()
+            if stmt_str:
+                logger.debug(f"Parsing statement: {stmt_str}")
+                
+                # Use safe parsing with fallback for each statement
+                try:
+                    # Parse each statement type with enhanced error handling
+                    if stmt_str.startswith('@') and '{' in stmt_str:
+                        # For-loop pattern like @key,s.v.items(){...}
+                        stmt = self._parse_for_loop_statement(stmt_str)
+                        logger.debug(f"Parsed as for-loop")
+                    elif '=' in stmt_str and not any(op in stmt_str for op in ['==', '!=', '<=', '>=']):
+                        stmt = self._parse_assignment(stmt_str)
+                        logger.debug(f"Parsed as assignment")
+                    elif stmt_str.startswith('R'):
+                        stmt = self._parse_return(stmt_str)
+                        logger.debug(f"Parsed as return")
+                    elif stmt_str == '_':
+                        stmt = ast.Pass()
+                        logger.debug(f"Parsed as pass")
+                    else:
+                        # Try as expression with safe fallback
+                        try:
+                            expr = self._parse_expression_string(stmt_str)
+                            stmt = ast.Expr(value=expr)
+                            logger.debug(f"Parsed as expression")
+                        except Exception as e:
+                            logger.debug(f"Failed to parse as expression, using pass: {e}")
+                            stmt = ast.Pass()
+                    
+                    # Fix AST attributes BEFORE validation
+                    if stmt:
+                        stmt = self._fix_ast_node_attributes(stmt)
+                    
+                    # Validate the parsed statement by checking if it can be converted to code
+                    try:
+                        import ast as ast_module
+                        # Try to compile the statement to catch any subtle issues
+                        module = ast_module.Module(body=[stmt], type_ignores=[])
+                        compile(module, '<string>', 'exec')
+                        logger.debug(f"Statement validation successful")
+                    except Exception as validation_error:
+                        logger.warning(f"Statement validation failed for '{stmt_str}': {validation_error}")
+                        # Use Pass as safe fallback with proper attributes
+                        stmt = self._fix_ast_node_attributes(ast.Pass())
+                
+                except Exception as parse_error:
+                    logger.warning(f"Failed to parse statement '{stmt_str}': {parse_error}")
+                    # Always fall back to Pass for unparseable statements with proper attributes
+                    stmt = self._fix_ast_node_attributes(ast.Pass())
+                
+                # Ensure AST attributes are set (redundant safety check)
+                if stmt and not hasattr(stmt, 'lineno'):
+                    stmt = self._fix_ast_node_attributes(stmt)
+                
+                if stmt:
+                    stmts.append(stmt)
+        
+        logger.debug(f"Parsed {len(stmts)} statements from block")
+        return stmts
+
+    def _parse_for_loop_statement(self, stmt_str: str) -> ast.AST:
+        """Parse for-loop statement like @key,s.v.items(){...}"""
+        logger.debug(f"Parsing for-loop statement: {stmt_str}")
+        
+        try:
+            # Extract parts: @target,iterable{body}
+            at_idx = stmt_str.index('@')
+            comma_idx = stmt_str.index(',')
+            brace_idx = stmt_str.index('{')
+            close_brace_idx = stmt_str.rindex('}')
+            
+            target_str = stmt_str[at_idx+1:comma_idx].strip()
+            iter_str = stmt_str[comma_idx+1:brace_idx].strip()
+            body_str = stmt_str[brace_idx+1:close_brace_idx].strip()
+            
+            # Parse target
+            target = self._parse_expression_string(target_str)
+            if isinstance(target, ast.Name):
+                target.ctx = ast.Store()
+            
+            # Parse iterable
+            iter_expr = self._parse_expression_string(iter_str)
+            
+            # Parse body statements
+            body_stmts = self._parse_block_statements(body_str) if body_str else [ast.Pass()]
+            
+            for_node = ast.For(target=target, iter=iter_expr, body=body_stmts, orelse=[])
+            return self._fix_ast_node_attributes(for_node)
+            
+        except Exception as e:
+            logger.debug(f"Error parsing for-loop statement: {e}")
+            return self._fix_ast_node_attributes(ast.Pass())
+
+    def _safe_parse_statement(self, stmt_str: str) -> ast.AST:
+        """Safely parse a statement with fallback to Pass if parsing fails."""
+        try:
+            # Try normal parsing
+            return self._parse_flow_statement([stmt_str], 0)[0]
+        except Exception as e:
+            self.logger.warning(f"Failed to parse statement '{stmt_str}': {e}")
+            # Return a Pass statement as fallback
+            return ast.Pass()
+
+    def _fix_ast_node_attributes(self, node: ast.AST, lineno: int = 1, col_offset: int = 0) -> ast.AST:
+        """Fix AST nodes by adding missing lineno and col_offset attributes."""
+        for child in ast.walk(node):
+            if not hasattr(child, 'lineno') or child.lineno is None:
+                child.lineno = lineno
+            if not hasattr(child, 'col_offset') or child.col_offset is None:
+                child.col_offset = col_offset
+        
+        ast.fix_missing_locations(node)
+        return node

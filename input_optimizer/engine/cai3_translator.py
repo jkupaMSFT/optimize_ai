@@ -519,46 +519,11 @@ class CAI3Translator:
         """Replace the body of a function/method"""
         
         if patch.body_fidelity == BodyFidelity.B1:
-            self.logger.debug(f"=== REPLACING BODY FOR {patch.target_cid} ===")
-            self.logger.debug(f"Original body content: {repr(patch.body_content)}")
-            
-            # Apply malformed statement fixes to patch body content before parsing
-            fixed_body_content = self._apply_malformed_fixes_to_body(patch.body_content)
-            self.logger.debug(f"After malformed fixes: {repr(fixed_body_content)}")
-            
             # Convert FLOW to Python AST with enhanced flags
             flow_compiler = self._create_flow_compiler(cai3_map, cai3_full)
-            
-            self.logger.debug(f"📤 SENDING TO FLOW COMPILER: {repr(fixed_body_content)}")
-            try:
-                new_body_stmts = flow_compiler._parse_flow_lines(
-                    fixed_body_content.split('\n'), 0
-                )[0]
-                self.logger.debug(f"📥 FLOW COMPILER RETURNED: {len(new_body_stmts)} statements")
-                
-                # Log each statement the FLOW compiler produced
-                for i, stmt in enumerate(new_body_stmts):
-                    try:
-                        stmt_code = ast.unparse(stmt) if hasattr(ast, 'unparse') else str(type(stmt))
-                        self.logger.debug(f"  Statement {i}: {repr(stmt_code)}")
-                        
-                        # Check for problematic patterns in FLOW compiler output
-                        if 'except ' in stmt_code and 'try:' not in stmt_code:
-                            self.logger.error(f"🚨 FLOW COMPILER PRODUCED ORPHANED EXCEPT: {repr(stmt_code)}")
-                        if stmt_code.strip() == 'pass':
-                            self.logger.error(f"🚨 FLOW COMPILER PRODUCED PASS STATEMENT: {repr(stmt_code)}")
-                        if '.data_buffer.ge:' in stmt_code or ')[].data_buffer' in stmt_code:
-                            self.logger.error(f"🚨 FLOW COMPILER PRODUCED MALFORMED EXPRESSION: {repr(stmt_code)}")
-                            
-                    except Exception as e:
-                        self.logger.debug(f"  Statement {i}: <unparseable: {e}>")
-                        
-            except Exception as e:
-                self.logger.error(f"❌ FLOW COMPILER PARSING FAILED: {e}")
-                import traceback
-                self.logger.debug(f"FLOW compiler traceback: {traceback.format_exc()}")
-                # Fallback to empty body
-                new_body_stmts = [ast.Pass()]
+            new_body_stmts = flow_compiler._parse_flow_lines(
+                patch.body_content.split('\n'), 0
+            )[0]
             
             # De-minify the B1 body before writing
             # Build short->orig map for this cid
@@ -678,39 +643,14 @@ class CAI3Translator:
             else:
                 stmt_code = self._ast_to_source(stmt)
             
-            # Handle multiline statements properly - don't split control structures
-            if self._is_multiline_control_structure(stmt):
-                # For try-except, if-else, for loops, etc., add as single block with proper indentation
-                lines_in_stmt = stmt_code.split('\n')
-                for line in lines_in_stmt:
-                    if line.strip():
-                        new_lines.append(body_indent + line)
-            else:
-                # For simple statements, can split normally
-                for line in stmt_code.split('\n'):
-                    if line.strip():
-                        new_lines.append(body_indent + line)
+            # Add proper indentation
+            for line in stmt_code.split('\n'):
+                if line.strip():
+                    new_lines.append(body_indent + line)
         
         # Insert the new lines
         result_lines = lines[:insert_position] + new_lines + lines[insert_position:]
         return '\n'.join(result_lines)
-    
-    def _is_multiline_control_structure(self, stmt: ast.AST) -> bool:
-        """
-        Check if a statement is a multiline control structure that should not be split.
-        """
-        return isinstance(stmt, (
-            ast.Try,        # try-except blocks
-            ast.If,         # if-elif-else statements  
-            ast.For,        # for loops
-            ast.While,      # while loops
-            ast.With,       # with statements
-            ast.FunctionDef, # function definitions
-            ast.ClassDef,   # class definitions
-            ast.AsyncFor,   # async for loops
-            ast.AsyncWith,  # async with statements
-            ast.AsyncFunctionDef  # async function definitions
-        ))
     
     def _create_flow_compiler(self, cai3_map: CAI3Map, cai3_full: CAI3Full = None) -> FLOWCompiler:
         """
@@ -906,19 +846,10 @@ class CAI3Translator:
                 stmt_code = ast.unparse(stmt)
             else:
                 stmt_code = self._ast_to_source(stmt)
-            
-            # Handle multiline statements properly - don't split control structures
-            if self._is_multiline_control_structure(stmt):
-                # For try-except, if-else, for loops, etc., add as single block with proper indentation
-                lines_in_stmt = stmt_code.split('\n')
-                for line in lines_in_stmt:
-                    if line.strip():
-                        new_body_lines.append(body_indent + line)
-            else:
-                # For simple statements, can split normally
-                for line in stmt_code.split('\n'):
-                    if line.strip():
-                        new_body_lines.append(body_indent + line)
+            # Add proper indentation
+            for line in stmt_code.split('\n'):
+                if line.strip():
+                    new_body_lines.append(body_indent + line)
         
         # Find where the body starts (after the function def and any decorators/docstrings)
         body_start_idx = func_line_idx + 1
@@ -1324,19 +1255,8 @@ class CAI3Translator:
         # Validate and repair body structures
         repair_count = 0
         validation_count = 0
-        malformed_fix_count = 0
         for cid, body_content in lite_data['bodies'].items():
             validation_count += 1
-            
-            # CRITICAL FIX: Apply malformed statement fixing to body content before parsing
-            # This fixes patterns like f!inud?(s.l.er(...),RF):_ before they cause parsing failures
-            original_body = body_content
-            body_content = self._apply_malformed_fixes_to_body(body_content)
-            if body_content != original_body:
-                malformed_fix_count += 1
-                self.logger.debug(f"Applied malformed fixes to body {cid}: {repr(original_body)} -> {repr(body_content)}")
-                lite_data['bodies'][cid] = body_content
-            
             if 'T{' in body_content:
                 self.logger.debug(f"Validating T{{}} structure in body for {cid}")
                 # Check for incomplete T{} structures
@@ -1362,7 +1282,7 @@ class CAI3Translator:
                 else:
                     self.logger.debug(f"T{{}} structure validation passed for {cid}")
         
-        self.logger.debug(f"Body validation complete: {validation_count} bodies checked, {repair_count} repaired, {malformed_fix_count} malformed patterns fixed")
+        self.logger.debug(f"Body validation complete: {validation_count} bodies checked, {repair_count} repaired")
         
         return lite_data
 
@@ -1373,18 +1293,7 @@ class CAI3Translator:
         result = {}
         
         # CRITICAL FIX: Reserved names that should never be used as variable names
-        reserved_names = {
-            "__init__", "__class__", "__dict__", "__annotations__", "__slots__",
-            "__name__", "__module__", "__doc__", "__file__", "__builtins__",
-            "os", "sys", "re", "json", "datetime", "typing"  # Common imports that shouldn't be variables
-        }
-        
-        # Python builtins that shouldn't be used as variables in most contexts
-        python_builtins = {
-            "str", "int", "float", "list", "dict", "set", "tuple", "bool",
-            "len", "range", "enumerate", "zip", "map", "filter", "sorted",
-            "open", "print", "input", "type", "isinstance", "hasattr"
-        }
+        reserved_names = {"__init__", "__class__", "__dict__", "__annotations__", "__slots__"}
         
         # 1) Process locals first with highest priority
         for short, orig in local_map.items():
@@ -1392,14 +1301,6 @@ class CAI3Translator:
             if orig in reserved_names:
                 result[short] = f"{orig}_var"
                 self.logger.debug(f"Protected reserved name: {short} -> {orig} became {short} -> {orig}_var")
-            elif orig in python_builtins and short not in {'s', 'self'}:  # Allow 's' -> 'self' 
-                # Be more selective about builtin protection
-                if short in {'i', 'j', 'k'} and orig in {'int', 'str'}:
-                    # Don't protect common loop variables from int/str
-                    result[short] = short  # Use short name instead
-                    self.logger.debug(f"Protected builtin by using short name: {short} -> {orig} became {short} -> {short}")
-                else:
-                    result[short] = orig  # Allow other builtin mappings
             else:
                 result[short] = orig
         
@@ -1413,14 +1314,6 @@ class CAI3Translator:
             if short == "i" and orig == "__init__":
                 # Never map 'i' to '__init__' in variable contexts
                 self.logger.debug(f"Blocked problematic mapping: i -> __init__")
-                continue
-            
-            # Additional protection for common loop variables    
-            if short in {'i', 'j', 'k'} and orig in reserved_names:
-                # Use descriptive names for loop variables instead of reserved names
-                descriptive_names = {'i': 'item', 'j': 'index', 'k': 'key'}
-                result[short] = descriptive_names.get(short, short)
-                self.logger.debug(f"Protected loop variable: {short} -> {orig} became {short} -> {result[short]}")
                 continue
                 
             if orig in reserved_names:
@@ -1472,22 +1365,12 @@ class CAI3Translator:
                     inner_end = cur.index("}:_")
                     inner_cond = cur[inner_start:inner_end]
                     
-                    # Normalize expressions CAREFULLY to avoid creating malformed chained calls
+                    # Normalize expressions
                     guard_norm = self._normalize_expr_for_validation(guard)
                     inner_norm = self._normalize_expr_for_validation(inner_cond)
                     
-                    # CRITICAL FIX: Ensure clean action statement
-                    clean_action = nxt.strip()
-                    # Remove any prefix artifacts that might have been added
-                    if clean_action.startswith('.'):
-                        clean_action = clean_action[1:]  # Remove leading dot
-                    
-                    # Build merged if statement with proper structure
-                    if inner_norm and inner_norm.strip() and inner_norm.strip() != "_":
-                        merged_if = f"if ({guard_norm}) and ({inner_norm}):\n    {clean_action}"
-                    else:
-                        merged_if = f"if {guard_norm}:\n    {clean_action}"
-                    
+                    # Build merged if statement
+                    merged_if = f"if ({guard_norm}) and ({inner_norm}):\n    {nxt}"
                     merged.append(merged_if)
                     self.logger.debug(f"Merged validation pattern: '{cur}' + '{nxt}' -> '{merged_if}'")
                     i += 2
@@ -1504,124 +1387,25 @@ class CAI3Translator:
     def _normalize_expr_for_validation(self, expr: str) -> str:
         """
         Normalize validation expressions for proper Python syntax.
-        Generalized to handle malformed expressions across any domain.
         """
         import re
         s = expr.strip()
         
-        # GENERALIZED FIX: Handle malformed chain expressions with complex conditionals
-        # Pattern: Detect any expression with repeated attribute access and complex logical operators
-        # Examples: "obj.attr['key'] not in collection or obj.attr['key'] <= value"
-        #          "x.y['#hash'] in z and x.y['#hash'] > 0"
+        # Map s.d -> self.data_buffer
+        s = s.replace("s.d", "self.data_buffer")
         
-        # 1. Detect repeated object.attribute['key'] patterns with logical operators
-        repeated_access_pattern = r"(\w+\.\w+\['[^']+'\])\s+(not\s+in|in|[<>=!]+)\s+([^|&]+)\s+(or|and)\s+\1\s*([<>=!]+)"
-        match = re.search(repeated_access_pattern, s)
-        
-        if match:
-            obj_access = match.group(1)  # e.g., "s.d['#4899']"
-            first_op = match.group(2)    # e.g., "not in"
-            first_operand = match.group(3).strip()  # e.g., "i"
-            logical_op = match.group(4)  # e.g., "or"
-            second_op = match.group(5)   # e.g., "<="
-            
-            # Extract object path and key for reconstruction
-            obj_match = re.match(r"(\w+)\.(\w+)\['([^']+)'\]", obj_access)
-            if obj_match:
-                obj_name, attr_name, key = obj_match.groups()
-                
-                # Create simplified, safe expression based on context
-                full_obj_name = self._resolve_object_name(obj_name, attr_name)
-                safe_key = key if not key.startswith('#') else f"'{key}'"
-                
-                if logical_op == "or":
-                    # For OR conditions, create existence check with fallback
-                    if "not in" in first_op:
-                        s = f"{safe_key} not in {first_operand} or {full_obj_name}.get({safe_key}, 0) {second_op} 0"
-                    else:
-                        s = f"{full_obj_name}.get({safe_key}) {first_op} {first_operand} or {full_obj_name}.get({safe_key}, 0) {second_op} 0"
-                else:  # and
-                    # For AND conditions, create safe chained validation
-                    s = f"{safe_key} in {full_obj_name} and {full_obj_name}[{safe_key}] {first_op} {first_operand} and {full_obj_name}[{safe_key}] {second_op} 0"
-                
-                self.logger.debug(f"Fixed repeated access pattern: '{expr}' -> '{s}'")
-        
-        # 2. Handle simple abbreviation mappings (generalized)
-        # Common patterns: s.d -> self.data_buffer, obj.attr -> self.attribute, etc.
-        abbreviation_mappings = {
-            r'\bs\.d\b': 'self.data_buffer',
-            r'\bc\.c\b': 'self.config', 
-            r'\bp\.p\b': 'self.properties',
-            r'\bm\.m\b': 'self.metadata',
-            r'\bv\.v\b': 'self.values'
-        }
-        
-        for pattern, replacement in abbreviation_mappings.items():
-            if re.search(pattern, s):
-                s = re.sub(pattern, replacement, s)
-                self.logger.debug(f"Applied abbreviation mapping: {pattern} -> {replacement}")
-        
-        # 3. Fix token boundaries - ensure proper spacing
+        # Fix token boundaries - ensure space after ']'
         s = re.sub(r"\](?=[A-Za-z_])", "] ", s)
-        s = re.sub(r"([A-Za-z_]\w*)\(", r"\1 (", s)  # Space before parentheses
         
-        # 4. Normalize operators
-        operator_normalizations = {
-            "!in": " not in ",
-            "!==": " != ",
-            "===": " == ",
-            "&&": " and ",
-            "||": " or "
-        }
+        # Handle 'not in' vs 'in' operators
+        s = s.replace("!in", " not in ")
         
-        for bad_op, good_op in operator_normalizations.items():
-            s = s.replace(bad_op, good_op)
-        
-        # 5. Context-aware variable resolution
-        # Map single-letter variables based on validation context
-        context_mappings = {
-            r'\bi\b': 'required_fields',  # Common in validation loops
-            r'\bj\b': 'field_name',       # Loop variables
-            r'\bk\b': 'key',              # Dictionary keys
-            r'\bv\b': 'value'             # Dictionary values
-        }
-        
-        for pattern, replacement in context_mappings.items():
-            if re.search(pattern, s) and not re.search(r'\b' + replacement.split('_')[0] + r'\b', s):
-                s = re.sub(pattern, replacement, s)
+        # Map bare 'i' to required_fields in validation contexts
+        if re.search(r'\bi\b', s):
+            s = re.sub(r'\bi\b', 'required_fields', s)
         
         self.logger.debug(f"Normalized validation expression: '{expr}' -> '{s}'")
         return s
-    
-    def _resolve_object_name(self, obj_abbrev: str, attr_abbrev: str) -> str:
-        """
-        Resolve abbreviated object.attribute to full name.
-        Generalized mapping for common abbreviations.
-        """
-        # Common object abbreviation patterns
-        obj_mappings = {
-            's': 'self',
-            'c': 'cls',
-            'cfg': 'config',
-            'ctx': 'context',
-            'req': 'request',
-            'resp': 'response'
-        }
-        
-        # Common attribute abbreviation patterns  
-        attr_mappings = {
-            'd': 'data_buffer',
-            'cfg': 'config',
-            'meta': 'metadata',
-            'props': 'properties',
-            'vals': 'values',
-            'cache': 'cache'
-        }
-        
-        obj_name = obj_mappings.get(obj_abbrev, obj_abbrev)
-        attr_name = attr_mappings.get(attr_abbrev, attr_abbrev)
-        
-        return f"{obj_name}.{attr_name}"
 
     def _resolve_short_cid(self, short_cid: str, cai3_full: CAI3Full) -> str:
         """
@@ -1743,11 +1527,7 @@ class CAI3Translator:
                             method_lines.extend(method_code)
                     
                     if method_lines:
-                        # Apply formatting to method code before adding indentation
-                        method_text = '\n'.join(method_lines)
-                        method_text = self._apply_black_formatting(method_text)
-                        formatted_method_lines = method_text.split('\n') if method_text else []
-                        python_lines.extend(["    " + line for line in formatted_method_lines if line.strip()])
+                        python_lines.extend(["    " + line for line in method_lines])
                     else:
                         python_lines.append("    pass")
                     
@@ -1775,12 +1555,7 @@ class CAI3Translator:
                         lite_structure['chain_aliases'],
                         lite_structure['pools']
                     )
-                    # Apply formatting to function code before adding to main
-                    if func_code:
-                        func_text = '\n'.join(func_code)
-                        func_text = self._apply_black_formatting(func_text)
-                        formatted_func_lines = func_text.split('\n') if func_text else []
-                        python_lines.extend([line for line in formatted_func_lines if line.strip()])
+                    python_lines.extend(func_code)
                     python_lines.append("")
         
         # Create the Python code
@@ -1789,14 +1564,8 @@ class CAI3Translator:
         # CRITICAL FIX: Clean up malformed expressions before final placeholder resolution
         python_code = self._clean_malformed_expressions(python_code)
 
-        # NOTE: No need to fix orphaned except statements since FLOW compiler handles T{...}X{...} properly
-        # python_code = self._fix_orphaned_except_statements(python_code)
-
         # CRITICAL FIX: Final placeholder resolution pass
         python_code = self._final_placeholder_resolution(python_code)
-
-        # FINAL STEP: Apply black formatting to clean up all spacing issues
-        python_code = self._apply_black_formatting(python_code)
 
         return python_code
 
@@ -2020,544 +1789,67 @@ class CAI3Translator:
     def _clean_malformed_expressions(self, code: str) -> str:
         """
         Fix malformed expressions at the source - address fundamental parsing issues.
-        Generalized to handle similar patterns across any domain.
+        This is a systematic fix rather than pattern-specific bandaids.
         """
         import re
         
-        # GENERALIZED FIX 1: Fix malformed conditional expressions with chained attribute access
-        # Pattern: if (condition).object.attribute[key].method() where condition corrupts the access chain
-        # This is a fundamental issue that affects any domain with conditional object access
+        # FUNDAMENTAL FIX 1: Fix malformed conditional expressions that create chained access
+        # Root cause: Conditional parsing creates expressions like (condition).attribute.attribute...
         
-        # Detect any object.attribute access that gets corrupted by conditional parsing
-        malformed_chain_pattern = r'if \(([^)]+)\)\.([a-zA-Z_][a-zA-Z0-9_]*)\[([^\]]+)\](?:\.([a-zA-Z_][a-zA-Z0-9_]*)\[([^\]]+)\])*\.([a-zA-Z_][a-zA-Z0-9_]*\([^)]*\))'
+        # Pattern: Detect and fix malformed chained attribute access from conditionals
+        # This addresses the fundamental issue rather than specific patterns
+        malformed_chain_pattern = r'\(([^)]+)\)((?:\.[a-zA-Z_][a-zA-Z0-9_]*(?:\[[^\]]+\])?)+)\.([a-zA-Z_][a-zA-Z0-9_]*\([^)]*\))'
         
         def fix_malformed_chain(match):
             condition = match.group(1)
-            obj_name = match.group(2)
-            key = match.group(3)
-            method_call = match.group(6)
+            chain = match.group(2)
+            method_call = match.group(3)
             
-            # Clean up the condition and create proper if statement
-            if "' in " in condition and obj_name in condition:
-                # Extract the key from the condition
-                key_pattern = rf"'([^']+)' in [^.]*\.{obj_name}"
-                key_match = re.search(key_pattern, condition)
-                if key_match:
-                    extracted_key = key_match.group(1)
-                    # Create proper conditional with the action
-                    return f"if '{extracted_key}' in self.{obj_name}:\n        self.{obj_name}.{method_call}"
-            
-            # Fallback: create basic if statement
-            return f"if {condition}:\n        self.{obj_name}.{method_call}"
-        
-        code = re.sub(malformed_chain_pattern, fix_malformed_chain, code)
-        
-        # GENERALIZED FIX 2: Fix malformed conditional expressions that create any chained access
-        # Pattern: (condition).attribute.attribute... where any object gets corrupted
-        generic_chain_pattern = r'\(([^)]+)\)((?:\.[a-zA-Z_][a-zA-Z0-9_]*(?:\[[^\]]+\])?)+)\.([a-zA-Z_][a-zA-Z0-9_]*(?:\([^)]*\))?)'
-        
-        def fix_generic_chain(match):
-            condition = match.group(1)
-            attribute_chain = match.group(2)
-            final_access = match.group(3)
-            
-            # Extract meaningful parts from the condition
+            # Analyze the condition to understand intent
             if ' in ' in condition:
+                # This is likely a membership test that got malformed
                 parts = condition.split(' in ')
                 if len(parts) == 2:
-                    key_expr = parts[0].strip()
-                    container_expr = parts[1].strip()
+                    item = parts[0].strip()
+                    container = parts[1].strip()
                     
-                    # Build proper conditional structure
-                    # Remove redundant chaining from attribute_chain
-                    clean_chain = self._simplify_attribute_chain(attribute_chain)
-                    base_obj = f"{container_expr}{clean_chain}"
+                    # Extract the actual container name from the chain
+                    # Remove redundant chaining
+                    base_container = container
+                    if chain.startswith('.'):
+                        # Extract base name from chained access
+                        chain_parts = chain[1:].split('.')
+                        if chain_parts:
+                            attr_name = chain_parts[0].split('[')[0]  # Remove array access
+                            base_container = f"{container}.{attr_name}" if not container.endswith(attr_name) else container
                     
-                    # Create conditional statement based on final access type
-                    if '(' in final_access:  # Method call
-                        return f"if {key_expr} in {container_expr}:\n        {base_obj}.{final_access}"
-                    else:  # Attribute access
-                        return f"if {key_expr} in {container_expr}:\n        {base_obj}.{final_access}"
-            
-            # Fallback for other condition types
-            clean_chain = self._simplify_attribute_chain(attribute_chain)
-            return f"if {condition}:\n        # Access: {clean_chain}.{final_access}"
-        
-        original_code = code
-        code = re.sub(generic_chain_pattern, fix_generic_chain, code)
-        
-        # GENERALIZED FIX 3: Remove redundant attribute access chains
-        # Pattern: .attr[key].attr[key] -> .attr[key] (works for any attribute/key combination)
-        # This handles any case where attribute access gets duplicated during parsing
-        
-        # Fix complex redundant patterns: obj.attr[key].attr[key].method
-        redundant_complex_pattern = r'\.([a-zA-Z_][a-zA-Z0-9_]*)\[([^\]]+)\]\.\1\[\2\]'
-        while re.search(redundant_complex_pattern, code):
-            code = re.sub(redundant_complex_pattern, r'.\1[\2]', code)
-        
-        # Fix simple redundant patterns: obj.attr[key].attr -> obj.attr[key]
-        redundant_simple_pattern = r'\.([a-zA-Z_][a-zA-Z0-9_]*)\[([^\]]+)\]\.\1(?!\w)'
-        code = re.sub(redundant_simple_pattern, r'.\1[\2]', code)
-        
-        # GENERALIZED FIX 4: Fix incomplete access patterns
-        # Pattern: container[] -> container (remove empty brackets)
-        # Pattern: object.[] -> object (remove malformed empty access)
-        
-        empty_bracket_patterns = [
-            (r'([a-zA-Z_][a-zA-Z0-9_]*)\[\]', r'\1'),  # var[] -> var
-            (r'\.([a-zA-Z_][a-zA-Z0-9_]*)\[\]', r'.\1'),  # .attr[] -> .attr
-            (r'\.\[\]', r'')  # .[] -> (remove completely)
-        ]
-        
-        for pattern, replacement in empty_bracket_patterns:
-            code = re.sub(pattern, replacement, code)
-        
-        # GENERALIZED FIX 5: Fix malformed method calls and attribute access
-        # Pattern: Fix any case where parsing creates invalid syntax combinations
-        
-        # Fix duplicated dots: ..attr -> .attr
-        code = re.sub(r'\.{2,}', '.', code)
-        
-        # Fix space before dots: object .attr -> object.attr
-        code = re.sub(r'(\w)\s+\.', r'\1.', code)
-        
-        # Fix malformed bracket access: [key]] -> [key]
-        code = re.sub(r'\[([^\]]+)\]{2,}', r'[\1]', code)
-        
-        # GENERALIZED FIX 6: Fix specific domain-agnostic syntax errors
-        
-        # Fix malformed operators that might appear in any domain
-        operator_fixes = {
-            '!!': '!',           # Double negation
-            '===': '==',         # Triple equals
-            '!==': '!=',         # JavaScript-style not equals
-            '&&': ' and ',       # JavaScript-style and
-            '||': ' or ',        # JavaScript-style or
-            ';;': ';',           # Double semicolon
-            ',,': ',',           # Double comma
-        }
-        
-        for bad_op, good_op in operator_fixes.items():
-            code = code.replace(bad_op, good_op)
-        
-        # GENERALIZED FIX 7: Fix malformed string patterns
-        # These can occur in any domain when string parsing goes wrong
-        
-        # Fix quotes: '' -> '' (normalize quotes)
-        code = re.sub(r"'{2,}", "'", code)
-        code = re.sub(r'"{2,}', '"', code)
-        
-        # Fix malformed f-strings: f'{var}' with extra braces
-        code = re.sub(r'f\'([^\']*)\{([^}]+)\}([^\']*)\'{2,}', r"f'\1{\2}\3'", code)
-        
-        if code != original_code:
-            self.logger.debug("Applied generalized malformed expression fixes")
-        
-        return code
-    
-    def _simplify_attribute_chain(self, chain: str) -> str:
-        """
-        Simplify redundant attribute chains to prevent malformed access.
-        Works for any object.attribute pattern.
-        """
-        if not chain.startswith('.'):
-            return chain
-            
-        # Split by dots and remove duplicates while preserving order
-        parts = chain[1:].split('.')  # Remove leading dot
-        simplified_parts = []
-        seen_attrs = set()
-        
-        for part in parts:
-            # Extract attribute name without brackets
-            attr_name = part.split('[')[0] if '[' in part else part
-            
-            if attr_name not in seen_attrs:
-                simplified_parts.append(part)
-                seen_attrs.add(attr_name)
-        
-        return '.' + '.'.join(simplified_parts) if simplified_parts else ''
-    
-    def _fix_malformed_statement(self, stmt_str: str) -> str:
-        """
-        Fix common malformed statement patterns that cause parsing failures.
-        NOTE: Try-except patterns (T{...}X{...}) are handled by FLOW compiler, not here.
-        """
-        import re
-        
-        # Create a copy to modify
-        fixed = stmt_str.strip()
-        
-        # DO NOT reconstruct T{...}X{...} patterns here - let FLOW compiler handle them!
-        # The FLOW compiler already has robust _parse_ultra_dense_try_except logic
-        
-        # Fix 1: Replace common malformed operators
-        operator_fixes = {
-            '!in': ' not in ',
-            '!==': ' != ',
-            '===': ' == ',
-            '!ine': ' not in e',  # Common typo
-            '!inud': ' not in ud',  # user_data abbreviation
-            '!ins': ' not in s',    # self abbreviation
-        }
-        
-        for bad_op, good_op in operator_fixes.items():
-            fixed = fixed.replace(bad_op, good_op)
-        
-        # Fix 2: Expand common abbreviations with proper spacing
-        abbreviation_fixes = {
-            r'\bud\b': 'user_data',
-            r'\brf\b': 'required_fields',
-            r'\bs\.l\.er\b': 'self.logger.error',
-            r'\bs\.l\.w\b': 'self.logger.warning',
-            r'\bs\.l\.i\b': 'self.logger.info',
-            r'\bRF\b': 'False',  # Just 'False', not 'return False' to avoid double return
-            r'\bRT\b': 'True',   # Just 'True', not 'return True'
-            r'\bRN\b': 'None',   # Just 'None', not 'return None'
-            r'\.g\(': '.get(',   # Fix method call abbreviations
-            r'\.sp\(': '.split(',
-            r'\.ap\(': '.append(',
-        }
-        
-        for pattern, replacement in abbreviation_fixes.items():
-            fixed = re.sub(pattern, replacement, fixed)
-        
-        # Fix 3: Handle ultra-dense validation loop patterns FIRST (before general ternary)
-        # Pattern: @f,rf{f!inud?(s.l.er(...),RF):_} -> for f in rf: if f not in ud: ...
-        # Use a more sophisticated approach to handle nested braces in f-strings
-        loop_start_pattern = r'@([^,]+),([^{]+)\{'
-        loop_match = re.search(loop_start_pattern, fixed)
-        if loop_match:
-            var, collection = loop_match.groups()
-            var = var.strip()
-            collection = collection.strip()
-            
-            # Find the matching closing brace by counting braces
-            start_pos = loop_match.end() - 1  # Position of opening brace
-            brace_count = 1
-            pos = start_pos + 1
-            
-            while pos < len(fixed) and brace_count > 0:
-                if fixed[pos] == '{':
-                    brace_count += 1
-                elif fixed[pos] == '}':
-                    brace_count -= 1
-                pos += 1
-            
-            if brace_count == 0:
-                # Found matching closing brace
-                body = fixed[start_pos + 1:pos - 1]
-                body = body.strip()
-                
-                # Handle ternary pattern within the loop body
-                if '?' in body and ':' in body:
-                    ternary_match = re.search(r'([^?]+)\?\(([^,]+),([^)]+)\):([^;]+)', body)
-                    if ternary_match:
-                        condition, action, result, fallback = ternary_match.groups()
-                        condition = condition.strip()
-                        action = action.strip()
-                        result = result.strip()
-                        fallback = fallback.strip()
-                        
-                        if fallback == '_':
-                            # Convert to proper for loop with if statement
-                            for_stmt = f"for {var} in {collection}: if {condition}: {action}; return {result}"
-                        else:
-                            for_stmt = f"for {var} in {collection}: if {condition}: {action}; return {result} else: {fallback}"
+                    # Create proper conditional statement
+                    if method_call.startswith('append('):
+                        arg = method_call[7:-1]  # Extract argument
+                        return f"{item} in {base_container}:\n                {base_container}.{method_call}"
                     else:
-                        # Simple for loop
-                        for_stmt = f"for {var} in {collection}: {body}"
-                else:
-                    # Simple for loop
-                    for_stmt = f"for {var} in {collection}: {body}"
-                
-                # Replace the entire loop pattern
-                loop_pattern = fixed[loop_match.start():pos]
-                fixed = fixed.replace(loop_pattern, for_stmt)
-        
-        # Fix 4: Fix ultra-dense conditional patterns with ternary operators
-        # Pattern: var?(action,result):fallback -> if var: action; return result else: fallback
-        ultra_dense_ternary = r'([^?]+)\?\(([^,]+),([^)]+)\):([^;]+)'
-        while re.search(ultra_dense_ternary, fixed):
-            match = re.search(ultra_dense_ternary, fixed)
-            if match:
-                condition, action, result, fallback = match.groups()
-                condition = condition.strip()
-                action = action.strip()
-                result = result.strip()
-                fallback = fallback.strip()
-                
-                # Clean up result - remove 'return' if it's already there in abbreviation
-                if result.startswith('return '):
-                    result = result[7:]  # Remove 'return '
-                
-                # Convert to proper if-else structure with proper spacing
-                if fallback == '_':
-                    # Simple if statement
-                    if_stmt = f"if {condition}: {action}; return {result}"
-                else:
-                    # If-else statement
-                    if_stmt = f"if {condition}: {action}; return {result} else: {fallback}"
-                
-                fixed = fixed.replace(match.group(0), if_stmt)
-        
-        # Fix 5: Fix malformed conditional expressions
-        # Pattern: (('@'!ine)|('.'!ine.sp('@')[-1])) -> proper email validation
-        malformed_email_pattern = r"\(\('@'[^)]+\)\|\('[^)]+\)\)"
-        if re.search(malformed_email_pattern, fixed):
-            # Replace with simplified email validation
-            fixed = re.sub(malformed_email_pattern, "('@' not in e or '.' not in e.split('@')[-1])", fixed)
-        
-        # Fix 6: Fix method calls with .sp() -> .split()
-        fixed = re.sub(r'\.sp\(', '.split(', fixed)
-        
-        # Fix 7: Fix malformed f-string expressions
-        # Pattern: f'text: {var}' with malformed braces
-        if "f'" in fixed:
-            # Fix missing closing braces
-            fixed = re.sub(r"f'([^']*\{[^}]*)'", r"f'\1}'", fixed)
-        
-        # Fix 8: Fix malformed method calls
-        # Pattern: .method(...) with incomplete parameters
-        method_call_pattern = r'\.(\w+)\(\?[^)]*\)'
-        if re.search(method_call_pattern, fixed):
-            # Replace ? with appropriate default
-            if '.append(' in fixed:
-                fixed = re.sub(r'\.append\(\?\)', '.append("validation error")', fixed)
-            elif '.error(' in fixed:
-                fixed = re.sub(r'\.error\(\?\)', '.error("error occurred")', fixed)
-        
-        # Fix 9: Clean up any remaining malformed patterns
-        # Remove excessive spaces but let black handle proper formatting
-        fixed = re.sub(r'\s+', ' ', fixed)
-        fixed = fixed.strip()
-        
-        if fixed != stmt_str:
-            self.logger.debug(f"Fixed malformed statement: '{stmt_str}' -> '{fixed}'")
-        
-        return fixed
-        
-    def _apply_black_formatting(self, code: str) -> str:
-        """
-        Apply black formatting to clean up spacing and syntax issues.
-        Enhanced with pre-processing to fix common syntax errors before black runs.
-        """
-        try:
-            import black
+                        return f"{item} in {base_container}:\n                {base_container}.{method_call}"
             
-            # PRE-PROCESS: Fix common syntax errors that prevent black from parsing
-            code = self._pre_process_for_black(code)
-            
-            # Try to format the code with black
-            try:
-                # Use black's format_str function with default settings
-                formatted_code = black.format_str(code, mode=black.FileMode())
-                self.logger.debug("Successfully applied black formatting")
-                return formatted_code
-            except black.InvalidInput as e:
-                self.logger.warning(f"Black formatting failed due to syntax errors: {e}")
-                # Apply more aggressive pre-processing and try again
-                fixed_code = self._aggressive_syntax_fix(code)
-                try:
-                    formatted_code = black.format_str(fixed_code, mode=black.FileMode())
-                    self.logger.debug("Successfully applied black formatting after aggressive fixes")
-                    return formatted_code
-                except:
-                    self.logger.warning("Black formatting failed even after aggressive fixes, using fallback")
-                    return self._fallback_formatting(fixed_code)
-            except Exception as e:
-                self.logger.warning(f"Black formatting failed: {e}")
-                return self._fallback_formatting(code)
-                
-        except ImportError:
-            self.logger.warning("Black not available, using fallback formatting")
-            return self._fallback_formatting(code)
-    
-    def _pre_process_for_black(self, code: str) -> str:
-        """
-        Pre-process code to fix common syntax errors that prevent black from parsing.
-        """
-        lines = code.split('\n')
-        fixed_lines = []
+            # Fallback: create a simple conditional
+            return f"# FIXME: Complex conditional expression needs manual review: {match.group(0)}"
         
-        for line in lines:
-            # Fix malformed for loops like: for h in os.listdir(scan_path) = os.path.join(scan_path, item)
-            if ' = ' in line and ('for ' in line and ' in ' in line):
-                # This looks like a malformed for loop with assignment
-                if line.strip().startswith('for '):
-                    # Try to fix by extracting the for loop part
-                    for_part = line.split(' = ')[0]
-                    if for_part.count('for ') == 1 and for_part.count(' in ') == 1:
-                        line = for_part + ':'
-                        self.logger.debug(f"Fixed malformed for loop: {line}")
-            
-            # Fix missing colons on control structures
-            if (line.strip().startswith(('if ', 'for ', 'while ', 'def ', 'class ', 'try', 'except', 'else', 'elif ')) 
-                and not line.rstrip().endswith(':') and not line.rstrip().endswith(':\\')):
-                line = line.rstrip() + ':'
-                self.logger.debug(f"Added missing colon: {line}")
-            
-            fixed_lines.append(line)
+        # Apply the fix
+        original_code = code
+        code = re.sub(malformed_chain_pattern, fix_malformed_chain, code)
         
-        return '\n'.join(fixed_lines)
-    
-    def _aggressive_syntax_fix(self, code: str) -> str:
-        """
-        Apply aggressive syntax fixes as a last resort before falling back.
-        """
-        # Fix indentation issues by completely rebuilding indentation
-        lines = code.split('\n')
-        fixed_lines = []
-        indent_level = 0
+        # FUNDAMENTAL FIX 2: Remove redundant attribute access chains
+        # Pattern: .attr[key].attr[key] -> .attr[key]
+        redundant_access_pattern = r'\.([a-zA-Z_][a-zA-Z0-9_]*)\[([^\]]+)\]\.\1\[\2\]'
+        code = re.sub(redundant_access_pattern, r'.\1[\2]', code)
         
-        for line in lines:
-            stripped = line.strip()
-            if not stripped:
-                fixed_lines.append("")
-                continue
-            
-            # Determine correct indentation level
-            if stripped.startswith(('class ', 'def ')) and indent_level > 0:
-                # New class/function at module level
-                indent_level = 0
-            elif stripped.endswith(':'):
-                # This line should be at current level and increase indent for next
-                current_indent = indent_level
-                indent_level += 1
-            elif stripped in ['pass', 'break', 'continue'] or stripped.startswith('return'):
-                # These are typically at current indent level
-                current_indent = indent_level
-            elif stripped.startswith(('except', 'else:', 'elif', 'finally:')):
-                # These are at the same level as their corresponding try/if
-                current_indent = max(0, indent_level - 1)
-            else:
-                # Regular statement
-                current_indent = indent_level
-            
-            # Apply the indentation
-            properly_indented = "    " * current_indent + stripped
-            fixed_lines.append(properly_indented)
+        # FUNDAMENTAL FIX 3: Fix empty array access patterns
+        # Pattern: container[] -> proper access or removal
+        empty_access_pattern = r'([a-zA-Z_][a-zA-Z0-9_]*)\[\]'
         
-        return '\n'.join(fixed_lines)
-    
-    def _fallback_formatting(self, code: str) -> str:
-        """
-        Enhanced fallback formatting when black is not available or fails.
-        Handles indentation, spacing, and basic syntax cleanup.
-        """
-        lines = code.split('\n')
-        formatted_lines = []
-        indent_level = 0
-        
-        for i, line in enumerate(lines):
-            original_line = line
-            line = line.strip()  # Remove all whitespace to start fresh
-            
-            if not line:
-                formatted_lines.append("")
-                continue
-            
-            # Determine indent level changes
-            if line.endswith(':'):
-                # This line should increase indent for next lines
-                current_indent = indent_level
-                indent_level += 1
-            elif line in ['pass', 'break', 'continue', 'return'] or line.startswith('return '):
-                # These typically don't change indent level
-                current_indent = indent_level
-            elif line.startswith(('def ', 'class ', 'if ', 'for ', 'while ', 'try:', 'except', 'else:', 'elif ', 'finally:')):
-                # Check if we need to dedent first
-                if indent_level > 0 and not (line.startswith('except') or line.startswith('else') or line.startswith('elif') or line.startswith('finally')):
-                    # Only dedent if this isn't an exception handler
-                    if not lines[max(0, i-1)].strip().endswith(':'):
-                        indent_level = max(0, indent_level - 1)
-                current_indent = indent_level
-                if line.endswith(':'):
-                    indent_level += 1
-            else:
-                # Regular statement - use current indent level but check for dedent
-                current_indent = indent_level
-                
-                # Check if previous line was a return/break/continue - might need to dedent
-                if i > 0:
-                    prev_line = lines[i-1].strip()
-                    if prev_line in ['pass', 'break', 'continue', 'return'] or prev_line.startswith('return '):
-                        # Look ahead to see if next line is a dedent
-                        if i < len(lines) - 1:
-                            next_line = lines[i+1].strip()
-                            if next_line.startswith(('def ', 'class ', 'except', 'else:', 'elif', 'finally:')) or not next_line:
-                                current_indent = max(0, indent_level - 1)
-            
-            # Apply indentation
-            indented_line = "    " * current_indent + line
-            
-            # Fix common spacing issues
-            if line.strip():
-                # Fix spacing around operators (but preserve the indentation we just added)
-                content = indented_line[current_indent * 4:]  # Get content without indent
-                content = re.sub(r'\s*=\s*', ' = ', content)
-                content = re.sub(r'(?<![=!<>])\s*==\s*', ' == ', content)  # Avoid messing with ===
-                content = re.sub(r'\s*!=\s*', ' != ', content)
-                content = re.sub(r'\s*<=\s*', ' <= ', content)
-                content = re.sub(r'\s*>=\s*', ' >= ', content)
-                content = re.sub(r'(?<!:)\s*:\s*(?!=)', ': ', content)  # Avoid messing with ::
-                content = re.sub(r'\s*,\s*', ', ', content)
-                
-                # Fix excessive spaces but preserve single spaces
-                content = re.sub(r'  +', ' ', content)
-                
-                # Reconstruct with proper indentation
-                indented_line = "    " * current_indent + content
-                
-            formatted_lines.append(indented_line)
-        
-        return '\n'.join(formatted_lines)
-        
-    def _apply_malformed_fixes_to_body(self, body_content: str) -> str:
-        """
-        Apply malformed statement fixes to body content before ultra-dense parsing.
-        PRIORITY: Delegate complex patterns to FLOW compiler instead of manual fixes.
-        """
-        if not body_content or not body_content.strip():
-            return body_content
-        
-        self.logger.debug(f"Applying malformed fixes to body: {body_content}")
-        
-        # HIGHEST PRIORITY: Check if this is a complex pattern that should be delegated
-        # to FLOW compiler instead of being manually fixed
-        should_delegate_to_flow = (
-            'T{' in body_content and ('X' in body_content or 'X{' in body_content) or  # Try-except patterns
-            (body_content.count('{') > 2) or  # Highly nested structures
-            ('?' in body_content and ('{' in body_content or '}:' in body_content)) or  # Conditional patterns with placeholders
-            ('@' in body_content and ',' in body_content and '{' in body_content) or  # Complex for-loop patterns
-            ('for ' in body_content and ('T{' in body_content or 'X{' in body_content))  # Mixed patterns
-        )
-        
-        if should_delegate_to_flow:
-            self.logger.debug(f"🔄 DELEGATING BODY TO FLOW COMPILER: Complex pattern detected")
-            # Return the original body content - let FLOW compiler handle it directly
-            # This bypasses manual malformed fixes that can corrupt complex structures
-            return body_content
-        
-        # Only apply manual fixes to simple statements
-        # Split body content by semicolons (respecting nested structures)
-        statements = self._split_respecting_nesting(body_content, ';')
-        
-        # Apply malformed statement fixes to each statement
-        fixed_statements = []
-        for stmt in statements:
-            stmt = stmt.strip()
-            if stmt:
-                fixed_stmt = self._fix_malformed_statement(stmt)
-                fixed_statements.append(fixed_stmt)
-            else:
-                fixed_statements.append(stmt)
-        
-        # Rejoin with semicolons
-        fixed_body = ';'.join(fixed_statements)
-        
-        self.logger.debug(f"Fixed body result: {fixed_body}")
-        return fixed_body
+        def fix_empty_access(match):
+            var_name = match.group(1)
+            # This suggests an incomplete array access - likely should be removed
+            return var_name
         
         code = re.sub(empty_access_pattern, fix_empty_access, code)
         
@@ -2893,12 +2185,7 @@ class CAI3Translator:
         if method_node.metadata.get('docstring'):
             docstring = method_node.metadata["docstring"]
             self.logger.debug(f"Adding docstring: {repr(docstring)}")
-            # Properly escape and format docstring
-            if '"""' in docstring:
-                # Use single quotes if triple quotes are in the string
-                lines.append(f"    '''{docstring}'''")
-            else:
-                lines.append(f'    """{docstring}"""')
+            lines.append(f'    """{docstring}"""')
         
         # Reconstruct body
         self.logger.debug(f"Starting body reconstruction for method {func_name}")
@@ -2960,19 +2247,6 @@ class CAI3Translator:
                     
                     self.logger.debug(f"Statement {i}: {repr(stmt_code)}")
                     
-                    # ENHANCED FORMATTING: Pre-process each statement before adding
-                    stmt_code = self._pre_process_for_black(stmt_code)
-                    
-                    # Validate the statement is meaningful
-                    if stmt_code.strip() in ['pass', '']:
-                        # Try to recover more meaningful content
-                        recovery_text = self._attempt_statement_recovery(stmt, body_content)
-                        if recovery_text and 'TODO' in recovery_text:
-                            stmt_code = recovery_text
-                        else:
-                            # Only use pass as absolute last resort
-                            stmt_code = "pass  # Generated from incomplete AST"
-                    
                     # Add proper indentation
                     for line in stmt_code.split('\n'):
                         if line.strip():
@@ -2980,92 +2254,13 @@ class CAI3Translator:
                             stmt_count += 1
                 except Exception as e:
                     self.logger.error(f"Failed to convert statement {i} to code: {e}")
-                    # AGGRESSIVE RECOVERY: Try multiple recovery strategies
-                    recovery_successful = False
-                    
-                    # Strategy 1: Try to recover from original body content
-                    try:
-                        if body_content:
-                            recovery_text = self._attempt_statement_recovery(stmt, body_content)
-                            if recovery_text and not recovery_text.startswith('pass'):
-                                lines.append(f"    {recovery_text}")
-                                recovery_successful = True
-                                continue
-                    except Exception as recovery_error:
-                        self.logger.debug(f"Recovery strategy 1 failed: {recovery_error}")
-                    
-                    # Strategy 2: Try to extract from the AST node itself
-                    try:
-                        if hasattr(stmt, '_fields'):
-                            # Try to reconstruct from AST fields
-                            if hasattr(stmt, 'target') and hasattr(stmt, 'iter'):
-                                # This is likely a for loop
-                                lines.append(f"    for item in collection:")
-                                lines.append(f"        # TODO: Implement loop body")
-                                recovery_successful = True
-                                continue
-                            elif hasattr(stmt, 'test') and hasattr(stmt, 'body'):
-                                # This is likely an if statement
-                                lines.append(f"    if condition:")
-                                lines.append(f"        # TODO: Implement conditional body")
-                                recovery_successful = True
-                                continue
-                    except Exception as ast_recovery_error:
-                        self.logger.debug(f"Recovery strategy 2 failed: {ast_recovery_error}")
-                    
-                    # Strategy 3: Create context-appropriate placeholder
-                    if not recovery_successful:
-                        if 'validate' in func_name.lower():
-                            lines.append("    # TODO: Implement validation logic")
-                        elif 'get' in func_name.lower():
-                            lines.append("    # TODO: Implement getter logic")
-                        elif 'set' in func_name.lower():
-                            lines.append("    # TODO: Implement setter logic")
-                        elif '__init__' in func_name:
-                            lines.append("    # TODO: Initialize instance variables")
-                        else:
-                            lines.append("    # TODO: Implement method body")
+                    lines.append("    pass  # Error converting statement")
             
             self.logger.debug(f"Added {stmt_count} code lines to method body")
         else:
-            # No body provided, create intelligent placeholder based on method name
-            self.logger.debug(f"No body content provided for method {func_name}, creating intelligent placeholder")
-            if '__init__' in func_name:
-                lines.append("    # TODO: Initialize instance variables")
-                if len(params) > 1:  # Has parameters beyond self
-                    for param in params[1:]:  # Skip 'self'
-                        lines.append(f"    self.{param} = {param}")
-            elif 'validate' in func_name.lower():
-                lines.append("    # TODO: Implement validation logic")
-                lines.append("    return True")
-            elif func_name.startswith('get_'):
-                lines.append("    # TODO: Implement getter logic")
-                lines.append("    return None")
-            elif func_name.startswith('set_'):
-                lines.append("    # TODO: Implement setter logic")
-            elif 'load' in func_name.lower():
-                lines.append("    # TODO: Implement loading logic")
-            elif 'save' in func_name.lower():
-                lines.append("    # TODO: Implement saving logic")
-            elif 'process' in func_name.lower():
-                lines.append("    # TODO: Implement processing logic")
-            else:
-                lines.append("    # TODO: Implement method body")
-                # Try to infer return type from signature if available
-                if method_node.signature and '->' in method_node.signature:
-                    return_type = method_node.signature.split('->')[-1].strip()
-                    if return_type in ['bool', 'b']:
-                        lines.append("    return False")
-                    elif return_type in ['str', 's']:
-                        lines.append("    return ''")
-                    elif return_type in ['int', 'i']:
-                        lines.append("    return 0")
-                    elif return_type in ['list', 'List']:
-                        lines.append("    return []")
-                    elif return_type in ['dict', 'Dict']:
-                        lines.append("    return {}")
-                    else:
-                        lines.append("    return None")
+            # No body provided, use placeholder
+            self.logger.debug(f"No body content provided for method {func_name}, using pass")
+            lines.append("    pass")
         
         # Apply hash and pool resolution to all lines
         self.logger.debug("Applying hash and pool resolution to all lines")
@@ -3084,94 +2279,6 @@ class CAI3Translator:
         
         return lines
 
-    def _attempt_statement_recovery(self, stmt, body_content: str) -> str:
-        """
-        Attempt to recover statement text from original body content when AST conversion fails.
-        This is a last-resort recovery mechanism to avoid pass statements.
-        """
-        import re
-        try:
-            # For failed AST nodes, try to extract meaningful patterns from body content
-            if 'for ' in body_content and hasattr(stmt, 'target'):
-                # Attempt to reconstruct for loop from body patterns
-                if '@f,' in body_content:
-                    # Ultra-dense for loop pattern
-                    pattern_match = re.search(r'@f,([^{]+)\{([^}]+)\}', body_content)
-                    if pattern_match:
-                        iterator = pattern_match.group(1).strip()
-                        loop_body = pattern_match.group(2).strip()
-                        return f"for {iterator}:\n        {loop_body}"
-                
-                # Handle T{} patterns with for loops
-                if 'T{' in body_content and 'for' in body_content:
-                    # Extract try block content
-                    try_pattern = r'T\{([^}]*for[^}]*)\}'
-                    try_match = re.search(try_pattern, body_content)
-                    if try_match:
-                        try_content = try_match.group(1)
-                        # Create a basic try block with the for loop
-                        return f"try:\n        {try_content}\n    except Exception:\n        pass"
-            
-            # For assignment statements
-            if '=' in body_content and hasattr(stmt, 'targets'):
-                # Extract assignment patterns
-                assignment_match = re.search(r'([a-zA-Z_][a-zA-Z0-9_]*)\s*=\s*([^;,]+)', body_content)
-                if assignment_match:
-                    var_name = assignment_match.group(1)
-                    value = assignment_match.group(2).strip()
-                    # Clean up common abbreviations in value
-                    if value == 'a':
-                        value = 'config_path'
-                    elif value == '{}':
-                        value = '{}'
-                    elif value.startswith('[') and value.endswith(']'):
-                        # Keep list assignments as-is
-                        pass
-                    return f"{var_name} = {value}"
-            
-            # For function calls
-            if '(' in body_content and ')' in body_content:
-                # Extract function call patterns
-                call_match = re.search(r'([a-zA-Z_][a-zA-Z0-9_]*)\s*\([^)]*\)', body_content)
-                if call_match:
-                    call_text = call_match.group(0)
-                    # Clean up common patterns
-                    if 'lower()' in call_text:
-                        return 'self.config_name = config_path.lower()'
-                    return call_text
-            
-            # For return statements
-            if body_content.startswith('R') or 'return' in body_content:
-                if 'Rg0' in body_content:
-                    return 'return self.config'
-                elif 'RT' in body_content:
-                    return 'return True'
-                elif 'RF' in body_content:
-                    return 'return False'
-                elif 'RN' in body_content:
-                    return 'return None'
-            
-            # For conditional statements
-            if '?' in body_content and ('if' in body_content or '(' in body_content):
-                # Try to create a basic conditional
-                if 'not in' in body_content:
-                    return 'if field not in data:\n        return False'
-                else:
-                    return 'if condition:\n        pass'
-            
-            # For try-catch patterns
-            if 'T{' in body_content and 'X(' in body_content:
-                return 'try:\n        pass\n    except Exception:\n        pass'
-            
-            # Last resort: create a meaningful placeholder based on context
-            if hasattr(stmt, 'lineno'):
-                return f"# TODO: Implement method body (line {stmt.lineno})"
-            
-            return "# TODO: Implement method body"
-            
-        except Exception:
-            return "# TODO: Implement method body"
-
     def _parse_ultra_dense_body(self, body_content: str, method_node,
                             flow_compiler: FLOWCompiler,
                             cai3_map: CAI3Map, cai3_full: CAI3Full,
@@ -3182,13 +2289,6 @@ class CAI3Translator:
         self.logger.debug(f"Parsing ultra-dense body for method: {method_node.name}")
         self.logger.debug(f"Body content: {repr(body_content)}")
         self.logger.debug(f"Body length: {len(body_content)}")
-        
-        # CRITICAL ENHANCEMENT: Apply malformed fixes BEFORE any processing
-        self.logger.debug("Applying malformed fixes to body content before parsing")
-        original_body = body_content
-        body_content = self._apply_malformed_fixes_to_body(body_content)
-        if body_content != original_body:
-            self.logger.debug(f"Malformed fixes applied: {original_body} -> {body_content}")
         
         # Add validation before processing
         is_valid, error_msg = self._validate_bracket_structure(body_content)
@@ -3312,37 +2412,6 @@ class CAI3Translator:
                     self.logger.debug(f"Statement {stmt_idx}: Detected conditional pattern")
                     # Conditional expression or if statement
                     stmt = self._parse_ultra_dense_conditional(stmt_str, flow_compiler)
-                elif stmt_str.startswith('if '):
-                    self.logger.debug(f"Statement {stmt_idx}: Detected pre-built if statement")
-                    # This is already a complete if statement from validation pattern merging
-                    # Parse it as a complete statement
-                    lines = stmt_str.split('\n')
-                    main_line = lines[0]  # "if condition:"
-                    body_line = lines[1].strip() if len(lines) > 1 else "pass"
-                    
-                    # Extract condition from "if condition:"
-                    condition_part = main_line[3:-1]  # Remove "if " and ":"
-                    
-                    # Parse the condition
-                    try:
-                        condition_expr = flow_compiler._parse_expression_string(condition_part)
-                        # Parse the body
-                        if body_line and body_line != "pass":
-                            # Create a simple expression statement for the body
-                            body_expr = flow_compiler._parse_expression_string(body_line)
-                            body_stmt = self._fix_ast_node_attributes(ast.Expr(value=body_expr))
-                        else:
-                            body_stmt = self._fix_ast_node_attributes(ast.Pass())
-                        
-                        # Create if statement
-                        stmt = self._fix_ast_node_attributes(ast.If(
-                            test=condition_expr,
-                            body=[body_stmt],
-                            orelse=[]
-                        ))
-                    except Exception as if_error:
-                        self.logger.warning(f"Failed to parse pre-built if statement '{stmt_str}': {if_error}")
-                        stmt = self._fix_ast_node_attributes(ast.Pass())
                 elif stmt_str == '_':
                     self.logger.debug(f"Statement {stmt_idx}: Pass statement")
                     stmt = self._fix_ast_node_attributes(ast.Pass())
@@ -3368,32 +2437,6 @@ class CAI3Translator:
                     
             except Exception as e:
                 self.logger.error(f"Statement {stmt_idx}: Failed to parse '{stmt_str}': {e}")
-                # ENHANCED ERROR RECOVERY: Try to fix common patterns before giving up
-                try:
-                    # Fix common malformed patterns
-                    fixed_stmt = self._fix_malformed_statement(stmt_str)
-                    if fixed_stmt != stmt_str:
-                        self.logger.debug(f"Attempting to parse fixed statement: '{fixed_stmt}'")
-                        # Try parsing the fixed statement
-                        if fixed_stmt.startswith('R'):
-                            stmt = self._parse_ultra_dense_return(fixed_stmt, flow_compiler)
-                        elif '=' in fixed_stmt and not any(op in fixed_stmt for op in ['==', '!=', '<=', '>=']):
-                            stmt = self._parse_ultra_dense_assignment(fixed_stmt, flow_compiler)
-                        elif fixed_stmt.startswith('@'):
-                            stmt = self._parse_ultra_dense_for(fixed_stmt, flow_compiler)
-                        else:
-                            # Try as expression
-                            expr = flow_compiler._parse_expression_string(fixed_stmt)
-                            stmt = self._fix_ast_node_attributes(ast.Expr(value=expr))
-                        
-                        if stmt:
-                            self.logger.debug(f"Successfully recovered statement {stmt_idx}")
-                            statements.append(stmt)
-                            continue
-                except Exception as recovery_error:
-                    self.logger.debug(f"Recovery attempt failed: {recovery_error}")
-                
-                # Last resort: add pass statement
                 statements.append(self._fix_ast_node_attributes(ast.Pass()))
         
         # Apply deminification to all statements
@@ -3596,47 +2639,27 @@ class CAI3Translator:
     def _is_malformed_expression_context(self, before: str, after: str, hash_ref: str) -> bool:
         """
         Determine if we're in a malformed expression context where hash resolution
-        would make things worse. This uses generic patterns rather than domain-specific ones.
+        would make things worse.
         """
-        import re
+        # Check for patterns that indicate malformed expressions:
         
-        # GENERAL SOLUTION: Check for patterns that indicate malformed expressions
-        
-        # 1. Generic repeated attribute access patterns: .attr[key].attr[key]
-        # This catches any repeated chained attribute access, not just data_buffer
-        repeated_attr_pattern = r'\.([a-zA-Z_][a-zA-Z0-9_]*)\[[^\]]*\]\.\1'
-        if re.search(repeated_attr_pattern, before[-50:] + after[:50]):
+        # 1. Chained attribute access patterns that suggest malformed expressions
+        if ('.data_buffer[' in before[-50:] and 
+            ('].data_buffer[' in after[:50] or '].data_buffer' in after[:50])):
             return True
         
-        # 2. Generic chained attribute access that suggests malformed expressions
-        # Pattern: .attr[...].attr (any attribute, not just data_buffer)
-        generic_chain_pattern = r'\.([a-zA-Z_][a-zA-Z0-9_]*)\[[^\]]*\]\.([a-zA-Z_][a-zA-Z0-9_]*)'
-        combined_context = before[-50:] + after[:50]
-        chain_matches = re.findall(generic_chain_pattern, combined_context)
-        
-        # If we find the same attribute name appearing multiple times in a chain
-        for attr1, attr2 in chain_matches:
-            if attr1 == attr2:
-                return True
-        
-        # 3. Parenthesized membership tests that would become invalid
+        # 2. Parenthesized membership tests that would become invalid
         # Pattern: ('#hash' in container) -> should not resolve the hash
         if (before.rstrip().endswith("'") and 
             after.lstrip().startswith("' in") and
             '(' in before[-20:]):
             return True
         
-        # 4. Generic malformed chained expressions (any attribute repeated)
-        # Look for pattern: .attrX in before AND .attrX in after
-        attr_in_before = re.findall(r'\.([a-zA-Z_][a-zA-Z0-9_]*)', before[-30:])
-        attr_in_after = re.findall(r'\.([a-zA-Z_][a-zA-Z0-9_]*)', after[:30])
-        
-        # If same attribute appears on both sides, likely malformed
-        common_attrs = set(attr_in_before) & set(attr_in_after)
-        if common_attrs:
+        # 3. Already malformed chained expressions
+        if '.data_buffer' in before[-30:] and '.data_buffer' in after[:30]:
             return True
         
-        # 5. Complex conditional expressions with parentheses that suggest malformed parsing
+        # 4. Complex conditional expressions with parentheses that suggest malformed parsing
         paren_depth = before.count('(') - before.count(')')
         if paren_depth > 0 and (' in ' in before[-30:] or ' in ' in after[:30]):
             # This suggests we're inside a conditional expression
@@ -4824,99 +3847,46 @@ class CAI3Translator:
     def _parse_ultra_dense_statement(self, stmt_str: str, flow_compiler: FLOWCompiler) -> Optional[ast.AST]:
         """Parse any ultra-dense statement with placeholder resolution."""
         stmt_str = stmt_str.strip()
-        self.logger.debug(f"=== ULTRA DENSE STATEMENT PARSING ===")
-        self.logger.debug(f"Input: {repr(stmt_str)}")
+        self.logger.debug(f"_parse_ultra_dense_statement called with: '{stmt_str}'")
         
-        # COMPREHENSIVE PATTERN ANALYSIS
-        patterns_detected = []
-        if 'for ' in stmt_str or stmt_str.startswith('@'):
-            patterns_detected.append("FOR_LOOP")
-        if 'T{' in stmt_str and ('X' in stmt_str or 'X{' in stmt_str):
-            patterns_detected.append("TRY_EXCEPT")
-        if '?' in stmt_str and ('{' in stmt_str or '}:' in stmt_str):
-            patterns_detected.append("CONDITIONAL")
-        if stmt_str.startswith('@') and ',' in stmt_str and '{' in stmt_str:
-            patterns_detected.append("COMPLEX_FOR")
-        
-        self.logger.debug(f"Patterns detected: {patterns_detected}")
-        
-        # HIGHEST PRIORITY: Delegate ALL complex multi-pattern statements to FLOW compiler
-        should_delegate = (
-            len(patterns_detected) > 1 or  # Multiple patterns
-            'TRY_EXCEPT' in patterns_detected or  # Always delegate try-except
-            'COMPLEX_FOR' in patterns_detected or  # Complex for-loops
-            ('?' in stmt_str and ('T{' in stmt_str or 'X{' in stmt_str)) or  # Conditional + try-except
-            (stmt_str.count('{') > 2) or  # Highly nested
-            ('for ' in stmt_str and 'except' in stmt_str)  # Mixed patterns
-        )
-        
-        if should_delegate:
-            self.logger.debug(f"🔄 DELEGATING TO FLOW COMPILER: Patterns={patterns_detected}")
-            self.logger.debug(f"🔄 Delegation criteria met: complex={len(patterns_detected) > 1}, "
-                            f"try_except={'TRY_EXCEPT' in patterns_detected}, "
-                            f"complex_for={'COMPLEX_FOR' in patterns_detected}")
+        # CRITICAL: Check for conditional patterns FIRST
+        is_conditional, pattern_parts = self._detect_conditional_pattern(stmt_str)
+        if is_conditional:
+            self.logger.debug(f"Detected conditional pattern: {pattern_parts}")
+            
+            # Resolve the pattern to valid Python
+            resolved = self._resolve_conditional_pattern(pattern_parts)
+            self.logger.debug(f"Resolved conditional to: {resolved}")
+            
+            # Parse the resolved Python
             try:
-                # Use FLOW compiler's native parsing for complex patterns
-                self.logger.debug(f"🔄 Calling flow_compiler._parse_flow_lines with: {[stmt_str]}")
-                parsed_results = flow_compiler._parse_flow_lines([stmt_str], 0)
-                self.logger.debug(f"🔄 FLOW compiler returned: {len(parsed_results)} results")
-                
-                if parsed_results and len(parsed_results) > 0:
-                    parsed_stmts = parsed_results[0]
-                    if parsed_stmts and len(parsed_stmts) > 0:
-                        result = self._fix_ast_node_attributes(parsed_stmts[0])
-                        self.logger.debug(f"✅ FLOW compiler delegation successful")
-                        return result
-                    else:
-                        self.logger.warning(f"⚠️ FLOW compiler returned empty statement list")
+                # For if statements, parse as statement
+                if resolved.startswith('if '):
+                    # Parse the if statement
+                    lines = resolved.split('\n')
+                    tree = ast.parse('\n'.join(lines))
+                    if tree.body:
+                        return self._fix_ast_node_attributes(tree.body[0])
                 else:
-                    self.logger.warning(f"⚠️ FLOW compiler returned no results")
-                    
-            except Exception as flow_error:
-                self.logger.error(f"❌ FLOW compiler failed: {flow_error}")
-                import traceback
-                self.logger.debug(f"FLOW compiler traceback: {traceback.format_exc()}")
-        
-        # CRITICAL: Check for conditional patterns FIRST (for simple conditionals only)
-        if 'CONDITIONAL' in patterns_detected and len(patterns_detected) == 1:
-            self.logger.debug(f"🔍 Processing simple conditional pattern")
-            is_conditional, pattern_parts = self._detect_conditional_pattern(stmt_str)
-            if is_conditional:
-                self.logger.debug(f"Detected conditional pattern: {pattern_parts}")
-                
-                # Resolve the pattern to valid Python
-                resolved = self._resolve_conditional_pattern(pattern_parts)
-                self.logger.debug(f"Resolved conditional to: {resolved}")
-                
-                # Parse the resolved Python
-                try:
-                    # For if statements, parse as statement
-                    if resolved.startswith('if '):
-                        # Parse the if statement
-                        lines = resolved.split('\n')
-                        tree = ast.parse('\n'.join(lines))
+                    # For ternary expressions, parse as expression then wrap
+                    expr = ast.parse(resolved, mode='eval').body
+                    # Check if it's an assignment
+                    if ' = ' in resolved:
+                        # Parse as assignment
+                        tree = ast.parse(resolved)
                         if tree.body:
                             return self._fix_ast_node_attributes(tree.body[0])
-                    else:
-                        # For ternary expressions, parse as expression then wrap
-                        expr = ast.parse(resolved, mode='eval').body
-                        # Check if it's an assignment
-                        if ' = ' in resolved:
-                            # Parse as assignment
-                            tree = ast.parse(resolved)
-                            if tree.body:
-                                return self._fix_ast_node_attributes(tree.body[0])
-                        return self._fix_ast_node_attributes(ast.Expr(value=expr))
-                except SyntaxError as e:
-                    self.logger.warning(f"Failed to parse resolved conditional: {e}")
-                    # Fall through to existing logic
+                    return self._fix_ast_node_attributes(ast.Expr(value=expr))
+            except SyntaxError as e:
+                self.logger.warning(f"Failed to parse resolved conditional: {e}")
+                # Fall through to existing logic
         
         # CRITICAL: Check for complex structures BEFORE placeholder resolution
         # because placeholder resolution can corrupt the structure
         
         # Check for try-except structures first (highest priority)
         if stmt_str.startswith('T{') and 'X' in stmt_str:
-            self.logger.debug("⚠️ WARNING: Try-except pattern not delegated - processing locally")
+            self.logger.debug("Statement detected as try-except (before placeholder resolution)")
             return self._parse_ultra_dense_try_except(stmt_str, flow_compiler)
         
         # Check for for-loop structures with placeholders
@@ -5187,38 +4157,6 @@ class CAI3Translator:
         
         except Exception as e:
             self.logger.warning(f"Failed to parse ultra-dense statement '{stmt_str}': {e}")
-            
-            # ENHANCED ERROR RECOVERY: Try to fix malformed patterns before giving up
-            try:
-                self.logger.debug("Attempting error recovery with malformed statement fixing")
-                fixed_stmt = self._fix_malformed_statement(stmt_str)
-                if fixed_stmt != stmt_str:
-                    self.logger.debug(f"Fixed malformed statement: '{stmt_str}' -> '{fixed_stmt}'")
-                    
-                    # Try parsing the fixed statement
-                    if fixed_stmt.startswith('if '):
-                        # Parse as complete if statement
-                        tree = ast.parse(fixed_stmt)
-                        if tree.body:
-                            return self._fix_ast_node_attributes(tree.body[0])
-                    elif fixed_stmt.startswith('for '):
-                        # Parse as complete for statement
-                        tree = ast.parse(fixed_stmt)
-                        if tree.body:
-                            return self._fix_ast_node_attributes(tree.body[0])
-                    elif '=' in fixed_stmt and not any(op in fixed_stmt for op in ['==', '!=', '<=', '>=']):
-                        # Try as assignment
-                        tree = ast.parse(fixed_stmt)
-                        if tree.body:
-                            return self._fix_ast_node_attributes(tree.body[0])
-                    else:
-                        # Try as expression
-                        expr = flow_compiler._parse_expression_string(fixed_stmt)
-                        return self._fix_ast_node_attributes(ast.Expr(value=expr))
-                        
-            except Exception as recovery_error:
-                self.logger.debug(f"Error recovery failed: {recovery_error}")
-            
             # Return a safe Pass statement as fallback
             return self._fix_ast_node_attributes(ast.Pass())
 
@@ -5677,74 +4615,37 @@ class CAI3Translator:
         return cleaned
 
     def _parse_block_statements_safe(self, block_str: str, flow_compiler: FLOWCompiler) -> List[ast.AST]:
-        """Parse block statements with comprehensive logging and error recovery."""
-        self.logger.debug(f"=== PARSING BLOCK STATEMENTS ===")
-        self.logger.debug(f"Block input: {repr(block_str)}")
-        
+        """Parse block statements with better error recovery."""
         if not block_str or block_str.strip() == '_':
-            self.logger.debug("Empty block, returning pass statement")
             return [ast.Pass()]
         
         stmts = []
         
         # Split by semicolon but respect nested structures
         parts = self._split_respecting_nesting(block_str, ';')
-        self.logger.debug(f"Split into {len(parts)} parts: {[repr(p) for p in parts]}")
         
-        for i, part in enumerate(parts):
+        for part in parts:
             part = part.strip()
             if not part:
-                self.logger.debug(f"Part {i}: empty, skipping")
                 continue
             
-            self.logger.debug(f"=== Processing part {i}: {repr(part)} ===")
-            
             try:
-                # Pattern analysis for this part
-                part_patterns = []
-                if part.startswith('@'):
-                    part_patterns.append("FOR_LOOP")
-                if 'T{' in part and ('X' in part or 'X{' in part):
-                    part_patterns.append("TRY_EXCEPT")
-                if 'except' in part and not part.startswith('T{'):
-                    part_patterns.append("ORPHAN_EXCEPT")
-                if '?' in part:
-                    part_patterns.append("CONDITIONAL")
-                
-                self.logger.debug(f"Part {i} patterns: {part_patterns}")
-                
-                # CRITICAL: Check for orphaned except statements
-                if 'ORPHAN_EXCEPT' in part_patterns:
-                    self.logger.error(f"🚨 ORPHANED EXCEPT DETECTED in part {i}: {repr(part)}")
-                    self.logger.error(f"🚨 This should have been caught by delegation!")
-                    # Skip orphaned except statements
-                    continue
-                
                 # Check for for-loop pattern FIRST (higher priority)
                 if part.startswith('@') and ',' in part and '{' in part:
-                    self.logger.debug(f"Part {i}: Parsing as for-loop")
+                    # Extract for-loop components properly
                     stmt = self._parse_for_loop_safe(part, flow_compiler)
                 else:
-                    self.logger.debug(f"Part {i}: Parsing as general ultra-dense statement")
+                    # Use existing parsing for other statements
                     stmt = self._parse_ultra_dense_statement(part, flow_compiler)
                 
                 if stmt:
-                    fixed_stmt = self._fix_ast_node_attributes(stmt)
-                    stmts.append(fixed_stmt)
-                    self.logger.debug(f"Part {i}: Successfully parsed and added statement")
-                else:
-                    self.logger.warning(f"Part {i}: Parsing returned None, adding pass")
-                    stmts.append(self._fix_ast_node_attributes(ast.Pass()))
+                    stmts.append(self._fix_ast_node_attributes(stmt))
                     
             except Exception as e:
-                self.logger.error(f"Part {i}: Failed to parse '{part}': {e}")
-                import traceback
-                self.logger.debug(f"Part {i} traceback: {traceback.format_exc()}")
+                self.logger.debug(f"Failed to parse statement '{part}': {e}")
                 stmts.append(self._fix_ast_node_attributes(ast.Pass()))
         
-        result = stmts or [ast.Pass()]
-        self.logger.debug(f"=== BLOCK PARSING COMPLETE: {len(result)} statements ===")
-        return result
+        return stmts or [ast.Pass()]
 
     def _parse_for_loop_safe(self, stmt_str: str, flow_compiler: FLOWCompiler) -> ast.AST:
         """Parse for-loop with better handling of method calls in iterables."""

@@ -1075,41 +1075,6 @@ class FLOWCompiler:
         statements = []
         i = 0
         
-        # CRITICAL FIX: Handle ultra-dense semicolon-separated statements
-        if len(lines) == 1 and ';' in lines[0]:
-            ultra_dense_line = lines[0].strip()
-            logger.debug(f"🔧 FLOW: Processing ultra-dense line with semicolons: {ultra_dense_line}")
-            
-            # Split by semicolons but respect nested structures
-            dense_statements = self._split_respecting_nested_structures(ultra_dense_line)
-            logger.debug(f"🔧 FLOW: Split into {len(dense_statements)} statements: {dense_statements}")
-            
-            for stmt_str in dense_statements:
-                stmt_str = stmt_str.strip()
-                if not stmt_str:
-                    continue
-                    
-                try:
-                    stmt = self._parse_ultra_dense_statement_safe(stmt_str)
-                    if stmt and not isinstance(stmt, ast.Pass):
-                        statements.append(stmt)
-                        logger.debug(f"✅ FLOW: Successfully parsed: {stmt_str}")
-                    else:
-                        logger.warning(f"⚠️ FLOW: Parsing returned Pass for: {stmt_str}")
-                        # Try alternative parsing methods
-                        alt_stmt = self._try_alternative_parsing(stmt_str)
-                        if alt_stmt and not isinstance(alt_stmt, ast.Pass):
-                            statements.append(alt_stmt)
-                            logger.debug(f"✅ FLOW: Alternative parsing succeeded: {stmt_str}")
-                        else:
-                            logger.error(f"❌ FLOW: All parsing failed for: {stmt_str}")
-                            statements.append(ast.Pass())
-                except Exception as e:
-                    logger.error(f"❌ FLOW: Exception parsing {stmt_str}: {e}")
-                    statements.append(ast.Pass())
-            
-            return statements, 1
-        
         while i < len(lines):
             line = lines[i].rstrip()
             
@@ -1136,460 +1101,6 @@ class FLOWCompiler:
             i += consumed
         
         return statements, i
-    
-    def _split_respecting_nested_structures(self, ultra_dense_line: str) -> List[str]:
-        """Split ultra-dense line by semicolons while respecting nested structures."""
-        statements = []
-        current_stmt = ""
-        brace_depth = 0
-        paren_depth = 0
-        in_string = False
-        string_char = None
-        i = 0
-        
-        while i < len(ultra_dense_line):
-            char = ultra_dense_line[i]
-            
-            # Handle string literals
-            if char in ["'", '"'] and (i == 0 or ultra_dense_line[i-1] != '\\'):
-                if not in_string:
-                    in_string = True
-                    string_char = char
-                elif char == string_char:
-                    in_string = False
-                    string_char = None
-            
-            if not in_string:
-                if char == '{':
-                    brace_depth += 1
-                elif char == '}':
-                    brace_depth -= 1
-                elif char == '(':
-                    paren_depth += 1
-                elif char == ')':
-                    paren_depth -= 1
-                elif char == ';' and brace_depth == 0 and paren_depth == 0:
-                    # Found statement boundary
-                    if current_stmt.strip():
-                        statements.append(current_stmt.strip())
-                    current_stmt = ""
-                    i += 1
-                    continue
-            
-            current_stmt += char
-            i += 1
-        
-        # Add the last statement
-        if current_stmt.strip():
-            statements.append(current_stmt.strip())
-        
-        return statements
-    
-    def _parse_ultra_dense_statement_safe(self, stmt_str: str) -> ast.AST:
-        """Safely parse an ultra-dense statement with comprehensive error handling."""
-        logger.debug(f"🔧 FLOW: Parsing ultra-dense statement: {stmt_str}")
-        
-        try:
-            # Handle specific patterns - ORDER MATTERS!
-            
-            # 0. Try-except pattern FIRST: T{...}X{...} (contains ? but is not conditional)
-            if stmt_str.startswith('T{') and '}X{' in stmt_str:
-                logger.debug(f"🔧 FLOW: Detected try-except pattern")
-                result = self._parse_ultra_dense_try_except(stmt_str)
-                if isinstance(result, ast.Pass):
-                    logger.warning(f"⚠️ FLOW: Try-except parser returned Pass for: {stmt_str}")
-                return result
-            
-            # 1. For-loop pattern: @var,iter{body}
-            if stmt_str.startswith('@') and ',' in stmt_str and '{' in stmt_str:
-                logger.debug(f"🔧 FLOW: Detected for-loop pattern")
-                result = self._parse_ultra_dense_for_loop(stmt_str)
-                if isinstance(result, ast.Pass):
-                    logger.warning(f"⚠️ FLOW: For-loop parser returned Pass for: {stmt_str}")
-                return result
-            
-            # 2. Conditional pattern: condition?(true_action):false_action or condition?(true_action,result):_
-            # BUT NOT try-except patterns
-            if '?' in stmt_str and (':' in stmt_str or ',' in stmt_str) and not stmt_str.startswith('T{'):
-                logger.debug(f"🔧 FLOW: Detected conditional pattern")
-                result = self._parse_ultra_dense_conditional(stmt_str)
-                if isinstance(result, ast.Pass):
-                    logger.warning(f"⚠️ FLOW: Conditional parser returned Pass for: {stmt_str}")
-                return result
-            
-            # 3. Assignment pattern: var=value
-            if '=' in stmt_str and not any(op in stmt_str for op in ['==', '!=', '<=', '>=']):
-                logger.debug(f"🔧 FLOW: Detected assignment pattern")
-                result = self._parse_ultra_dense_assignment(stmt_str)
-                if isinstance(result, ast.Pass):
-                    logger.warning(f"⚠️ FLOW: Assignment parser returned Pass for: {stmt_str}")
-                return result
-            
-            # 4. Return pattern: R or Rvalue
-            if stmt_str.startswith('R'):
-                logger.debug(f"🔧 FLOW: Detected return pattern")
-                result = self._parse_ultra_dense_return(stmt_str)
-                if isinstance(result, ast.Pass):
-                    logger.warning(f"⚠️ FLOW: Return parser returned Pass for: {stmt_str}")
-                return result
-            
-            # 5. Try to parse as expression
-            logger.debug(f"🔧 FLOW: No specific pattern detected, trying expression parsing")
-            try:
-                expr = self._parse_expression_string(stmt_str)
-                result = self._fix_ast_node_attributes(ast.Expr(value=expr))
-                logger.debug(f"✅ FLOW: Successfully parsed as expression")
-                return result
-            except Exception as e:
-                logger.debug(f"⚠️ FLOW: Expression parsing failed: {e}")
-            
-            # 6. Fallback to regular flow statement parsing
-            logger.debug(f"🔧 FLOW: Trying fallback flow statement parsing")
-            stmt, _ = self._parse_flow_statement([stmt_str], 0)
-            if stmt and not isinstance(stmt, ast.Pass):
-                logger.debug(f"✅ FLOW: Fallback parsing succeeded")
-                return stmt
-            else:
-                logger.warning(f"⚠️ FLOW: All parsing methods failed for: {stmt_str} - returning Pass")
-                return self._fix_ast_node_attributes(ast.Pass())
-            
-        except Exception as e:
-            logger.warning(f"⚠️ FLOW: Failed to parse ultra-dense statement '{stmt_str}': {e}")
-            return self._fix_ast_node_attributes(ast.Pass())
-    
-    def _parse_ultra_dense_try_except(self, stmt_str: str) -> ast.AST:
-        """Parse ultra-dense try-except: T{try_body}X{except_body} or T{try_body}X(exception){except_body}"""
-        try:
-            logger.debug(f"🔧 FLOW: Parsing ultra-dense try-except: {stmt_str}")
-            
-            # Find T{ and }X{ pattern
-            if not stmt_str.startswith('T{'):
-                logger.warning(f"⚠️ FLOW: Try-except doesn't start with T{{: {stmt_str}")
-                return self._fix_ast_node_attributes(ast.Pass())
-            
-            # Find the matching }X{ 
-            brace_depth = 0
-            try_start = 2  # After 'T{'
-            except_start = -1
-            
-            for i, char in enumerate(stmt_str[try_start:], try_start):
-                if char == '{':
-                    brace_depth += 1
-                elif char == '}':
-                    brace_depth -= 1
-                    if brace_depth == -1:  # Found the closing brace for try
-                        if i + 1 < len(stmt_str) and stmt_str[i + 1] == 'X':
-                            except_start = i + 1
-                            break
-            
-            if except_start == -1:
-                logger.warning(f"⚠️ FLOW: No }}X{{{{ pattern found in: {stmt_str}")
-                return self._fix_ast_node_attributes(ast.Pass())
-            
-            try_body_str = stmt_str[try_start:except_start - 1]  # Exclude the }
-            except_part = stmt_str[except_start:]  # X{...} or X(exception){...}
-            
-            logger.debug(f"🔧 FLOW: Try body: '{try_body_str}'")
-            logger.debug(f"🔧 FLOW: Except part: '{except_part}'")
-            
-            # Parse try body
-            try_stmts = []
-            if try_body_str.strip():
-                try:
-                    # Split by semicolons and parse each statement
-                    if ';' in try_body_str:
-                        for sub_stmt in try_body_str.split(';'):
-                            if sub_stmt.strip():
-                                parsed = self._parse_ultra_dense_statement_safe(sub_stmt.strip())
-                                if not isinstance(parsed, ast.Pass):
-                                    try_stmts.append(parsed)
-                    else:
-                        parsed = self._parse_ultra_dense_statement_safe(try_body_str.strip())
-                        if not isinstance(parsed, ast.Pass):
-                            try_stmts.append(parsed)
-                except Exception as e:
-                    logger.error(f"❌ FLOW: Failed to parse try body '{try_body_str}': {e}")
-            
-            if not try_stmts:
-                try_stmts = [ast.Pass()]
-            
-            # Parse except part
-            except_stmts = []
-            exception_type = None
-            exception_name = None
-            
-            if except_part.startswith('X(') and '){' in except_part:
-                # Exception with type/name: X(exception){body}
-                paren_start = except_part.index('(') + 1
-                paren_end = except_part.index('){')
-                exception_str = except_part[paren_start:paren_end]
-                except_body_str = except_part[paren_end + 2:-1]  # Remove ){ and final }
-                
-                if exception_str and exception_str != '?':
-                    exception_type = ast.Name(id=exception_str, ctx=ast.Load())
-                    exception_name = exception_str
-                
-            elif except_part.startswith('X{') and except_part.endswith('}'):
-                # Simple except: X{body}
-                except_body_str = except_part[2:-1]  # Remove X{ and }
-            else:
-                logger.warning(f"⚠️ FLOW: Invalid except format: {except_part}")
-                return self._fix_ast_node_attributes(ast.Pass())
-            
-            logger.debug(f"🔧 FLOW: Except body: '{except_body_str}'")
-            
-            # Parse except body
-            if except_body_str.strip():
-                try:
-                    if ';' in except_body_str:
-                        for sub_stmt in except_body_str.split(';'):
-                            if sub_stmt.strip():
-                                parsed = self._parse_ultra_dense_statement_safe(sub_stmt.strip())
-                                if not isinstance(parsed, ast.Pass):
-                                    except_stmts.append(parsed)
-                    else:
-                        parsed = self._parse_ultra_dense_statement_safe(except_body_str.strip())
-                        if not isinstance(parsed, ast.Pass):
-                            except_stmts.append(parsed)
-                except Exception as e:
-                    logger.error(f"❌ FLOW: Failed to parse except body '{except_body_str}': {e}")
-            
-            if not except_stmts:
-                except_stmts = [ast.Pass()]
-            
-            # Create try-except AST
-            handler = ast.ExceptHandler(
-                type=exception_type,
-                name=exception_name,
-                body=except_stmts
-            )
-            
-            try_node = ast.Try(
-                body=try_stmts,
-                handlers=[handler],
-                orelse=[],
-                finalbody=[]
-            )
-            
-            result = self._fix_ast_node_attributes(try_node)
-            logger.debug(f"✅ FLOW: Successfully created try-except AST")
-            return result
-            
-        except Exception as e:
-            logger.error(f"❌ FLOW: Failed to parse try-except '{stmt_str}': {e}")
-            return self._fix_ast_node_attributes(ast.Pass())
-
-    def _parse_ultra_dense_for_loop(self, stmt_str: str) -> ast.AST:
-        """Parse ultra-dense for loop: @var,iter{body}"""
-        try:
-            # Extract components
-            at_idx = stmt_str.index('@')
-            comma_idx = stmt_str.index(',')
-            brace_idx = stmt_str.index('{')
-            close_brace_idx = stmt_str.rindex('}')
-            
-            target_str = stmt_str[at_idx+1:comma_idx].strip()
-            iter_str = stmt_str[comma_idx+1:brace_idx].strip()
-            body_str = stmt_str[brace_idx+1:close_brace_idx].strip()
-            
-            logger.debug(f"🔧 FLOW: For-loop parts - target: {target_str}, iter: {iter_str}, body: {body_str}")
-            
-            # Parse target
-            target = ast.Name(id=self._expand_compressed_name(target_str), ctx=ast.Store())
-            
-            # Parse iterator
-            iter_expr = self._parse_expression_string(iter_str)
-            
-            # Parse body
-            body_stmts = []
-            if body_str:
-                body_parts = self._split_respecting_nested_structures(body_str)
-                for part in body_parts:
-                    if part.strip():
-                        stmt = self._parse_ultra_dense_statement_safe(part.strip())
-                        if stmt:
-                            body_stmts.append(stmt)
-            
-            if not body_stmts:
-                body_stmts = [self._fix_ast_node_attributes(ast.Pass())]
-            
-            for_node = ast.For(target=target, iter=iter_expr, body=body_stmts, orelse=[])
-            return self._fix_ast_node_attributes(for_node)
-            
-        except Exception as e:
-            logger.error(f"❌ FLOW: Failed to parse for-loop '{stmt_str}': {e}")
-            return self._fix_ast_node_attributes(ast.Pass())
-    
-    def _parse_ultra_dense_conditional(self, stmt_str: str) -> ast.AST:
-        """Parse ultra-dense conditional: condition?(action,result):fallback or condition?(action):_"""
-        try:
-            logger.debug(f"🔧 FLOW: Parsing ultra-dense conditional: {stmt_str}")
-            
-            # Find the positions of ? and : respecting nesting
-            question_idx = -1
-            colon_idx = -1
-            brace_depth = 0
-            paren_depth = 0
-            
-            for i, char in enumerate(stmt_str):
-                if char == '{':
-                    brace_depth += 1
-                elif char == '}':
-                    brace_depth -= 1
-                elif char == '(':
-                    paren_depth += 1
-                elif char == ')':
-                    paren_depth -= 1
-                elif char == '?' and brace_depth == 0 and paren_depth == 0 and question_idx == -1:
-                    question_idx = i
-                elif char == ':' and brace_depth == 0 and paren_depth == 0 and question_idx != -1 and colon_idx == -1:
-                    colon_idx = i
-                    break
-            
-            if question_idx == -1:
-                logger.warning(f"⚠️ FLOW: No '?' found in conditional: {stmt_str} - returning Pass")
-                # No valid conditional pattern found
-                return self._fix_ast_node_attributes(ast.Pass())
-            
-            condition_str = stmt_str[:question_idx].strip()
-            
-            if colon_idx != -1:
-                true_part = stmt_str[question_idx+1:colon_idx].strip()
-                false_part = stmt_str[colon_idx+1:].strip()
-            else:
-                true_part = stmt_str[question_idx+1:].strip()
-                false_part = "_"
-            
-            logger.debug(f"🔧 FLOW: Conditional parts - condition: {condition_str}, true: {true_part}, false: {false_part}")
-            
-            # Parse condition
-            condition = self._parse_condition_string(condition_str)
-            
-            # Parse true action
-            true_stmts = []
-            if true_part != '_':
-                # Handle parenthesized actions like (action,result)
-                if true_part.startswith('(') and true_part.endswith(')'):
-                    inner = true_part[1:-1]
-                    # Split by comma for action,result pattern
-                    if ',' in inner:
-                        parts = inner.split(',')
-                        for part in parts:
-                            part = part.strip()
-                            if part and part != '_':
-                                stmt = self._parse_ultra_dense_statement_safe(part)
-                                if stmt:
-                                    true_stmts.append(stmt)
-                    else:
-                        stmt = self._parse_ultra_dense_statement_safe(inner)
-                        if stmt:
-                            true_stmts.append(stmt)
-                else:
-                    stmt = self._parse_ultra_dense_statement_safe(true_part)
-                    if stmt:
-                        true_stmts.append(stmt)
-            
-            # Parse false action
-            false_stmts = []
-            if false_part != '_':
-                stmt = self._parse_ultra_dense_statement_safe(false_part)
-                if stmt:
-                    false_stmts.append(stmt)
-            
-            if not true_stmts:
-                true_stmts = [self._fix_ast_node_attributes(ast.Pass())]
-            
-            if_node = ast.If(test=condition, body=true_stmts, orelse=false_stmts)
-            return self._fix_ast_node_attributes(if_node)
-            
-        except Exception as e:
-            logger.error(f"❌ FLOW: Failed to parse conditional '{stmt_str}': {e}")
-            return self._fix_ast_node_attributes(ast.Pass())
-    
-    def _parse_ultra_dense_assignment(self, stmt_str: str) -> ast.AST:
-        """Parse ultra-dense assignment: var=value"""
-        try:
-            parts = stmt_str.split('=', 1)
-            if len(parts) != 2:
-                return self._fix_ast_node_attributes(ast.Pass())
-            
-            target_str, value_str = parts
-            target_str = target_str.strip()
-            value_str = value_str.strip()
-            
-            # Parse target
-            target = self._parse_expression_string(target_str)
-            if isinstance(target, ast.Name):
-                target.ctx = ast.Store()
-            
-            # Parse value
-            value = self._parse_expression_string(value_str)
-            
-            assign_node = ast.Assign(targets=[target], value=value)
-            return self._fix_ast_node_attributes(assign_node)
-            
-        except Exception as e:
-            logger.error(f"❌ FLOW: Failed to parse assignment '{stmt_str}': {e}")
-            return self._fix_ast_node_attributes(ast.Pass())
-    
-    def _parse_ultra_dense_return(self, stmt_str: str) -> ast.AST:
-        """Parse ultra-dense return: R or Rvalue"""
-        try:
-            if len(stmt_str) == 1:  # Just 'R'
-                return self._fix_ast_node_attributes(ast.Return(value=None))
-            
-            value_str = stmt_str[1:].strip()
-            if value_str:
-                value = self._parse_expression_string(value_str)
-                return self._fix_ast_node_attributes(ast.Return(value=value))
-            else:
-                return self._fix_ast_node_attributes(ast.Return(value=None))
-                
-        except Exception as e:
-            logger.error(f"❌ FLOW: Failed to parse return '{stmt_str}': {e}")
-            return self._fix_ast_node_attributes(ast.Pass())
-    
-    def _try_alternative_parsing(self, stmt_str: str) -> ast.AST:
-        """Try alternative parsing strategies for complex patterns."""
-        try:
-            # Try to expand compressed operators first
-            expanded = self.expand_compressed_operators(stmt_str)
-            if expanded != stmt_str:
-                logger.debug(f"🔧 FLOW: Trying expanded form: {expanded}")
-                return self._parse_ultra_dense_statement_safe(expanded)
-            
-            # Try to fix common issues
-            fixed = self._preprocess_statement_for_parsing(stmt_str)
-            if fixed != stmt_str:
-                logger.debug(f"🔧 FLOW: Trying preprocessed form: {fixed}")
-                return self._parse_ultra_dense_statement_safe(fixed)
-            
-            return self._fix_ast_node_attributes(ast.Pass())
-            
-        except Exception as e:
-            logger.debug(f"⚠️ FLOW: Alternative parsing also failed for '{stmt_str}': {e}")
-            return self._fix_ast_node_attributes(ast.Pass())
-    
-    def _preprocess_statement_for_parsing(self, stmt_str: str) -> str:
-        """Preprocess statement to fix common parsing issues."""
-        import re
-        
-        # Fix common operator issues
-        stmt_str = re.sub(r'!in([a-zA-Z_])', r' not in \1', stmt_str)
-        stmt_str = re.sub(r'([a-zA-Z_])!in', r'\1 not in', stmt_str)
-        
-        # Fix method call abbreviations
-        stmt_str = re.sub(r'\.er\(', '.error(', stmt_str)
-        stmt_str = re.sub(r'\.ap\(', '.append(', stmt_str)
-        stmt_str = re.sub(r'\.g\(', '.get(', stmt_str)
-        stmt_str = re.sub(r'\.sp\(', '.split(', stmt_str)
-        
-        # Fix return abbreviations
-        stmt_str = re.sub(r'\bRF\b', 'return False', stmt_str)
-        stmt_str = re.sub(r'\bRT\b', 'return True', stmt_str)
-        stmt_str = re.sub(r'\bRN\b', 'return None', stmt_str)
-        
-        return stmt_str
     
     def _parse_flow_statement(self, lines: List[str], indent_level: int) -> Tuple[Optional[ast.AST], int]:
         """
@@ -2255,19 +1766,13 @@ class FLOWCompiler:
         return ast.Pass()
 
     def expand_compressed_operators(self, expr: str) -> str:
-        """Expand compressed operators back to Python syntax with safe parentheses handling."""
+        """Expand compressed operators back to Python syntax."""
         result = expr
+        
+        # Handle operators in order of specificity (most specific first)
+        # This prevents conflicts like != being affected by standalone !
+        
         import re
-        
-        logger.debug(f"🔧 FLOW: expand_compressed_operators input: '{expr}'")
-        
-        # CRITICAL FIX: For complex parenthesized expressions, use parentheses-aware processing
-        if result.count('(') > 1 or result.count(')') > 1:
-            # This is a complex expression with nested parentheses
-            # Process it more carefully to avoid corrupting the structure
-            result = self._expand_operators_safe_parentheses(result)
-            logger.debug(f"🔧 FLOW: After safe parentheses expansion: '{result}'")
-            return result
         
         # FIRST: Handle FLOW syntax patterns like @i,ran(10){pri(i)}
         # Pattern: @variable,iterable{body} -> for variable in iterable: body
@@ -2344,70 +1849,63 @@ class FLOWCompiler:
             
             result = result[:start] + python_try + result[end:]
 
-        # Handle simple !in patterns (but not in complex expressions)
-        if '!in' in result and result.count('(') <= 1:
-            # Simple !in pattern
-            result = re.sub(r'(\w+)!in(\w+)', r'\1 not in \2', result)
+        # Enhanced: Handle multiple !?var,container patterns with better boundary detection
+        # Use a more precise pattern that handles complex containers better
+        # Updated pattern to be more flexible and handle edge cases including spaces and word boundaries
+        not_in_patterns = list(re.finditer(r'!\?([^,\s]+?),\s*([^\s&|)}\],]+)', result))
+
+        # Process matches in reverse to maintain string positions
+        for match in reversed(not_in_patterns):
+            var_part = match.group(1).strip()
+            container_part = match.group(2).strip()
+            
+            # Clean up container_part - remove trailing punctuation that shouldn't be part of the container
+            container_part = re.sub(r'[,\s]*$', '', container_part)
+            
+            # Special handling for placeholder containers
+            if container_part == '?':
+                # Try to infer the container from context if possible
+                # For now, keep the placeholder but mark it for later resolution
+                container_part = '?'  # Will be resolved in next phase
+            
+            # Replace this specific match, preserving surrounding content
+            start, end = match.span()
+            result = result[:start] + f'{var_part} not in {container_part}' + result[end:]
+
+        # Second pass: Clean up any remaining standalone !? that might have been missed
+        # This handles edge cases where the pattern might be malformed
+        result = re.sub(r'!\?(?![^,]*,)', 'not ', result)
+        
+        # First: Multi-character operators
+        if '!in' in result:
             result = result.replace('!in', ' not in ')
         
-        # Handle other operators for simple expressions
-        if result.count('(') <= 1:
-            if '!=' in result:
-                result = result.replace('!=', ' != ')
-                
-            if '<=' in result:
-                result = result.replace('<=', ' <= ')
-                
-            if '>=' in result:
-                result = result.replace('>=', ' >= ')
+        if '!=' in result:
+            result = result.replace('!=', ' != ')
             
-            # Handle == operator with proper spacing
-            if '==' in result:
-                result = re.sub(r'(\S)==(\S)', r'\1 == \2', result)
-                result = re.sub(r' +== +', ' == ', result)
+        if '<=' in result:
+            result = result.replace('<=', ' <= ')
             
-            # Single character operators
-            if '&' in result:
-                result = result.replace('&', ' and ')
-                
-            if '|' in result:
-                result = result.replace('|', ' or ')
+        if '>=' in result:
+            result = result.replace('>=', ' >= ')
+        
+        # FIX: Handle == operator with proper spacing
+        if '==' in result:
+            # Use regex to add spaces around == if not already present
+            result = re.sub(r'(\S)==(\S)', r'\1 == \2', result)
+            # Clean up multiple spaces
+            result = re.sub(r' +== +', ' == ', result)
+        
+        # Then: Single character operators (but not already handled)
+        if '&' in result:
+            result = result.replace('&', ' and ')
             
-            # Method abbreviations
-            result = re.sub(r'\.sp\(', '.split(', result)
-            
-            # Standalone ! (but not those already in !=, !in, or !?)
-            result = re.sub(r'!(?![=in?])', 'not ', result)
+        if '|' in result:
+            result = result.replace('|', ' or ')
         
-        logger.debug(f"🔧 FLOW: expand_compressed_operators output: '{result}'")
-        return result
-
-    def _expand_operators_safe_parentheses(self, expr: str) -> str:
-        """Safely expand operators in complex parenthesized expressions."""
-        import re
-        
-        # For complex expressions, we need to be very careful
-        # Only expand operators that are clearly unambiguous
-        result = expr
-        
-        # Method abbreviations (safe)
-        result = re.sub(r'\.sp\(', '.split(', result)
-        
-        # Handle !in only if it's clearly a 'not in' operator
-        # Use negative lookbehind/lookahead to ensure it's not part of a larger expression
-        result = re.sub(r'(?<!\w)!in(?=\s|\w)', ' not in ', result)
-        
-        # Handle simple operators with word boundaries
-        result = re.sub(r'(?<!\S)!=(?!\S)', ' != ', result)
-        result = re.sub(r'(?<!\S)<=(?!\S)', ' <= ', result) 
-        result = re.sub(r'(?<!\S)>=(?!\S)', ' >= ', result)
-        result = re.sub(r'(?<!\S)==(?!\S)', ' == ', result)
-        
-        # Only expand & and | if they're not inside quotes and at proper boundaries
-        # This is safer for complex expressions
-        if "'" not in result and '"' not in result:
-            result = re.sub(r'(?<!\S)&(?!\S)', ' and ', result)
-            result = re.sub(r'(?<!\S)\|(?!\S)', ' or ', result)
+        # Finally: Standalone ! (but not those already in !=, !in, or !?)
+        # Use regex to only replace ! that's not part of !=, !in, or !?
+        result = re.sub(r'!(?![=in?])', 'not ', result)
         
         return result
 
@@ -2433,57 +1931,9 @@ class FLOWCompiler:
     def _parse_condition_string(self, condition_str: str) -> ast.AST:
         """Parse a condition string with proper operator expansion."""
         condition_str = condition_str.strip()
-        logger.debug(f"🔧 FLOW: Parsing condition string: '{condition_str}'")
         
-        # CRITICAL: For complex parenthesized expressions, handle them specially FIRST
-        if condition_str.count('(') > 1 or condition_str.count(')') > 1:
-            logger.debug(f"🔧 FLOW: Detected complex parenthesized expression")
-            return self._parse_complex_parenthesized_condition(condition_str)
-        
-        # CRITICAL: Expand compressed operators AFTER checking for complex expressions
-        original_condition = condition_str
+        # CRITICAL: Expand compressed operators FIRST
         condition_str = self.expand_compressed_operators(condition_str)
-        if condition_str != original_condition:
-            logger.debug(f"🔧 FLOW: After operator expansion: '{original_condition}' -> '{condition_str}'")
-        
-        # Handle simple parenthesized conditions like (('@' not in email) or ('.' not in email.split('@')[-1]))
-        if condition_str.startswith('((') and condition_str.endswith('))'):
-            # This is a complex compound condition
-            inner = condition_str[2:-2]  # Remove outer parentheses
-            logger.debug(f"🔧 FLOW: Parsing complex compound condition: {inner}")
-            
-            # Split by | (OR) at the top level
-            or_parts = self._split_by_operator(inner, 'or')
-            if len(or_parts) > 1:
-                logger.debug(f"🔧 FLOW: Found {len(or_parts)} OR parts: {or_parts}")
-                # Multiple OR parts
-                or_values = []
-                for part in or_parts:
-                    try:
-                        part_condition = self._parse_single_condition_part(part.strip())
-                        or_values.append(part_condition)
-                    except Exception as e:
-                        logger.error(f"❌ FLOW: Failed to parse OR part '{part}': {e}")
-                        or_values.append(ast.Constant(value=True))  # fallback
-                return ast.BoolOp(op=ast.Or(), values=or_values)
-            
-            # Split by & (AND) at the top level
-            and_parts = self._split_by_operator(inner, 'and')
-            if len(and_parts) > 1:
-                logger.debug(f"🔧 FLOW: Found {len(and_parts)} AND parts: {and_parts}")
-                # Multiple AND parts
-                and_values = []
-                for part in and_parts:
-                    try:
-                        part_condition = self._parse_single_condition_part(part.strip())
-                        and_values.append(part_condition)
-                    except Exception as e:
-                        logger.error(f"❌ FLOW: Failed to parse AND part '{part}': {e}")
-                        and_values.append(ast.Constant(value=True))  # fallback
-                return ast.BoolOp(op=ast.And(), values=and_values)
-            
-            # Single complex part
-            return self._parse_single_condition_part(inner)
         
         # Handle chain alias in compressed operators BEFORE existing !in check
         # Pattern: x!ing0 -> x not in self.config (where g0 -> s.c)
@@ -2570,227 +2020,6 @@ class FLOWCompiler:
         
         # Fallback: parse as expression
         return self._parse_expression_string(condition_str)
-
-    def _parse_complex_parenthesized_condition(self, condition_str: str) -> ast.AST:
-        """Handle complex parenthesized conditions with proper precedence."""
-        logger.debug(f"🔧 FLOW: Parsing complex parenthesized condition: '{condition_str}'")
-        
-        # First, try to parse it directly as Python syntax
-        try:
-            # Apply minimal operator expansion that's safe for complex expressions
-            expanded = self._expand_operators_safe_parentheses(condition_str)
-            logger.debug(f"🔧 FLOW: Safe expansion: '{condition_str}' -> '{expanded}'")
-            
-            # Try to parse as Python expression
-            try:
-                ast_node = ast.parse(expanded, mode='eval')
-                return ast_node.body
-            except SyntaxError as e:
-                logger.debug(f"🔧 FLOW: Direct parse failed: {e}")
-                # Fall back to manual parsing
-                pass
-        except Exception as e:
-            logger.debug(f"🔧 FLOW: Safe expansion failed: {e}")
-        
-        # Manual parsing for complex expressions
-        if condition_str.startswith('((') and condition_str.endswith('))'):
-            inner = condition_str[2:-2]
-            
-            # Try to split by OR at the top level
-            or_parts = self._split_by_operator_safe(inner, 'or')
-            if len(or_parts) > 1:
-                or_values = []
-                for part in or_parts:
-                    or_values.append(self._parse_single_condition_part_safe(part.strip()))
-                return ast.BoolOp(op=ast.Or(), values=or_values)
-            
-            # Try to split by AND at the top level  
-            and_parts = self._split_by_operator_safe(inner, 'and')
-            if len(and_parts) > 1:
-                and_values = []
-                for part in and_parts:
-                    and_values.append(self._parse_single_condition_part_safe(part.strip()))
-                return ast.BoolOp(op=ast.And(), values=and_values)
-            
-            # Single part
-            return self._parse_single_condition_part_safe(inner)
-        
-        # Fallback
-        return self._parse_single_condition_part_safe(condition_str)
-
-    def _split_by_operator_safe(self, text: str, operator: str) -> list:
-        """Split text by operator while respecting parentheses and quotes."""
-        parts = []
-        current_part = ""
-        paren_depth = 0
-        quote_char = None
-        i = 0
-        
-        while i < len(text):
-            char = text[i]
-            
-            # Handle quotes
-            if char in ('"', "'") and (i == 0 or text[i-1] != '\\'):
-                if quote_char is None:
-                    quote_char = char
-                elif quote_char == char:
-                    quote_char = None
-            
-            # Skip if inside quotes
-            if quote_char:
-                current_part += char
-                i += 1
-                continue
-                
-            # Handle parentheses
-            if char == '(':
-                paren_depth += 1
-            elif char == ')':
-                paren_depth -= 1
-            
-            # Check for operator at the same parentheses level
-            if (paren_depth == 0 and 
-                text[i:i+len(operator)] == operator and
-                (i + len(operator) >= len(text) or text[i + len(operator)] not in 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ_')):
-                # Found operator at correct level
-                if current_part.strip():
-                    parts.append(current_part.strip())
-                current_part = ""
-                i += len(operator)
-                continue
-            
-            current_part += char
-            i += 1
-        
-        if current_part.strip():
-            parts.append(current_part.strip())
-        
-        return parts if len(parts) > 1 else [text]
-
-    def _parse_single_condition_part_safe(self, part: str) -> ast.AST:
-        """Parse a single condition part safely."""
-        part = part.strip()
-        
-        # Remove outer parentheses if they exist and are outermost
-        if part.startswith('(') and part.endswith(')'):
-            # Check if these are the outermost parentheses
-            paren_count = 0
-            for i, char in enumerate(part):
-                if char == '(':
-                    paren_count += 1
-                elif char == ')':
-                    paren_count -= 1
-                    if paren_count == 0 and i < len(part) - 1:
-                        # Found closing paren before end, so outer parens are not outermost
-                        break
-            else:
-                # Outer parentheses are indeed outermost, remove them
-                part = part[1:-1].strip()
-        
-        # Apply safe operator expansion
-        expanded_part = self._expand_operators_safe_parentheses(part)
-        
-        # Try to parse as Python condition
-        try:
-            ast_node = ast.parse(expanded_part, mode='eval')
-            return ast_node.body
-        except SyntaxError:
-            # Fall back to manual parsing
-            return self._parse_condition_string(expanded_part)
-        
-        # Handle binary operators with ASCII - order matters!
-        # CRITICAL: Check for 'not in' before 'in' to avoid incorrect splitting
-        for op_text, op_class in [
-            ('!=', ast.NotEq),
-            ('==', ast.Eq),
-            ('<=', ast.LtE),
-            ('>=', ast.GtE),
-            ('not in', ast.NotIn),  # Check 'not in' before 'in'
-            ('!in', ast.NotIn),     # This should come after the compressed pattern above
-            ('in', ast.In),
-            ('<', ast.Lt),
-            ('>', ast.Gt),
-        ]:
-            if op_text in condition_str:
-                left_str, right_str = condition_str.split(op_text, 1)
-                left = self._parse_expression_string(left_str.strip())
-                right = self._parse_expression_string(right_str.strip())
-                return ast.Compare(left=left, ops=[op_class()], comparators=[right])
-        
-        # Fallback: parse as expression
-        return self._parse_expression_string(condition_str)
-    
-    def _split_by_operator(self, text: str, operator: str) -> list:
-        """Split text by operator while respecting parentheses."""
-        parts = []
-        current_part = ""
-        paren_depth = 0
-        quote_char = None
-        i = 0
-        
-        while i < len(text):
-            char = text[i]
-            
-            # Handle quotes
-            if char in ('"', "'") and (i == 0 or text[i-1] != '\\'):
-                if quote_char is None:
-                    quote_char = char
-                elif quote_char == char:
-                    quote_char = None
-            
-            # Skip if inside quotes
-            if quote_char:
-                current_part += char
-                i += 1
-                continue
-                
-            # Handle parentheses
-            if char == '(':
-                paren_depth += 1
-            elif char == ')':
-                paren_depth -= 1
-            
-            # Check for operator at the same parentheses level
-            if (paren_depth == 0 and 
-                text[i:i+len(operator)] == operator and
-                (i + len(operator) >= len(text) or text[i + len(operator)] not in 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ_')):
-                # Found operator at correct level
-                if current_part.strip():
-                    parts.append(current_part.strip())
-                current_part = ""
-                i += len(operator)
-                continue
-            
-            current_part += char
-            i += 1
-        
-        if current_part.strip():
-            parts.append(current_part.strip())
-        
-        return parts if len(parts) > 1 else [text]
-    
-    def _parse_single_condition_part(self, part: str) -> ast.AST:
-        """Parse a single condition part, handling parentheses."""
-        part = part.strip()
-        
-        # Remove outer parentheses if they exist
-        if part.startswith('(') and part.endswith(')'):
-            # Check if these are the outermost parentheses
-            paren_count = 0
-            for i, char in enumerate(part):
-                if char == '(':
-                    paren_count += 1
-                elif char == ')':
-                    paren_count -= 1
-                    if paren_count == 0 and i < len(part) - 1:
-                        # Found closing paren before end, so outer parens are not outermost
-                        break
-            else:
-                # Outer parentheses are indeed outermost, remove them
-                part = part[1:-1].strip()
-        
-        # Recursively parse this part as a condition
-        return self._parse_condition_string(part)
     
     def _parse_expression_string(self, expr_str: str) -> ast.AST:
         """Parse an expression string, handling dense notation"""
@@ -3472,19 +2701,13 @@ class FLOWCompiler:
     def _preprocess_body_statement(self, stmt_str: str) -> str:
         """
         FUNDAMENTAL FIX: Preprocess body statements to prevent malformed expressions.
-        This ensures proper statement structure before AST parsing using generic patterns.
+        This ensures proper statement structure before AST parsing.
         """
         import re
         
-        # GENERIC FIX: Remove redundant chained access for ANY attribute
-        # Pattern: obj[key].obj[key].method -> obj[key].method
+        # Fix redundant chained access: obj[key].obj[key].method -> obj[key].method
         redundant_pattern = r'(\w+\[[^\]]+\])\.\1\.'
         stmt_str = re.sub(redundant_pattern, r'\1.', stmt_str)
-        
-        # GENERIC FIX: More complex redundant chains
-        # Pattern: .attr[key].attr[key] -> .attr[key] (for any attribute)
-        redundant_attr_pattern = r'\.([a-zA-Z_][a-zA-Z0-9_]*)\[([^\]]+)\]\.\1\[\2\]'
-        stmt_str = re.sub(redundant_attr_pattern, r'.\1[\2]', stmt_str)
         
         # Fix method calls that lack proper object reference
         # Pattern: .method[args] -> proper_object.method[args]
@@ -3492,15 +2715,15 @@ class FLOWCompiler:
             # This is likely a malformed method call
             method_part = stmt_str[1:]  # Remove leading dot
             if '.' in method_part:
-                # Multiple dots - likely obj.attr['key'].append(...)
-                # Extract the base pattern more generically
+                # Multiple dots - likely s.data_buffer['key'].append(...)
+                # Fix to proper conditional execution
                 parts = method_part.split('.')
                 if len(parts) >= 2 and 'append(' in stmt_str:
-                    # Find any attribute that appears to be duplicated
-                    base_obj = 's.' + parts[0]  # e.g., s.data_buffer, s.config, etc.
-                    remaining = '.'.join(parts[1:])
+                    # Convert to proper append statement
+                    base_obj = 's.' + parts[0]  # e.g., s.data_buffer
+                    remaining = '.'.join(parts[1:])  # e.g., data_buffer['key'].append(...)
                     
-                    # Extract the key and append value generically
+                    # Extract the key and append value
                     key_match = re.search(r"\['([^']+)'\]", remaining)
                     append_match = re.search(r"append\(([^)]+)\)", remaining)
                     

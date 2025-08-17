@@ -14,8 +14,11 @@ try:
     from cli.commands.session import session
     from cli.commands.integrate import integrate
     from cli.commands.demo import demo
+    from cli.commands.claude_code import claude_code
+    claude_code_available = True
 except ImportError as e:
     print(f"Absolute import error: {e}")
+    claude_code_available = False
     try:
         # Try relative imports as backup
         from .commands.compress import compress
@@ -23,8 +26,14 @@ except ImportError as e:
         from .commands.session import session
         from .commands.integrate import integrate
         from .commands.demo import demo
+        try:
+            from .commands.claude_code import claude_code
+            claude_code_available = True
+        except ImportError:
+            claude_code_available = False
     except ImportError as e2:
         print(f"Relative import error: {e2}")
+        claude_code_available = False
     # Fallback for development/testing
     @click.command()
     def compress():
@@ -45,6 +54,13 @@ except ImportError as e:
     @click.command()
     def demo():
         click.echo("Demo command not available")
+
+if not claude_code_available:
+    @click.group()
+    def claude_code():
+        """Claude Code integration (unavailable - missing dependencies)"""
+        click.echo("Claude Code integration is not available. Missing dependencies.")
+        click.echo("Please check that all required modules are installed.")
 
 __version__ = '0.1.0'  # MVP version
 
@@ -71,6 +87,10 @@ cli.add_command(translate)
 cli.add_command(session)
 cli.add_command(integrate)
 cli.add_command(demo)
+if claude_code_available:
+    cli.add_command(claude_code)
+else:
+    cli.add_command(claude_code)  # Add the fallback version
 
 if __name__ == '__main__':
     try:

@@ -218,16 +218,29 @@ class CAI3WaterfallEnhancement:
             
             compression_ratio = (1 - compressed_tokens / original_tokens) * 100
             
+            # Determine the correct tier based on original token count
+            tier_used = CompressionTier.TINY
+            for tier, (min_tokens, max_tokens) in {
+                CompressionTier.TINY: (0, 100),
+                CompressionTier.SMALL: (100, 250),
+                CompressionTier.MEDIUM: (250, 1000),
+                CompressionTier.LARGE: (1000, 10000),
+                CompressionTier.HUGE: (10000, float('inf'))
+            }.items():
+                if min_tokens <= original_tokens < max_tokens:
+                    tier_used = tier
+                    break
+            
             self.logger.info(
                 f"CAI3 enhanced compression: {original_tokens} → {compressed_tokens} tokens "
-                f"({compression_ratio:.1f}% reduction), {len(edit_scope_cids)} methods with bodies"
+                f"({compression_ratio:.1f}% reduction), {len(edit_scope_cids)} methods with bodies, tier: {tier_used.name}"
             )
             
             return CompressionResult(
                 original_tokens=original_tokens,
                 compressed_tokens=compressed_tokens,
                 compression_ratio=compression_ratio,
-                tier_used=CompressionTier.MEDIUM,
+                tier_used=tier_used,
                 method_used="cai3_enhanced",
                 content=lite_content,
                 metadata={
@@ -236,7 +249,8 @@ class CAI3WaterfallEnhancement:
                     'compression_mode': 'CAI3 All Bodies' if getattr(self, 'include_all_methods', False) else 'CAI3 Edit Scope',
                     'edit_scope_size': len(edit_scope_cids),
                     'total_nodes': len(cai3_full.nodes),
-                    'source_path': str(source_path) if source_path else None
+                    'source_path': str(source_path) if source_path else None,
+                    'tier_used': tier_used.name
                 }
             )
             
@@ -1850,8 +1864,9 @@ def enhance_waterfall_with_cai3(WaterfallCompressorClass):
             # Determine tier
             tier = self._determine_tier(original_tokens)
             
-            # Use enhanced CAI3 for MEDIUM tier if enabled
-            if tier == CompressionTier.MEDIUM and getattr(self, 'use_cai3_mode', True):
+            # Use enhanced CAI3 for SMALL, MEDIUM, LARGE, and HUGE tiers (100+ tokens) if enabled
+            # All these tiers use _standard_compression which should be CAI3-enhanced
+            if tier in [CompressionTier.SMALL, CompressionTier.MEDIUM, CompressionTier.LARGE, CompressionTier.HUGE] and getattr(self, 'use_cai3_mode', True):
                 try:
                     return self._standard_compression_cai3(content, original_tokens, source_path)
                 except Exception as e:
@@ -1860,7 +1875,7 @@ def enhance_waterfall_with_cai3(WaterfallCompressorClass):
                     # Fallback to original compression
                     return original_compress(self, content, source_path)
             
-            # Otherwise use original compression
+            # Otherwise use original compression (TINY tier)
             return original_compress(self, content, source_path)
         
         WaterfallCompressorClass.compress_string = enhanced_compress

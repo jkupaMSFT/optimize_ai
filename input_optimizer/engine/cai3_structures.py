@@ -189,6 +189,7 @@ class CAI3Lite:
     chain_aliases: Optional[str] = None  # "D:g0=s.c.g|g1=tv.items|g2=dt.now"
     cid_aliases: Optional[str] = None  # "X:0=mt_5605|1=mt_961c|..."
     pools: Optional[str] = None  # "P:p0=value1;p1=value2"
+    raw_blocks: Optional[str] = None  # "R:raw_id=compressed_data,..."
     
     def serialize(self) -> str:
         """Convert to ultra-dense string format for LLM"""
@@ -208,6 +209,8 @@ class CAI3Lite:
             lines.append(self.config_keys)
         if self.pools:
             lines.append(self.pools)
+        if self.raw_blocks:
+            lines.append(self.raw_blocks)
         
         # No blank lines in dense mode
         
@@ -363,20 +366,41 @@ class CAI3Patch:
         return patches
 
 class CAI3Cache:
-    """Cache manager for CAI3 artifacts"""
+    """Cache manager for CAI3 artifacts with robust path handling"""
     
     def __init__(self, cache_dir: Path = Path(".cai3_cache")):
         self.cache_dir = cache_dir
         self.cache_dir.mkdir(exist_ok=True)
+        
+        # Keep track of content hashes to file mappings for better cache hits
+        self.content_hash_map = {}
+        self._load_content_hash_index()
     
     def get_cache_key(self, source_path: Path) -> str:
         """Generate cache key from source path"""
         return hashlib.md5(str(source_path.absolute()).encode()).hexdigest()[:12]
     
+    def get_content_hash(self, source_path: Path) -> Optional[str]:
+        """Get content hash for a file, used for cache matching"""
+        try:
+            if source_path.exists():
+                return hashlib.md5(source_path.read_bytes()).hexdigest()
+            return None
+        except Exception:
+            return None
+    
     def store_full(self, source_path: Path, cai3_full: CAI3Full):
-        """Store CAI3Full to cache"""
+        """Store CAI3Full to cache with content hash tracking"""
         cache_key = self.get_cache_key(source_path)
         cache_file = self.cache_dir / f"{cache_key}_full.json"
+        
+        # Update content hash before storing
+        content_hash = self.get_content_hash(source_path)
+        if content_hash:
+            cai3_full.file_hash = content_hash
+            self.content_hash_map[content_hash] = cache_key
+            self._save_content_hash_index()
+        
         cache_file.write_text(cai3_full.to_json())
     
     def store_map(self, source_path: Path, cai3_map: CAI3Map):
@@ -386,28 +410,98 @@ class CAI3Cache:
         cache_file.write_text(cai3_map.to_json())
     
     def load_full(self, source_path: Path) -> Optional[CAI3Full]:
-        """Load CAI3Full from cache"""
+        """Load CAI3Full from cache with fallback strategies"""
+        # Strategy 1: Direct cache lookup
         cache_key = self.get_cache_key(source_path)
         cache_file = self.cache_dir / f"{cache_key}_full.json"
         if cache_file.exists():
             return CAI3Full.from_json(cache_file.read_text())
+        
+        # Strategy 2: Content hash lookup
+        content_hash = self.get_content_hash(source_path)
+        if content_hash and content_hash in self.content_hash_map:
+            fallback_key = self.content_hash_map[content_hash]
+            fallback_file = self.cache_dir / f"{fallback_key}_full.json"
+            if fallback_file.exists():
+                logging.getLogger(__name__).info(f"Found cache by content hash: {fallback_file}")
+                return CAI3Full.from_json(fallback_file.read_text())
+        
+        # Strategy 3: Search all cache files for matching content hash
+        if content_hash:
+            for cache_file in self.cache_dir.glob("*_full.json"):
+                try:
+                    cache_data = json.loads(cache_file.read_text())
+                    if cache_data.get('file_hash') == content_hash:
+                        logging.getLogger(__name__).info(f"Found matching cache by content hash: {cache_file}")
+                        return CAI3Full.from_json(cache_file.read_text())
+                except (json.JSONDecodeError, KeyError):
+                    continue
+        
         return None
     
     def load_map(self, source_path: Path) -> Optional[CAI3Map]:
-        """Load CAI3Map from cache"""
+        """Load CAI3Map from cache with fallback strategies"""
+        # Strategy 1: Direct cache lookup
         cache_key = self.get_cache_key(source_path)
         cache_file = self.cache_dir / f"{cache_key}_map.json"
         if cache_file.exists():
             return CAI3Map.from_json(cache_file.read_text())
+        
+        # Strategy 2: Content hash lookup
+        content_hash = self.get_content_hash(source_path)
+        if content_hash and content_hash in self.content_hash_map:
+            fallback_key = self.content_hash_map[content_hash]
+            fallback_file = self.cache_dir / f"{fallback_key}_map.json"
+            if fallback_file.exists():
+                return CAI3Map.from_json(fallback_file.read_text())
+        
+        # Strategy 3: Find corresponding map file for any matching full cache
+        if content_hash:
+            for cache_file in self.cache_dir.glob("*_full.json"):
+                try:
+                    cache_data = json.loads(cache_file.read_text())
+                    if cache_data.get('file_hash') == content_hash:
+                        # Found matching full cache, look for corresponding map
+                        map_file = self.cache_dir / cache_file.name.replace('_full.json', '_map.json')
+                        if map_file.exists():
+                            return CAI3Map.from_json(map_file.read_text())
+                except (json.JSONDecodeError, KeyError):
+                    continue
+        
         return None
     
     def invalidate(self, source_path: Path):
         """Invalidate cache for a source file"""
         cache_key = self.get_cache_key(source_path)
+        
+        # Remove from content hash map
+        content_hash = self.get_content_hash(source_path)
+        if content_hash and content_hash in self.content_hash_map:
+            del self.content_hash_map[content_hash]
+            self._save_content_hash_index()
+        
+        # Remove cache files
         for suffix in ['_full.json', '_map.json']:
             cache_file = self.cache_dir / f"{cache_key}{suffix}"
             if cache_file.exists():
                 cache_file.unlink()
+    
+    def _load_content_hash_index(self):
+        """Load the content hash to cache key mapping"""
+        index_file = self.cache_dir / "content_hash_index.json"
+        if index_file.exists():
+            try:
+                self.content_hash_map = json.loads(index_file.read_text())
+            except (json.JSONDecodeError, FileNotFoundError):
+                self.content_hash_map = {}
+    
+    def _save_content_hash_index(self):
+        """Save the content hash to cache key mapping"""
+        index_file = self.cache_dir / "content_hash_index.json"
+        try:
+            index_file.write_text(json.dumps(self.content_hash_map, indent=2))
+        except Exception as e:
+            logging.getLogger(__name__).warning(f"Failed to save content hash index: {e}")
 
 # Utility functions
 def generate_cid(node_type: str, node_name: str, parent_cid: Optional[str] = None) -> str:

@@ -231,10 +231,19 @@ class CAI3WaterfallEnhancement:
                     tier_used = tier
                     break
             
-            self.logger.info(
+            # Enhanced logging with RAW fallback info
+            raw_blocks_count = len(getattr(cai3_full, 'raw_blocks', {}))
+            unsupported_count = len(getattr(cai3_full, 'unsupported_nodes', set()))
+            
+            log_msg = (
                 f"CAI3 enhanced compression: {original_tokens} → {compressed_tokens} tokens "
                 f"({compression_ratio:.1f}% reduction), {len(edit_scope_cids)} methods with bodies, tier: {tier_used.name}"
             )
+            
+            if raw_blocks_count > 0 or unsupported_count > 0:
+                log_msg += f", RAW fallback: {raw_blocks_count} blocks, {unsupported_count} unsupported types"
+            
+            self.logger.info(log_msg)
             
             return CompressionResult(
                 original_tokens=original_tokens,
@@ -250,7 +259,10 @@ class CAI3WaterfallEnhancement:
                     'edit_scope_size': len(edit_scope_cids),
                     'total_nodes': len(cai3_full.nodes),
                     'source_path': str(source_path) if source_path else None,
-                    'tier_used': tier_used.name
+                    'tier_used': tier_used.name,
+                    'raw_blocks_count': len(getattr(cai3_full, 'raw_blocks', {})),
+                    'unsupported_nodes': list(getattr(cai3_full, 'unsupported_nodes', set())),
+                    'has_raw_fallback': len(getattr(cai3_full, 'raw_blocks', {})) > 0
                 }
             )
             
@@ -781,6 +793,10 @@ class CAI3WaterfallEnhancement:
                 'cid_aliases': {}  # Will be populated during LITE creation
             }
         )
+        
+        # Initialize RAW fallback infrastructure
+        cai3_full.raw_blocks = {}  # Will be populated by FLOW compiler
+        cai3_full.unsupported_nodes = set()  # Will be populated by FLOW compiler
         
         return cai3_full
     
@@ -1464,6 +1480,19 @@ class CAI3WaterfallEnhancement:
                         
                     except Exception as e:
                         self.logger.warning(f"Failed to create ultra-dense body for {cid}: {e}")
+            
+            # After processing all methods, transfer accumulated RAW blocks from flow compiler
+            if hasattr(flow_compiler, 'raw_blocks') and flow_compiler.raw_blocks:
+                if not hasattr(cai3_full, 'raw_blocks'):
+                    cai3_full.raw_blocks = {}
+                cai3_full.raw_blocks.update(flow_compiler.raw_blocks)
+                self.logger.debug(f"Transferred {len(flow_compiler.raw_blocks)} RAW blocks from method compilation")
+            
+            if hasattr(flow_compiler, 'unsupported_nodes') and flow_compiler.unsupported_nodes:
+                if not hasattr(cai3_full, 'unsupported_nodes'):
+                    cai3_full.unsupported_nodes = set()
+                cai3_full.unsupported_nodes.update(flow_compiler.unsupported_nodes)
+                self.logger.debug(f"Tracked {len(flow_compiler.unsupported_nodes)} unsupported node types from method compilation")
         
             # Transfer hash mappings from flow compiler to CAI3Full
             if hasattr(flow_compiler, 'hash_to_value') and flow_compiler.hash_to_value:
@@ -1474,6 +1503,19 @@ class CAI3WaterfallEnhancement:
                 legacy_mapping = flow_compiler.get_legacy_hash_mapping() if hasattr(flow_compiler, 'get_legacy_hash_mapping') else flow_compiler.hash_to_value
                 cai3_full.hash_to_value.update(legacy_mapping)
                 self.logger.debug(f"Transferred {len(legacy_mapping)} hash mappings to CAI3Full")
+            
+            # Transfer RAW blocks and unsupported nodes from flow compiler
+            if hasattr(flow_compiler, 'raw_blocks') and flow_compiler.raw_blocks:
+                if not hasattr(cai3_full, 'raw_blocks'):
+                    cai3_full.raw_blocks = {}
+                cai3_full.raw_blocks.update(flow_compiler.raw_blocks)
+                self.logger.debug(f"Transferred {len(flow_compiler.raw_blocks)} RAW blocks to CAI3Full")
+            
+            if hasattr(flow_compiler, 'unsupported_nodes') and flow_compiler.unsupported_nodes:
+                if not hasattr(cai3_full, 'unsupported_nodes'):
+                    cai3_full.unsupported_nodes = set()
+                cai3_full.unsupported_nodes.update(flow_compiler.unsupported_nodes)
+                self.logger.debug(f"Tracked {len(flow_compiler.unsupported_nodes)} unsupported node types: {flow_compiler.unsupported_nodes}")
         
         # Filter pools to only referenced ones
         pool_section = None
@@ -1507,6 +1549,31 @@ class CAI3WaterfallEnhancement:
                 if pool_items:
                     pool_section = f"P:{','.join(pool_items)}"  # Comma separator
         
+        # Add RAW blocks section if any RAW blocks were created
+        raw_section = None
+        if hasattr(cai3_full, 'raw_blocks') and cai3_full.raw_blocks:
+            # Check if any RAW blocks are referenced in bodies
+            body_text = ' '.join(bodies) if bodies else ""
+            referenced_raw_ids = set()
+            
+            # Find RAW{raw_id} references in bodies
+            import re
+            raw_pattern = r'RAW\{([^}]+)\}'
+            for match in re.finditer(raw_pattern, body_text):
+                referenced_raw_ids.add(match.group(1))
+            
+            if referenced_raw_ids:
+                raw_items = []
+                for raw_id in list(referenced_raw_ids)[:5]:  # Limit to 5 most important RAW blocks
+                    if raw_id in cai3_full.raw_blocks:
+                        raw_data = cai3_full.raw_blocks[raw_id]
+                        # Store compressed RAW block data
+                        raw_items.append(f"{raw_id}={raw_data['data']}")
+                
+                if raw_items:
+                    raw_section = f"R:{','.join(raw_items)}"
+                    self.logger.debug(f"Added RAW section with {len(raw_items)} blocks")
+        
         # Create ultra-compact LITE
         return CAI3Lite(
             header=header,
@@ -1515,6 +1582,7 @@ class CAI3WaterfallEnhancement:
             cid_aliases=cid_aliases_section,
             config_keys=config_keys,  # Skip
             pools=pool_section,
+            raw_blocks=raw_section,  # Add RAW blocks section
             table=table,
             bodies=bodies
         )

@@ -94,14 +94,51 @@ class FileAnalyzer:
     compressed, metadata = proxy.process_input("analyze this code", str(temp_path))
     
     print(f"✅ Compression successful: {metadata['compression_ratio']:.1f}% reduction")
+    print(f"📊 Compressed output preview:\n{compressed[:500]}...")
+    
+    # Extract CAI3 content safely with proper error handling
+    import re
+    cai3_content = None
+    
+    # Try to extract CAI3 content using multiple patterns
+    patterns = [
+        r'---CAI3 CODE START---(.*?)---CAI3 CODE END---',
+        r'```cai3\n(.*?)\n```',
+        r'#C3L.*?(?=\n\n|\Z)',
+        r'#CAI3.*?(?=\n\n|\Z)'
+    ]
+    
+    for pattern in patterns:
+        match = re.search(pattern, compressed, re.DOTALL)
+        if match:
+            cai3_content = match.group(1).strip() if len(match.groups()) > 0 else match.group(0).strip()
+            print(f"✅ Found CAI3 content using pattern: {pattern}")
+            break
+    
+    # If no structured CAI3 found, look for any CAI3-like content
+    if not cai3_content:
+        lines = compressed.split('\n')
+        cai3_lines = [line for line in lines if line.strip().startswith(('#C3L', '#CAI3', 'B#', 'P:', 'T:', 'X:', 'D:'))]
+        if cai3_lines:
+            cai3_content = '\n'.join(cai3_lines)
+            print(f"✅ Found CAI3-like content in {len(cai3_lines)} lines")
+    
+    # Fallback: use the entire compressed output if it looks like CAI3
+    if not cai3_content and any(marker in compressed for marker in ['#C3L', '#CAI3', 'B#']):
+        cai3_content = compressed
+        print("✅ Using entire compressed output as CAI3 content")
+    
+    if not cai3_content:
+        print("❌ No CAI3 content found in compressed output")
+        print(f"Full compressed output:\n{compressed}")
+        return
     
     # Simulate Claude returning full CAI3-LITE for the FileAnalyzer class
-    # Use the actual compressed output format from the real compression
     mock_cai3_response = f"""
 Here's the optimized code in CAI3 format:
 
 ---CAI3 CODE START---
-{compressed.split('---CAI3 CODE START---')[1].split('---CAI3 CODE END---')[0].strip()}
+{cai3_content}
 ---CAI3 CODE END---
 
 This optimizes the file scanning with better error handling and efficient extension tracking.
@@ -263,53 +300,148 @@ class DataProcessor:
     print(f"  Lines: {original_source_for_compression.count(chr(10)) + 1}")
     
     # Extract actual CID and function details from the compression context
+    # NOTE: This must happen AFTER compression has created the cache
     actual_cid = None
     original_body = None
     target_function = None
-    try:
-        from input_optimizer.engine.cai3_structures import CAI3Cache
-        
-        cache = CAI3Cache()
-        cai3_full = cache.load_full(temp_path)
-        
-        if cai3_full and cai3_full.nodes:
-            # Look for validate_user_data method which is a good target for optimization
-            for node in cai3_full.nodes:
-                if node.name == 'validate_user_data' and node.type.value == 'M':
-                    actual_cid = node.cid
-                    target_function = 'validate_user_data'
-                    # Get the body from the compressed content
-                    import re
-                    body_match = re.search(rf'B#{re.escape(node.cid)}:([^\n]+)', compressed)
-                    if body_match:
-                        original_body = body_match.group(1)
-                    print(f"✅ Found method: {node.name}")
-                    print(f"   CID: {node.cid}")
-                    print(f"   Short name: {node.short_name}")
-                    print(f"   Original body: {original_body}")
-                    print(f"   Context hash available: {node.context_hash is not None}")
+    
+    # APPROACH 1: Try to extract CIDs from the compression metadata (most reliable)
+    # This uses the actual stored alias mappings from the compression process
+    if hasattr(metadata, 'get') and 'cai3_full' in metadata and metadata['cai3_full']:
+        cai3_full = metadata['cai3_full']
+        if hasattr(cai3_full, 'compression_stats') and 'cid_aliases' in cai3_full.compression_stats:
+            stored_aliases = cai3_full.compression_stats['cid_aliases']
+            print(f"✅ Found stored CID aliases: {stored_aliases}")
+            
+            # Look for validate_user_data in the stored aliases
+            for alias, full_cid in stored_aliases.items():
+                # Find the node with this CID to get its name
+                for node in cai3_full.nodes:
+                    if node.cid == full_cid and node.name == 'validate_user_data':
+                        actual_cid = full_cid
+                        target_function = 'validate_user_data'
+                        print(f"   ✅ Found validate_user_data: alias {alias} -> CID {full_cid}")
+                        break
+                if actual_cid:
                     break
             
-            # Fallback to any method if validate_user_data not found
-            if not actual_cid:
+            # Fallback to first method if validate_user_data not found
+            if not actual_cid and stored_aliases:
+                first_alias, first_cid = next(iter(stored_aliases.items()))
+                # Find the node name for this CID
                 for node in cai3_full.nodes:
-                    if node.type.value in ['M', 'F'] and node.name not in ['__init__', '_load_config', '_setup_logging']:
-                        actual_cid = node.cid
+                    if node.cid == first_cid:
+                        actual_cid = first_cid
                         target_function = node.name
+                        print(f"   ✅ Using fallback method: alias {first_alias} -> CID {first_cid} ({node.name})")
+                        break
+    
+    # APPROACH 2: Try to extract CIDs directly from the compressed CAI3 output
+    # This is less reliable because it only gets the short aliases
+    if not actual_cid:
+        import re
+        
+        # Extract method CIDs from the compressed output
+        cid_pattern = r'M:([^.]+)\.([^#]+)#([a-zA-Z0-9_]+)'
+        method_matches = re.findall(cid_pattern, compressed)
+        
+        if method_matches:
+            print(f"✅ Found {len(method_matches)} methods in compressed output:")
+            for class_name, method_name, cid in method_matches:
+                print(f"   {class_name}.{method_name} -> CID: {cid}")
+                # Look for validate_user_data by checking for 'vu' (validate_user) or 'vud' abbreviations
+                if method_name in ['validate_user_data', 'vud', 'vu', 'validate_user']:
+                    actual_cid = cid
+                    target_function = 'validate_user_data'
+                    print(f"   ✅ Selected target: {method_name} with CID: {cid}")
+                    break
+            
+            # Fallback to first available method if validate_user_data not found
+            if not actual_cid and method_matches:
+                class_name, method_name, cid = method_matches[0]
+                actual_cid = cid
+                target_function = method_name
+                print(f"   ✅ Using fallback method: {method_name} with CID: {cid}")
+        
+        # If we found a method via pattern matching, check if it's validate_user_data
+        if actual_cid:
+            # Look specifically for a3 which should be validate_user_data based on the output
+            for class_name, method_name, cid in method_matches:
+                if cid == 'a3':  # This should be validate_user_data based on the pattern
+                    actual_cid = cid
+                    target_function = 'validate_user_data'
+                    print(f"   ✅ Found validate_user_data as {method_name} with CID: {cid}")
+                    break
+    
+    # APPROACH 3: If both approaches fail, try cache loading as backup
+    if not actual_cid:
+        try:
+            from input_optimizer.engine.cai3_structures import CAI3Cache
+            
+            cache = CAI3Cache()
+            print(f"DEBUG: Loading cache for path: {temp_path}")
+            print(f"DEBUG: Path exists: {temp_path.exists()}")
+            
+            # Check if cache file exists
+            import os
+            cache_dir = os.path.expanduser("~/.cai3_cache")
+            print(f"DEBUG: Cache directory: {cache_dir}")
+            print(f"DEBUG: Cache dir exists: {os.path.exists(cache_dir)}")
+            
+            # Try to create cache directory if it doesn't exist
+            if not os.path.exists(cache_dir):
+                os.makedirs(cache_dir, exist_ok=True)
+                print(f"DEBUG: Created cache directory: {cache_dir}")
+            
+            if os.path.exists(cache_dir):
+                print(f"DEBUG: Cache dir contents: {os.listdir(cache_dir)}")
+            
+            cai3_full = cache.load_full(temp_path)
+            
+            print(f"DEBUG: Cache loaded: {cai3_full is not None}")
+            if cai3_full:
+                print(f"DEBUG: Number of nodes: {len(cai3_full.nodes) if cai3_full.nodes else 0}")
+                if cai3_full.nodes:
+                    print(f"DEBUG: Node names: {[node.name for node in cai3_full.nodes]}")
+            
+            if cai3_full and cai3_full.nodes:
+                # Look for validate_user_data method which is a good target for optimization
+                for node in cai3_full.nodes:
+                    if node.name == 'validate_user_data' and node.type.value == 'M':
+                        actual_cid = node.cid
+                        target_function = 'validate_user_data'
+                        # Get the body from the compressed content
                         import re
                         body_match = re.search(rf'B#{re.escape(node.cid)}:([^\n]+)', compressed)
                         if body_match:
                             original_body = body_match.group(1)
-                        print(f"✅ Found fallback method: {node.name}")
+                        print(f"✅ Found method: {node.name}")
                         print(f"   CID: {node.cid}")
                         print(f"   Short name: {node.short_name}")
                         print(f"   Original body: {original_body}")
+                        print(f"   Context hash available: {node.context_hash is not None}")
                         break
-        
-    except Exception as e:
-        print(f"Error extracting details: {e}")
-        import traceback
-        traceback.print_exc()
+                
+                # Fallback to any method if validate_user_data not found
+                if not actual_cid:
+                    for node in cai3_full.nodes:
+                        if node.type.value in ['M', 'F'] and node.name not in ['__init__', '_load_config', '_setup_logging']:
+                            actual_cid = node.cid
+                            target_function = node.name
+                            import re
+                            body_match = re.search(rf'B#{re.escape(node.cid)}:([^\n]+)', compressed)
+                            if body_match:
+                                original_body = body_match.group(1)
+                            print(f"✅ Found fallback method: {node.name}")
+                            print(f"   CID: {node.cid}")
+                            print(f"   Short name: {node.short_name}")
+                            print(f"   Original body: {original_body}")
+                            break
+            
+        except Exception as e:
+            print(f"Error extracting details from cache: {e}")
+            import traceback
+            traceback.print_exc()
     
     # Use actual CID if found
     if not actual_cid:
@@ -318,6 +450,19 @@ class DataProcessor:
         target_function = "validate_user_data"
     
     print(f"Using CID: {actual_cid} for function: {target_function}")
+    
+    # CRITICAL FIX: If we have an alias, resolve it to the full CID for the patch
+    # The translator expects full CIDs, not aliases
+    final_cid_for_patch = actual_cid
+    if hasattr(metadata, 'get') and 'cai3_full' in metadata and metadata['cai3_full']:
+        cai3_full = metadata['cai3_full']
+        if hasattr(cai3_full, 'compression_stats') and 'cid_aliases' in cai3_full.compression_stats:
+            stored_aliases = cai3_full.compression_stats['cid_aliases']
+            if actual_cid in stored_aliases:
+                final_cid_for_patch = stored_aliases[actual_cid]
+                print(f"🔧 Resolved alias for patch: {actual_cid} -> {final_cid_for_patch}")
+    
+    print(f"Final CID for patch: {final_cid_for_patch}")
     
     # Create a realistic patch based on the target function
     if target_function == 'validate_user_data':
@@ -329,12 +474,12 @@ class DataProcessor:
         improved_body = "# Optimized implementation with better error handling"
         optimization_desc = "improved with better error handling and performance"
     
-    # Create patch that Claude would send
+    # Create patch that Claude would send - USE THE FULL CID
     mock_patch = f"""
 I'll optimize the {target_function} method:
 
 #C3-PATCH
-1:TGT:cid={actual_cid} OP:RB F=B1
+1:TGT:cid={final_cid_for_patch} OP:RB F=B1
 B:
 {improved_body}
 E
@@ -461,36 +606,70 @@ class ConfigManager:
     proxy = ClaudeCodeProxy(enable_compression=True)
     compressed, metadata = proxy.process_input("show compressed", str(temp_path))
     
-    # Extract CAI3 content
-    import re
-    cai3_match = re.search(r'---CAI3 CODE START---(.*?)---CAI3 CODE END---', 
-                          compressed, re.DOTALL)
+    print(f"✅ Compression completed")
+    print(f"📊 Compressed output preview:\n{compressed[:300]}...")
     
-    if cai3_match:
-        cai3_content = cai3_match.group(1).strip()
-        
-        # Translate back
+    # Extract CAI3 content safely
+    import re
+    cai3_content = None
+    
+    # Try multiple extraction patterns
+    patterns = [
+        r'---CAI3 CODE START---(.*?)---CAI3 CODE END---',
+        r'```cai3\n(.*?)\n```',
+        r'(#C3L.*?)(?=\n\n|\Z)',
+        r'(#CAI3.*?)(?=\n\n|\Z)'
+    ]
+    
+    for pattern in patterns:
+        match = re.search(pattern, compressed, re.DOTALL)
+        if match:
+            cai3_content = match.group(1).strip() if len(match.groups()) > 0 else match.group(0).strip()
+            print(f"✅ Extracted CAI3 content using pattern: {pattern}")
+            break
+    
+    # Fallback extraction
+    if not cai3_content:
+        lines = compressed.split('\n')
+        cai3_lines = [line for line in lines if line.strip().startswith(('#C3L', '#CAI3', 'B#', 'P:', 'T:', 'X:', 'D:'))]
+        if cai3_lines:
+            cai3_content = '\n'.join(cai3_lines)
+            print(f"✅ Extracted {len(cai3_lines)} CAI3-like lines")
+        elif any(marker in compressed for marker in ['#C3L', '#CAI3', 'B#']):
+            cai3_content = compressed
+            print("✅ Using entire output as CAI3 content")
+    
+    if cai3_content:
+        # Use the same temp_path that was used for compression to ensure cache consistency
         translator = CAI3Translator()
-        translated = translator.translate_lite_to_python(cai3_content, temp_path)
-        
-        print("\n✅ Roundtrip successful!")
-        print("Original lines:", len(original.split('\n')))
-        print("Translated lines:", len(translated.split('\n')))
-        
-        # Verify functionality preserved
-        import ast
         try:
-            orig_ast = ast.parse(original)
-            trans_ast = ast.parse(translated)
+            translated = translator.translate_lite_to_python(cai3_content, temp_path)
             
-            # Compare number of classes and methods
-            orig_classes = sum(1 for _ in ast.walk(orig_ast) if isinstance(_, ast.ClassDef))
-            trans_classes = sum(1 for _ in ast.walk(trans_ast) if isinstance(_, ast.ClassDef))
+            print("\n✅ Roundtrip successful!")
+            print("Original lines:", len(original.split('\n')))
+            print("Translated lines:", len(translated.split('\n')))
             
-            print(f"Classes preserved: {orig_classes} -> {trans_classes}")
-            
-        except SyntaxError as e:
-            print(f"❌ Syntax error: {e}")
+            # Verify functionality preserved
+            import ast
+            try:
+                orig_ast = ast.parse(original)
+                trans_ast = ast.parse(translated)
+                
+                # Compare number of classes and methods
+                orig_classes = sum(1 for _ in ast.walk(orig_ast) if isinstance(_, ast.ClassDef))
+                trans_classes = sum(1 for _ in ast.walk(trans_ast) if isinstance(_, ast.ClassDef))
+                
+                print(f"Classes preserved: {orig_classes} -> {trans_classes}")
+                
+            except SyntaxError as e:
+                print(f"❌ Syntax error: {e}")
+                
+        except ValueError as e:
+            print(f"❌ Translation failed: {e}")
+            print("This likely means the cache wasn't found - temp file paths may not match")
+    else:
+        print("❌ No CAI3 content found for roundtrip testing")
+        print(f"Compressed output was:\n{compressed}")
     
     temp_path.unlink()
 

@@ -100,13 +100,12 @@ def claude_code():
 @click.option('--show-stats', is_flag=True, default=True, help='Show compression statistics')
 @click.option('--live-metrics', '-l', is_flag=True, help='Show live token metrics and cost analysis')
 @click.option('--verbose', '-v', is_flag=True, help='Verbose output')
-@click.option('--raw-cai3', is_flag=True, help='Show raw CAI3 references without humanization (for debugging)')
 @click.option('--strict-contract', is_flag=True, help='Force strict contract enforcement for all CAI3 interactions')
 @click.option('--enable-constraints', is_flag=True, default=False, help='Enable advanced constraint-based CAI3 processing')
 @click.option('--disable-constraints', is_flag=True, default=False, help='Disable constraint-based CAI3 processing (default: enabled)')
 def ask(prompt: str, file: Optional[str], no_compress: bool, apply_patch: bool, 
         output: Optional[str], show_stats: bool, live_metrics: bool, verbose: bool, 
-        raw_cai3: bool, strict_contract: bool, enable_constraints: bool, disable_constraints: bool):
+        strict_contract: bool, enable_constraints: bool, disable_constraints: bool):
     """
     Ask Claude Code a question about your code with intelligent compression and cost analysis.
     
@@ -393,7 +392,7 @@ CRITICAL OUTPUT REQUIREMENTS:
                         metadata['constraint_validation_used'] = True
                     else:
                         # Use legacy CLI validation when constraints are disabled
-                        if not _validate_cai3_compliance(result):
+                        if not _validate_cai3_compliance(result, verbose):
                             if verbose:
                                 console.print(f"[dim]⚠️ CAI3-LITE compliance failed, attempting repair...[/dim]")
                             result = _repair_cai3_format(result, compressed_prompt, max_retries=2, verbose=verbose)
@@ -418,7 +417,7 @@ CRITICAL OUTPUT REQUIREMENTS:
                     console.print(f"[dim]ℹ️ No CAI3 translation needed (no_compress={no_compress}, contains_cai3={contains_cai3})[/dim]")
         
         # Display results with enhanced formatting
-        _display_results_enhanced(final_output, metadata, show_stats, raw_cai3)
+        _display_results_enhanced(final_output, metadata, show_stats)
         
         # Show comprehensive cost analysis
         if live_metrics or (show_stats and (original_claude_tokens > 0 or response_claude_tokens > 0)):
@@ -610,7 +609,7 @@ def _execute_claude_code_enhanced(prompt: str, verbose: bool) -> str:
     except subprocess.TimeoutExpired:
         raise RuntimeError("Claude Code request timed out after 5 minutes")
 
-def _display_results_enhanced(output: str, metadata: Dict[str, Any], show_stats: bool, raw_cai3: bool = False):
+def _display_results_enhanced(output: str, metadata: Dict[str, Any], show_stats: bool):
     """Display the final results with proper formatting that prevents truncation."""
     console.print("\n" + "─" * 80)
     
@@ -622,12 +621,8 @@ def _display_results_enhanced(output: str, metadata: Dict[str, Any], show_stats:
         ))
         return
     
-    # Humanize CAI3 references before displaying (unless raw mode is requested)
-    if raw_cai3:
-        console.print("[dim]🔧 Showing raw CAI3 references (--raw-cai3 mode)[/dim]")
-        display_output = output
-    else:
-        display_output = _humanize_cai3_references(output, metadata)
+    # Skip humanization - display output directly
+    display_output = output
     
     # Extract code blocks if present
     code_block_pattern = r'```(\w+)?\n(.*?)\n```'
@@ -734,27 +729,34 @@ def _display_results_enhanced(output: str, metadata: Dict[str, Any], show_stats:
         # Add methodology note
         console.print(f"[dim]💡 Use --live-metrics for detailed cost analysis with actual response data[/dim]")
 
-def _validate_cai3_compliance(result: str) -> bool:
+def _validate_cai3_compliance(result: str, verbose: bool = False) -> bool:
     """Validate CAI3-LITE response compliance before translation."""
-    issues = []
     
     # Check for single fenced block
     code_blocks = re.findall(r'```(\w+)?\n(.*?)\n```', result, re.DOTALL)
     if len(code_blocks) != 1:
+        if verbose:
+            console.print(f"[dim]❌ Validation failed: Expected 1 code block, found {len(code_blocks)}[/dim]")
         return False
     
     lang, content = code_blocks[0]
     
-    # Check language tag
-    if lang not in ['C3L', 'CAI3', 'cai3']:
+    # Check language tag (be more lenient)
+    if lang and lang.upper() not in ['C3L', 'CAI3', 'CAICODE']:
+        if verbose:
+            console.print(f"[dim]❌ Validation failed: Invalid language tag '{lang}'[/dim]")
         return False
     
     # Check for forbidden patterns
     if '(was ' in content or '...)' in content:
+        if verbose:
+            console.print(f"[dim]❌ Validation failed: Contains forbidden patterns[/dim]")
         return False
     
     # Check for truncated pools
     if 'P:p...' in content or re.search(r'P:.*\.\.\.', content):
+        if verbose:
+            console.print(f"[dim]❌ Validation failed: Contains truncated pools[/dim]")
         return False
     
     # Extract and validate pools
@@ -769,16 +771,25 @@ def _validate_cai3_compliance(result: str) -> bool:
         for pool_def in re.finditer(r'(p\d+)=', pool_line):
             pool_defs.add(pool_def.group(1))
     
-    # Find referenced pools
-    for pool_ref in re.finditer(r'\b(p\d+)\b', content):
-        if pool_ref.start() > content.find('T:'):  # Only in table/body sections
+    # Find referenced pools (look in table and body sections)
+    table_start = content.find('T:')
+    if table_start != -1:
+        # Check everything from T: section onwards (table and bodies)
+        table_and_bodies = content[table_start:]
+        for pool_ref in re.finditer(r'\b(p\d+)\b', table_and_bodies):
             pool_refs.add(pool_ref.group(1))
     
     # Check for missing pools
     missing_pools = pool_refs - pool_defs
     if missing_pools:
+        if verbose:
+            console.print(f"[dim]❌ Validation failed: Missing pool definitions: {missing_pools}[/dim]")
+            console.print(f"[dim]  Defined pools: {pool_defs}[/dim]")
+            console.print(f"[dim]  Referenced pools: {pool_refs}[/dim]")
         return False
     
+    if verbose:
+        console.print(f"[dim]✅ CAI3-LITE validation passed[/dim]")
     return True
 
 def _repair_cai3_format(result: str, compressed_prompt: str, max_retries: int = 2, verbose: bool = False) -> str:
@@ -806,7 +817,7 @@ def _repair_cai3_format(result: str, compressed_prompt: str, max_retries: int = 
             repaired_result = _execute_claude_code_enhanced(repair_prompt, verbose)
             
             # Validate the repair
-            if _validate_cai3_compliance(repaired_result):
+            if _validate_cai3_compliance(repaired_result, verbose):
                 if verbose:
                     console.print(f"[dim]✅ CAI3 format repair successful on retry {retry + 1}[/dim]")
                 return repaired_result
@@ -833,8 +844,8 @@ def _analyze_cai3_issues(result: str) -> list:
     
     lang, content = code_blocks[0]
     
-    # Check language tag
-    if lang not in ['C3L', 'CAI3', 'cai3']:
+    # Check language tag (be more lenient)
+    if lang and lang.upper() not in ['C3L', 'CAI3', 'CAICODE']:
         issues.append(f"wrong_language_tag:{lang}")
     
     # Check for forbidden patterns
@@ -860,9 +871,12 @@ def _analyze_cai3_issues(result: str) -> list:
         for pool_def in re.finditer(r'(p\d+)=', pool_line):
             pool_defs.add(pool_def.group(1))
     
-    # Find referenced pools
-    for pool_ref in re.finditer(r'\b(p\d+)\b', content):
-        if pool_ref.start() > content.find('T:'):  # Only in table/body sections
+    # Find referenced pools (look in table and body sections)
+    table_start = content.find('T:')
+    if table_start != -1:
+        # Check everything from T: section onwards (table and bodies)
+        table_and_bodies = content[table_start:]
+        for pool_ref in re.finditer(r'\b(p\d+)\b', table_and_bodies):
             pool_refs.add(pool_ref.group(1))
     
     # Check for missing pools
@@ -909,216 +923,219 @@ def _contains_cai3(text: str) -> bool:
     cai3_markers = ['#C3L', '#C3-PATCH', 'CAI3 CODE', 'B#', 'X:', 'D:', 'T:']
     return any(marker in text for marker in cai3_markers)
 
-def _humanize_cai3_references(text: str, metadata: Dict[str, Any], skip_humanization: bool = False) -> str:
-    """
-    Convert CAI3 references in Claude's response to human-readable explanations.
-    
-    This function identifies CAI3 references like "Block B#b9 (Function `ac`)" and 
-    replaces them with readable explanations like "Function `add_config` in ConfigManager class".
-    
-    Args:
-        text: The Claude output text
-        metadata: Compression metadata containing source path and other info
-        skip_humanization: If True, return original text without humanization
-    """
-    if skip_humanization or not metadata.get("compressed", False) or not metadata.get("source_path"):
-        return text
-    
-    try:
-        # Import CAI3 structures
-        from integrations.claude_wrapper.claude_proxy import ClaudeCodeProxy
-        from input_optimizer.engine.cai3_structures import CAI3Cache
-        
-        # Load the CAI3 mapping data
-        cache_dir = Path.home() / ".optimize_ai" / "claude_cache"
-        cai3_cache = CAI3Cache(cache_dir)
-        source_path = Path(metadata["source_path"])
-        
-        cai3_full = cai3_cache.load_full(source_path)
-        cai3_map = cai3_cache.load_map(source_path)
-        
-        if not cai3_full or not cai3_map:
-            # Try to provide basic humanization using known patterns
-            return _basic_cai3_humanization(text)
-        
-        # Create mapping from short names to full context
-        humanized_text = text
-        
-        # Extract and replace various CAI3 reference patterns
-        import re
-        
-        # Pattern 1: Block references like "Block B#b9" or "B#b9"
-        block_pattern = r'(?:Block\s+)?B#([a-z0-9]+)'
-        for match in re.finditer(block_pattern, text, re.IGNORECASE):
-            block_id = match.group(1)
-            full_match = match.group(0)
+# COMMENTED OUT: Humanization process was corrupting CAI3lite format
+# def _humanize_cai3_references(text: str, metadata: Dict[str, Any], skip_humanization: bool = False) -> str:
+#     """
+#     Convert CAI3 references in Claude's response to human-readable explanations.
+#     
+#     This function identifies CAI3 references like "Block B#b9 (Function `ac`)" and 
+#     replaces them with readable explanations like "Function `add_config` in ConfigManager class".
+#     
+#     Args:
+#         text: The Claude output text
+#         metadata: Compression metadata containing source path and other info
+#         skip_humanization: If True, return original text without humanization
+#     """
+#     if skip_humanization or not metadata.get("compressed", False) or not metadata.get("source_path"):
+#         return text
+#     
+#     try:
+#         # Import CAI3 structures
+#         from integrations.claude_wrapper.claude_proxy import ClaudeCodeProxy
+#         from input_optimizer.engine.cai3_structures import CAI3Cache
+#         
+#         # Load the CAI3 mapping data
+#         cache_dir = Path.home() / ".optimize_ai" / "claude_cache"
+#         cai3_cache = CAI3Cache(cache_dir)
+#         source_path = Path(metadata["source_path"])
+#         
+#         cai3_full = cai3_cache.load_full(source_path)
+#         cai3_map = cai3_cache.load_map(source_path)
+#         
+#         if not cai3_full or not cai3_map:
+#             # Try to provide basic humanization using known patterns
+#             return _basic_cai3_humanization(text)
+#         
+#         # Create mapping from short names to full context
+#         humanized_text = text
+#         
+#         # Extract and replace various CAI3 reference patterns
+#         import re
+#         
+#         # Pattern 1: Block references like "Block B#b9" or "B#b9"
+#         block_pattern = r'(?:Block\s+)?B#([a-z0-9]+)'
+#         for match in re.finditer(block_pattern, text, re.IGNORECASE):
+#             block_id = match.group(1)
+#             full_match = match.group(0)
+#             
+#             # Find the corresponding node in CAI3Full
+#             readable_name = _find_readable_name_for_block(block_id, cai3_full)
+#             if readable_name:
+#                 humanized_text = humanized_text.replace(full_match, f"{readable_name} (was {full_match})")
+#         
+#         # Pattern 2: Function references like "Function `ac`"
+#         func_pattern = r'Function\s+`([a-z0-9]+)`'
+#         for match in re.finditer(func_pattern, text, re.IGNORECASE):
+#             short_name = match.group(1)
+#             full_match = match.group(0)
+#             
+#             # Find the full function name
+#             readable_name = _find_readable_name_for_short(short_name, cai3_full)
+#             if readable_name:
+#                 humanized_text = humanized_text.replace(full_match, f"Function `{readable_name}` (was `{short_name}`)")
+#         
+#         # Pattern 3: Method references like "method `vr`"
+#         method_pattern = r'(?:method|Method)\s+`([a-z0-9]+)`'
+#         for match in re.finditer(method_pattern, text, re.IGNORECASE):
+#             short_name = match.group(1)
+#             full_match = match.group(0)
+#             
+#             # Find the full method name with class context
+#             readable_name = _find_readable_name_for_short(short_name, cai3_full, include_class=True)
+#             if readable_name:
+#                 humanized_text = humanized_text.replace(full_match, f"Method `{readable_name}` (was `{short_name}`)")
+#         
+#         # Pattern 4: CID references like "cid=fn_1a2c" or similar
+#         cid_pattern = r'(?:cid=|CID:\s*)([a-z_0-9]+)'
+#         for match in re.finditer(cid_pattern, text, re.IGNORECASE):
+#             cid = match.group(1)
+#             full_match = match.group(0)
             
-            # Find the corresponding node in CAI3Full
-            readable_name = _find_readable_name_for_block(block_id, cai3_full)
-            if readable_name:
-                humanized_text = humanized_text.replace(full_match, f"{readable_name} (was {full_match})")
-        
-        # Pattern 2: Function references like "Function `ac`"
-        func_pattern = r'Function\s+`([a-z0-9]+)`'
-        for match in re.finditer(func_pattern, text, re.IGNORECASE):
-            short_name = match.group(1)
-            full_match = match.group(0)
-            
-            # Find the full function name
-            readable_name = _find_readable_name_for_short(short_name, cai3_full)
-            if readable_name:
-                humanized_text = humanized_text.replace(full_match, f"Function `{readable_name}` (was `{short_name}`)")
-        
-        # Pattern 3: Method references like "method `vr`"
-        method_pattern = r'(?:method|Method)\s+`([a-z0-9]+)`'
-        for match in re.finditer(method_pattern, text, re.IGNORECASE):
-            short_name = match.group(1)
-            full_match = match.group(0)
-            
-            # Find the full method name with class context
-            readable_name = _find_readable_name_for_short(short_name, cai3_full, include_class=True)
-            if readable_name:
-                humanized_text = humanized_text.replace(full_match, f"Method `{readable_name}` (was `{short_name}`)")
-        
-        # Pattern 4: CID references like "cid=fn_1a2c" or similar
-        cid_pattern = r'(?:cid=|CID:\s*)([a-z_0-9]+)'
-        for match in re.finditer(cid_pattern, text, re.IGNORECASE):
-            cid = match.group(1)
-            full_match = match.group(0)
-            
-            # Find the node with this CID
-            readable_name = _find_readable_name_for_cid(cid, cai3_full)
-            if readable_name:
-                humanized_text = humanized_text.replace(full_match, f"{full_match} ({readable_name})")
-        
-        # Pattern 5: Pool references like "p0", "p1" etc
-        pool_pattern = r'\bp([0-9]+)\b'
-        for match in re.finditer(pool_pattern, text):
-            pool_ref = match.group(0)
-            pool_id = match.group(1)
-            
-            # Look up in pools
-            if hasattr(cai3_full, 'pools') and pool_ref in cai3_full.pools:
-                pool_value = cai3_full.pools[pool_ref]
-                humanized_text = humanized_text.replace(pool_ref, f'"{pool_value}" (was {pool_ref})')
-        
-        # Add a summary of what was humanized if changes were made
-        if humanized_text != text:
-            changes_count = len(re.findall(r'\(was [^)]+\)', humanized_text))
-            humanized_text = f"🔍 **Humanized {changes_count} CAI3 references for clarity:**\n\n{humanized_text}"
-        
-        return humanized_text
-        
-    except Exception as e:
-        console.print(f"[dim]Note: Could not humanize CAI3 references: {e}[/dim]")
-        return _basic_cai3_humanization(text)
+#             # Find the node with this CID
+#             readable_name = _find_readable_name_for_cid(cid, cai3_full)
+#             if readable_name:
+#                 humanized_text = humanized_text.replace(full_match, f"{full_match} ({readable_name})")
+#         
+#         # Pattern 5: Pool references like "p0", "p1" etc
+#         pool_pattern = r'\bp([0-9]+)\b'
+#         for match in re.finditer(pool_pattern, text):
+#             pool_ref = match.group(0)
+#             pool_id = match.group(1)
+#             
+#             # Look up in pools
+#             if hasattr(cai3_full, 'pools') and pool_ref in cai3_full.pools:
+#                 pool_value = cai3_full.pools[pool_ref]
+#                 humanized_text = humanized_text.replace(pool_ref, f'"{pool_value}" (was {pool_ref})')
+#         
+#         # Add a summary of what was humanized if changes were made
+#         if humanized_text != text:
+#             changes_count = len(re.findall(r'\(was [^)]+\)', humanized_text))
+#             humanized_text = f"🔍 **Humanized {changes_count} CAI3 references for clarity:**\n\n{humanized_text}"
+#         
+#         return humanized_text
+#         
+#     except Exception as e:
+#         console.print(f"[dim]Note: Could not humanize CAI3 references: {e}[/dim]")
+#         return _basic_cai3_humanization(text)
 
-def _basic_cai3_humanization(text: str) -> str:
-    """
-    Provide basic humanization when full CAI3 mapping data is not available.
-    This uses common patterns and educated guesses to make output more readable.
-    """
-    import re
-    
-    humanized_text = text
-    changes_made = False
-    
-    # Common short name mappings (these are typical CAI3 patterns)
-    common_mappings = {
-        'ac': 'add_config',
-        'gc': 'get_config', 
-        'sc': 'set_config',
-        'vc': 'validate_config',
-        'vr': 'validate_record',
-        'gr': 'get_record',
-        'sr': 'save_record',
-        'dr': 'delete_record',
-        'gs': 'get_or_set',
-        'ps': 'process_string',
-        'pf': 'process_file',
-        'pd': 'process_data',
-        'cl': 'cleanup',
-        'init': '__init__',
-        'str': '__str__',
-        'repr': '__repr__',
-    }
-    
-    # Pattern 1: Function references like "Function `ac`"
-    func_pattern = r'Function\s+`([a-z0-9]+)`'
-    for match in re.finditer(func_pattern, text, re.IGNORECASE):
-        short_name = match.group(1)
-        full_match = match.group(0)
-        
-        if short_name in common_mappings:
-            readable_name = common_mappings[short_name]
-            humanized_text = humanized_text.replace(full_match, f"Function `{readable_name}` (likely expansion of `{short_name}`)")
-            changes_made = True
-    
-    # Pattern 2: Method references like "method `vr`"
-    method_pattern = r'(?:method|Method)\s+`([a-z0-9]+)`'
-    for match in re.finditer(method_pattern, text, re.IGNORECASE):
-        short_name = match.group(1)
-        full_match = match.group(0)
-        
-        if short_name in common_mappings:
-            readable_name = common_mappings[short_name]
-            humanized_text = humanized_text.replace(full_match, f"Method `{readable_name}` (likely expansion of `{short_name}`)")
-            changes_made = True
-    
-    # Pattern 3: Block references - provide context
-    block_pattern = r'(?:Block\s+)?B#([a-z0-9]+)'
-    for match in re.finditer(block_pattern, text, re.IGNORECASE):
-        block_id = match.group(1)
-        full_match = match.group(0)
-        humanized_text = humanized_text.replace(full_match, f"{full_match} (code block/function body)")
-        changes_made = True
-    
-    # Pattern 4: Add explanatory context for CAI3 format
-    if 'CAI3' in text or any(marker in text for marker in ['#C3L', 'B#', 'X:', 'D:']):
-        if changes_made:
-            note = "\n💡 Note: CAI3 mapping cache unavailable - showing likely expansions based on common patterns.\n"
-            humanized_text = note + humanized_text
-        else:
-            note = "\n💡 Note: This response contains CAI3 compressed references. Full humanization requires cache data from the compression phase.\n"
-            humanized_text = note + humanized_text
-    
-    return humanized_text
+# COMMENTED OUT: Basic humanization also disabled to prevent CAI3lite corruption  
+# def _basic_cai3_humanization(text: str) -> str:
+#     """
+#     Provide basic humanization when full CAI3 mapping data is not available.
+#     This uses common patterns and educated guesses to make output more readable.
+#     """
+#     import re
+#     
+#     humanized_text = text
+#     changes_made = False
+#     
+#     # Common short name mappings (these are typical CAI3 patterns)
+#     common_mappings = {
+#         'ac': 'add_config',
+#         'gc': 'get_config', 
+#         'sc': 'set_config',
+#         'vc': 'validate_config',
+#         'vr': 'validate_record',
+#         'gr': 'get_record',
+#         'sr': 'save_record',
+#         'dr': 'delete_record',
+#         'gs': 'get_or_set',
+#         'ps': 'process_string',
+#         'pf': 'process_file',
+#         'pd': 'process_data',
+#         'cl': 'cleanup',
+#         'init': '__init__',
+#         'str': '__str__',
+#         'repr': '__repr__',
+#     }
+#     
+#     # Pattern 1: Function references like "Function `ac`"
+#     func_pattern = r'Function\s+`([a-z0-9]+)`'
+#     for match in re.finditer(func_pattern, text, re.IGNORECASE):
+#         short_name = match.group(1)
+#         full_match = match.group(0)
+#         
+#         if short_name in common_mappings:
+#             readable_name = common_mappings[short_name]
+#             humanized_text = humanized_text.replace(full_match, f"Function `{readable_name}` (likely expansion of `{short_name}`)")
+#             changes_made = True
+#     
+#     # Pattern 2: Method references like "method `vr`"
+#     method_pattern = r'(?:method|Method)\s+`([a-z0-9]+)`'
+#     for match in re.finditer(method_pattern, text, re.IGNORECASE):
+#         short_name = match.group(1)
+#         full_match = match.group(0)
+#         
+#         if short_name in common_mappings:
+#             readable_name = common_mappings[short_name]
+#             humanized_text = humanized_text.replace(full_match, f"Method `{readable_name}` (likely expansion of `{short_name}`)")
+# #             changes_made = True
+#     
+#     # Pattern 3: Block references - provide context
+#     block_pattern = r'(?:Block\s+)?B#([a-z0-9]+)'
+#     for match in re.finditer(block_pattern, text, re.IGNORECASE):
+#         block_id = match.group(1)
+#         full_match = match.group(0)
+#         humanized_text = humanized_text.replace(full_match, f"{full_match} (code block/function body)")
+#         changes_made = True
+#     
+#     # Pattern 4: Add explanatory context for CAI3 format
+#     if 'CAI3' in text or any(marker in text for marker in ['#C3L', 'B#', 'X:', 'D:']):
+#         if changes_made:
+#             note = "\n💡 Note: CAI3 mapping cache unavailable - showing likely expansions based on common patterns.\n"
+#             humanized_text = note + humanized_text
+#         else:
+#             note = "\n💡 Note: This response contains CAI3 compressed references. Full humanization requires cache data from the compression phase.\n"
+#             humanized_text = note + humanized_text
+#     
+#     return humanized_text
 
-def _find_readable_name_for_block(block_id: str, cai3_full) -> Optional[str]:
-    """Find readable name for a block ID like 'b9'."""
-    # Block IDs typically correspond to body content
-    # Look for nodes with matching body references
-    for node in cai3_full.nodes:
-        if node.body_content and f"B#{block_id}" in node.body_content:
-            return f"{node.type.value} `{node.name}`"
-        # Also check if the block_id matches any part of the CID
-        if block_id in node.cid:
-            return f"{node.type.value} `{node.name}`"
-    return None
+# COMMENTED OUT: All humanization helper functions also disabled
+# def _find_readable_name_for_block(block_id: str, cai3_full) -> Optional[str]:
+#     """Find readable name for a block ID like 'b9'."""
+#     # Block IDs typically correspond to body content
+#     # Look for nodes with matching body references
+#     for node in cai3_full.nodes:
+#         if node.body_content and f"B#{block_id}" in node.body_content:
+#             return f"{node.type.value} `{node.name}`"
+#         # Also check if the block_id matches any part of the CID
+#         if block_id in node.cid:
+#             return f"{node.type.value} `{node.name}`"
+#     return None
 
-def _find_readable_name_for_short(short_name: str, cai3_full, include_class: bool = False) -> Optional[str]:
-    """Find readable name for a short name like 'ac' or 'vr'."""
-    for node in cai3_full.nodes:
-        if node.short_name == short_name:
-            if include_class and node.parent_cid:
-                # Find parent class
-                parent_node = next((n for n in cai3_full.nodes if n.cid == node.parent_cid), None)
-                if parent_node:
-                    return f"{node.name}` in class `{parent_node.name}"
-            return node.name
-    return None
+# def _find_readable_name_for_short(short_name: str, cai3_full, include_class: bool = False) -> Optional[str]:
+#     """Find readable name for a short name like 'ac' or 'vr'."""
+#     for node in cai3_full.nodes:
+#         if node.short_name == short_name:
+#             if include_class and node.parent_cid:
+#                 # Find parent class
+#                 parent_node = next((n for n in cai3_full.nodes if n.cid == node.parent_cid), None)
+#                 if parent_node:
+#                     return f"{node.name}` in class `{parent_node.name}"
+#             return node.name
+#     return None
 
-def _find_readable_name_for_cid(cid: str, cai3_full) -> Optional[str]:
-    """Find readable name for a CID like 'fn_1a2c'."""
-    for node in cai3_full.nodes:
-        if node.cid == cid:
-            if node.parent_cid:
-                # Find parent class
-                parent_node = next((n for n in cai3_full.nodes if n.cid == node.parent_cid), None)
-                if parent_node:
-                    return f"{node.type.value} `{node.name}` in class `{parent_node.name}`"
-            return f"{node.type.value} `{node.name}`"
-    return None
+# def _find_readable_name_for_cid(cid: str, cai3_full) -> Optional[str]:
+#     """Find readable name for a CID like 'fn_1a2c'."""
+#     for node in cai3_full.nodes:
+#         if node.cid == cid:
+#             if node.parent_cid:
+#                 # Find parent class
+#                 parent_node = next((n for n in cai3_full.nodes if n.cid == node.parent_cid), None)
+#                 if parent_node:
+#                     return f"{node.type.value} `{node.name}` in class `{parent_node.name}`"
+#             return f"{node.type.value} `{node.name}`"
+#     return None
 
 def _display_enhanced_compression_preview(metadata: Dict[str, Any], claude_metrics: Dict[str, Any], show_live_metrics: bool):
     """Display enhanced compression statistics with Claude Sonnet 4 cost analysis."""

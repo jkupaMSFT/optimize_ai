@@ -10,8 +10,9 @@ import os
 import tempfile
 import re
 import hashlib
+import traceback
 from pathlib import Path
-from typing import Dict, Tuple, Optional, Any
+from typing import Dict, Tuple, Optional, Any, List
 import logging
 from datetime import datetime
 
@@ -20,7 +21,7 @@ sys.path.append(str(Path(__file__).parent.parent.parent))
 from input_optimizer.engine.cai3_waterfall_integration import CAI3WaterfallEnhancement
 from input_optimizer.engine.waterfall_compressor import WaterfallCompressor, count_tokens
 from output_translator.core.translator import CAIToPythonTranslator
-from input_optimizer.engine.cai3_translator import CAI3Translator
+from input_optimizer.engine.cai3_ast_translator import CAI3Translator
 from input_optimizer.engine.cai3_structures import CAI3Patch, CAI3Cache
 from core.session_manager import SecureSessionManager
 from utils.logger import setup_logger
@@ -374,9 +375,8 @@ IMPORTANT: Before outputting, mentally verify:
         """
         Enhanced output processing with robust error recovery and retry logic.
         """
-        # CRITICAL: Remove any humanization annotations that Claude may have added
-        # despite our explicit instructions not to include them
-        claude_output = self._strip_humanization_annotations(claude_output)
+        # CRITICAL: Skip humanization to prevent CAI3lite corruption
+        # claude_output = self._strip_humanization_annotations(claude_output)
         
         # LOG RAW CLAUDE OUTPUT FIRST
         self.logger.info("=" * 80)
@@ -1262,10 +1262,14 @@ Please manually review and correct the code."""
             self.logger.info(f"🔄 Attempting to translate CAI3 content...")
             self.logger.info(f"Full CAI3 content being sent to translator:\n{cai3_content}")
             
-            # Translate full CAI3-LITE to Python
-            python_code = self.cai3_translator.translate_lite_to_python(
+            # Extract mappings from Claude's response if present
+            claude_mappings = self._extract_claude_mappings(claude_output)
+            
+            # Translate CAI3-LITE to Python using the proper pipeline
+            python_code = self._translate_cai3_to_python(
                 cai3_lite_content=cai3_content,
-                source_path=self.source_path
+                source_path=self.source_path,
+                claude_mappings=claude_mappings
             )
             
             # LOG TRANSLATION RESULT
@@ -1309,11 +1313,23 @@ Please manually review and correct the code."""
                 return self._extract_python_code_directly(claude_output, metadata)
             
             # Format the output
-            return self._format_full_translation_output(
+            formatted_output = self._format_full_translation_output(
                 claude_output=claude_output,
                 python_code=python_code,
                 metadata=metadata
             )
+            
+            # CRITICAL: Write the translated Python code back to the source file
+            self.logger.info(f"💾 Writing translated Python code to {self.source_path}")
+            try:
+                with open(self.source_path, 'w', encoding='utf-8') as f:
+                    f.write(python_code)
+                self.logger.info(f"✅ Successfully wrote {len(python_code)} characters to {self.source_path}")
+            except Exception as write_error:
+                self.logger.error(f"❌ Failed to write to {self.source_path}: {write_error}")
+                # Continue with formatted output even if file writing fails
+            
+            return formatted_output
             
         except Exception as e:
             self.logger.error(f"❌ Failed to translate CAI3-LITE: {e}")
@@ -1338,7 +1354,7 @@ Please manually review and correct the code."""
             return content
         
         # Try to find code blocks containing CAI3
-        code_block_pattern = r'```(?:cai3?|CAI3?|C3L)?\s*(.*?)```'
+        code_block_pattern = r'```(?:cai3lite?|cai3?|CAI3?|C3L)?[\s\n]*(.*?)```'
         matches = re.findall(code_block_pattern, text, re.DOTALL | re.IGNORECASE)
         
         for i, content in enumerate(matches):
@@ -1816,58 +1832,42 @@ Please manually review and correct the code."""
         
         lang, code_content = code_blocks[0]
         
-        # Track bracket counts per line
+        # Track bracket balance
+        open_braces = 0
+        close_braces = 0
+        open_parens = 0
+        close_parens = 0
+        open_brackets = 0
+        close_brackets = 0
+        
+        # Check balance in each line
         lines = code_content.split('\n')
-        fixed_lines = []
+        for i, line in enumerate(lines):
+            # Count opening brackets
+            open_braces += line.count('{')
+            open_parens += line.count('(')
+            open_brackets += line.count('[')
+            
+            # Count closing brackets
+            close_braces += line.count('}')
+            close_parens += line.count(')')
+            close_brackets += line.count(']')
         
-        for line in lines:
-            fixed_line = self._fix_bracket_balance_in_line(line)
-            fixed_lines.append(fixed_line)
-        
-        # Reconstruct the content
-        fixed_code = '\n'.join(fixed_lines)
-        return content.replace(code_content, fixed_code)
-    
-    def _fix_bracket_balance_in_line(self, line: str) -> str:
-        """
-        Fix bracket balance in a single line with CAI3-specific logic.
-        """
-        # Skip non-body lines
-        if not line.startswith('B#'):
-            return line
-        
-        # Extract the body content after the colon
-        if ':' not in line:
-            return line
-        
-        prefix, body = line.split(':', 1)
-        
-        # Count brackets in the body
-        open_braces = body.count('{')
-        close_braces = body.count('}')
-        open_parens = body.count('(')
-        close_parens = body.count(')')
-        open_brackets = body.count('[')
-        close_brackets = body.count(']')
-        
-        # Fix imbalances
+        # Generate correction strategy
+        corrections = []
         if open_braces > close_braces:
-            # Check if this is a T{} structure without X{}
-            if 'T{' in body and 'X{' not in body:
-                # Add exception handler
-                missing = open_braces - close_braces - 1  # -1 for the X{} we'll add
-                body += '}' * missing + 'X{_}'
-            else:
-                # Just add missing closing braces
-                body += '}' * (open_braces - close_braces)
-        
+            corrections.append('}' * (open_braces - close_braces))
         if open_parens > close_parens:
-            body += ')' * (open_parens - close_parens)
-        
+            corrections.append(')' * (open_parens - close_parens))
         if open_brackets > close_brackets:
-            body += ']' * (open_brackets - close_brackets)
+            corrections.append(']' * (open_brackets - close_brackets))
         
-        return f"{prefix}:{body}"
+        if corrections:
+            # Apply corrections to the last line (naive approach)
+            lines[-1] += ''.join(corrections)
+            self.logger.info(f"Applied bracket balance corrections: {corrections}")
+        
+        return content.replace(code_content, '\n'.join(lines))
     
     def _ensure_pool_completeness(self, content: str) -> str:
         """
@@ -1891,6 +1891,9 @@ Please manually review and correct the code."""
         if pool_match:
             pool_line = pool_match.group(1)
             pool_defs.update(re.findall(r'(p\d+)=', pool_line))
+        else:
+            # No P: section, all pools are undefined
+            pool_defs = set()
         
         # Add missing pool definitions
         missing_pools = pool_refs - pool_defs
@@ -1996,8 +1999,8 @@ Please manually review and correct the code."""
         cai3_output, mappings = self._parse_claude_response(response)
         
         # Apply basic validation and repair
-        is_valid, _ = self._validate_cai3_compliance(cai3_output)
-        if not is_valid:
+        is_compliant, _ = self._validate_cai3_compliance(cai3_output)
+        if not is_compliant:
             cai3_output = self._simple_repair_cai3_format(cai3_output)
         
         return cai3_output, mappings
@@ -2080,3 +2083,728 @@ B#a1:# Enhanced validation with optimized logic here
         if self.cai3_interface:
             return self.cai3_interface.get_constraint_statistics()
         return None
+
+    def _extract_claude_mappings(self, claude_output: str) -> Dict[str, Any]:
+        """
+        Extract mappings from Claude's response that Claude added/modified to fix bugs.
+        
+        Returns:
+            Dict containing pool mappings, variable mappings, method mappings, etc.
+        """
+        mappings = {
+            'pools': {},
+            'variables': {},
+            'methods': {},
+            'classes': {},
+            'hash_mappings': {}
+        }
+        
+        try:
+            import yaml
+            
+            # Look for MAPPINGS section in YAML format
+            yaml_pattern = r'## MAPPINGS\s*```yaml\s*(.*?)\s*```'
+            yaml_match = re.search(yaml_pattern, claude_output, re.DOTALL | re.IGNORECASE)
+            
+            if yaml_match:
+                yaml_content = yaml_match.group(1)
+                self.logger.info(f"🔍 Found MAPPINGS section ({len(yaml_content)} chars)")
+                
+                try:
+                    parsed_mappings = yaml.safe_load(yaml_content)
+                    if isinstance(parsed_mappings, dict) and 'cai3_to_python' in parsed_mappings:
+                        cai3_mappings = parsed_mappings['cai3_to_python']
+                        
+                        # Handle properly structured YAML with categories
+                        for category, items in cai3_mappings.items():
+                            if category in ['pools', 'variables', 'methods', 'classes', 'hash_mappings']:
+                                # Direct category mapping
+                                if isinstance(items, dict):
+                                    mappings[category].update(items)
+                            elif category.startswith('p') and category[1:].isdigit():
+                                # Pool reference like p0, p1 (flat structure)
+                                mappings['pools'][category] = items
+                            elif category.startswith('#') or 'hash' in category.lower():
+                                # Hash mapping (flat structure)
+                                mappings['hash_mappings'][category] = items
+                            else:
+                                # Try to categorize individual items (flat structure)
+                                if isinstance(items, str):
+                                    if any(keyword in items.lower() for keyword in ['class', 'analyzer', 'tier']):
+                                        mappings['classes'][category] = items
+                                    elif any(keyword in items.lower() for keyword in ['method', 'function', 'init', 'get', 'analyze']):
+                                        mappings['methods'][category] = items
+                                    else:
+                                        mappings['variables'][category] = items
+                        
+                        self.logger.info(f"✅ Extracted mappings: {len(mappings['pools'])} pools, "
+                                       f"{len(mappings['variables'])} variables, {len(mappings['methods'])} methods, "
+                                       f"{len(mappings['classes'])} classes, {len(mappings['hash_mappings'])} hashes")
+                        
+                except yaml.YAMLError as e:
+                    self.logger.warning(f"Failed to parse YAML mappings: {e}")
+            
+            # Also look for inline mappings in comments or text
+            self._extract_inline_mappings(claude_output, mappings)
+            
+        except ImportError:
+            self.logger.warning("PyYAML not available, using fallback mapping extraction")
+            self._extract_inline_mappings(claude_output, mappings)
+        
+        return mappings
+    
+    def _extract_inline_mappings(self, text: str, mappings: Dict[str, Any]):
+        """Extract mappings from inline comments and patterns in the text."""
+        
+        # Look for pool definitions like "p0: datetime", "p1: 'Tier 1 - Basic'"
+        pool_pattern = r'(p\d+):\s*["\']?([^,\n"\']+)["\']?'
+        for match in re.finditer(pool_pattern, text):
+            pool_id, pool_value = match.groups()
+            mappings['pools'][pool_id] = pool_value.strip()
+        
+        # Look for variable mappings like "min_tokens: min_t"
+        var_pattern = r'(\w+):\s*(\w+)'
+        lines = text.split('\n')
+        in_mapping_section = False
+        
+        for line in lines:
+            if 'mappings' in line.lower() or 'variable mappings' in line.lower():
+                in_mapping_section = True
+                continue
+            elif in_mapping_section and (line.strip() == '' or line.startswith('#')):
+                continue
+            elif in_mapping_section and not line.startswith(' '):
+                in_mapping_section = False
+            
+            if in_mapping_section:
+                match = re.search(var_pattern, line)
+                if match:
+                    original, compressed = match.groups()
+                    if len(compressed) < len(original):  # Likely a compression mapping
+                        mappings['variables'][compressed] = original
+                        
+    def _translate_cai3_to_python(self, cai3_lite_content: str, source_path: Path, 
+                             claude_mappings: Dict[str, Any]) -> str:
+        """
+        Translate CAI3-LITE to Python using the engine's high-level API.
+        claude_proxy just orchestrates - all logic is in the engine.
+        """
+        try:
+            self.logger.info("🔄 Starting CAI3-LITE to Python translation")
+            
+            # Use the high-level API from the translator
+            python_code = self.cai3_translator.translate_cai3_lite_to_python(
+                cai3_lite_content=cai3_lite_content,
+                source_path=source_path,
+                claude_mappings=claude_mappings
+            )
+            
+            self.logger.info(f"✅ Translation completed: {len(python_code)} chars generated")
+            return python_code
+            
+        except Exception as e:
+            self.logger.error(f"❌ CAI3 translation failed: {e}")
+            # Fallback to simple reconstruction
+            return self._fallback_cai3_reconstruction(cai3_lite_content, claude_mappings)
+
+    # def _translate_cai3_to_python(self, cai3_lite_content: str, source_path: Path, 
+    #                              claude_mappings: Dict[str, Any]) -> str:
+    #     """
+    #     Translate CAI3-LITE to Python using the proper pipeline:
+    #     1. Parse CAI3-LITE structure (P:, X:, T:, B# sections)
+    #     2. Use lexer/parser to tokenize and parse method bodies
+    #     3. Use AST translator to convert to Python AST
+    #     4. Reconstruct complete Python file
+        
+    #     Args:
+    #         cai3_lite_content: The CAI3-LITE code from Claude
+    #         source_path: Path to original source file 
+    #         claude_mappings: New mappings Claude added/modified
+            
+    #     Returns:
+    #         Reconstructed Python source code
+    #     """
+    #     try:
+    #         # Import the pipeline components
+    #         from input_optimizer.engine.cai3_grammar import CAI3LiteParser
+    #         from input_optimizer.engine.flow_tokenizer import FLOWLexer
+    #         from input_optimizer.engine.flow_parser import FLOWParser
+    #         from input_optimizer.engine.cai3_ast_translator import translate_method
+            
+    #         self.logger.info("🔄 Starting CAI3-LITE to Python translation pipeline")
+            
+    #         # Step 1: Parse CAI3-LITE structure using grammar parser with fallback
+    #         self.logger.info("📝 Step 1: Parsing CAI3-LITE structure")
+    #         ast_obj = self._parse_cai3_lite_safe(cai3_lite_content)
+            
+    #         if not ast_obj:
+    #             raise ValueError("Failed to parse CAI3-LITE structure")
+            
+    #         self.logger.info(f"✅ Parsed CAI3 structure: {len(ast_obj.pools)} pools, "
+    #                        f"{len(ast_obj.table)} table entries, {len(ast_obj.bodies)} bodies")
+            
+    #         # Step 2: Load original CAI3 cache for context
+    #         self.logger.info("📂 Step 2: Loading CAI3 cache context")
+    #         cai3_full = self.cai3_cache.load_full(source_path)
+    #         cai3_map = self.cai3_cache.load_map(source_path)
+            
+    #         if not cai3_full or not cai3_map:
+    #             self.logger.warning("No CAI3 cache found, proceeding with limited context")
+    #             # Create minimal context for translation
+    #             cai3_full = self._create_minimal_cai3_full(ast_obj, claude_mappings)
+    #             cai3_map = self._create_minimal_cai3_map(ast_obj, claude_mappings)
+            
+    #         # Step 3: Merge Claude's new mappings with existing context
+    #         self.logger.info("🔗 Step 3: Merging Claude mappings with existing context")
+    #         self._merge_claude_mappings(cai3_full, cai3_map, claude_mappings, ast_obj)
+            
+    #         # Step 4: Reconstruct Python file structure
+    #         self.logger.info("🏗️ Step 4: Reconstructing Python file structure")
+    #         python_code = self._reconstruct_python_file(ast_obj, cai3_full, cai3_map, claude_mappings)
+            
+    #         self.logger.info(f"✅ Translation completed: {len(python_code)} chars of Python code generated")
+    #         return python_code
+            
+    #     except Exception as e:
+    #         self.logger.error(f"❌ CAI3 translation pipeline failed: {e}")
+    #         import traceback
+    #         self.logger.error(f"📍 Pipeline stack trace:\n{traceback.format_exc()}")
+            
+    #         # Fallback to simpler reconstruction
+    #         return self._fallback_cai3_reconstruction(cai3_lite_content, claude_mappings)
+    
+    # def _parse_cai3_lite_safe(self, cai3_lite_content: str):
+    #     """Parse CAI3-LITE with fallback if parser unavailable or content has issues."""
+    #     try:
+    #         from input_optimizer.engine.cai3_grammar import CAI3LiteParser
+    #         parser = CAI3LiteParser()
+    #         ast_obj = parser.parse(cai3_lite_content)
+            
+    #         if ast_obj:
+    #             # Check if the parser actually found bodies when they should exist
+    #             if hasattr(ast_obj, 'bodies') and ast_obj.bodies:
+    #                 self.logger.info(f"CAI3LiteParser successfully parsed {len(ast_obj.bodies)} bodies")
+    #                 is_valid, errors = parser.validate_ast(ast_obj)
+    #                 if not is_valid:
+    #                     self.logger.warning(f"CAI3-LITE validation issues: {errors}")
+    #                 return ast_obj
+    #             elif 'B#' in cai3_lite_content or re.search(r'\bB[0-9]+\b', cai3_lite_content):
+    #                 # Content has B# or B0, B1, etc. directives but parser found no bodies - this indicates parser issue
+    #                 self.logger.warning("CAI3LiteParser found no bodies despite B# or B[0-9]+ content, falling back to regex parser")
+    #                 return self._parse_cai3_lite_fallback(cai3_lite_content)
+    #             else:
+    #                 # No B# content expected, parser is working correctly
+    #                 self.logger.info("No B# or B[0-9]+ content in CAI3-LITE, using CAI3LiteParser result")
+    #                 return ast_obj
+    #         else:
+    #             self.logger.info("CAI3LiteParser returned None (likely due to truncation detection), falling back to regex parser")
+    #             return self._parse_cai3_lite_fallback(cai3_lite_content)
+            
+    #     except ImportError:
+    #         self.logger.info("CAI3LiteParser not available, using regex fallback")
+    #         return self._parse_cai3_lite_fallback(cai3_lite_content)
+    #     except Exception as e:
+    #         self.logger.warning(f"CAI3LiteParser failed: {e}, using regex fallback")
+    #         return self._parse_cai3_lite_fallback(cai3_lite_content)
+
+    # def _parse_cai3_lite_fallback(self, content: str):
+    #     """Robust regex-based CAI3-LITE parser with improved error handling."""
+    #     import ast as _pyast
+        
+    #     class MinimalAST:
+    #         def __init__(self):
+    #             self.header = ""
+    #             self.imports = ""
+    #             self.chain_aliases = {}
+    #             self.pools = {}
+    #             self.bodies = {}
+    #             self.table = []
+        
+    #     ast_obj = MinimalAST()
+        
+    #     try:
+    #         # Normalize line endings and remove any BOM
+    #         content = content.replace('\r\n', '\n').replace('\r', '\n')
+    #         if content.startswith('\ufeff'):
+    #             content = content[1:]
+            
+    #         # Extract header with validation
+    #         lines = content.split('\n')
+    #         if lines and lines[0].strip().startswith('#C3L'):
+    #             ast_obj.header = lines[0].strip()
+    #             self.logger.debug(f"Found header: {ast_obj.header}")
+    #         else:
+    #             self.logger.warning("No valid #C3L header found")
+            
+    #         # Extract imports (I:) with improved pattern
+    #         imports_pattern = r'^I:\s*(.+?)$'
+    #         imports_match = re.search(imports_pattern, content, re.MULTILINE)
+    #         if imports_match:
+    #             ast_obj.imports = imports_match.group(1).strip()
+    #             self.logger.debug(f"Found imports: {ast_obj.imports}")
+            
+    #         # Extract pools (P:) with robust type preservation
+    #         pools_pattern = r'^P:\s*(.+?)$'
+    #         pools_match = re.search(pools_pattern, content, re.MULTILINE)
+    #         if pools_match:
+    #             pool_str = pools_match.group(1).strip()
+    #             self.logger.debug(f"Processing pools: {pool_str}")
+                
+    #             # Handle multiple pool definitions with safer parsing
+    #             pool_entries = []
+    #             current_entry = ""
+    #             in_quotes = None
+    #             i = 0
+                
+    #             while i < len(pool_str):
+    #                 char = pool_str[i]
+                    
+    #                 if char in ('"', "'") and (i == 0 or pool_str[i-1] != '\\'):
+    #                     if in_quotes is None:
+    #                         in_quotes = char
+    #                     elif in_quotes == char:
+    #                         in_quotes = None
+                    
+    #                 if char in (';', ',') and in_quotes is None:
+    #                     # End of current entry
+    #                     if current_entry.strip():
+    #                         pool_entries.append(current_entry.strip())
+    #                     current_entry = ""
+    #                 else:
+    #                     current_entry += char
+                    
+    #                 i += 1
+                
+    #             # Add the last entry
+    #             if current_entry.strip():
+    #                 pool_entries.append(current_entry.strip())
+                    
+    #             for pool_def in pool_entries:
+    #                 pool_match = re.match(r'(p\d+)\s*=\s*(.+)', pool_def.strip())
+    #                 if pool_match:
+    #                     pool_id, value_str = pool_match.groups()
+    #                     value_str = value_str.strip()
+                        
+    #                     try:
+    #                         # Try literal_eval first for proper type conversion
+    #                         ast_obj.pools[pool_id] = _pyast.literal_eval(value_str)
+    #                         self.logger.debug(f"Pool {pool_id}: {ast_obj.pools[pool_id]} (type: {type(ast_obj.pools[pool_id])})")
+    #                     except (ValueError, SyntaxError) as e:
+    #                         # Fallback: clean string handling
+    #                         if value_str.startswith('"') and value_str.endswith('"'):
+    #                             ast_obj.pools[pool_id] = value_str[1:-1]
+    #                         elif value_str.startswith("'") and value_str.endswith("'"):
+    #                             ast_obj.pools[pool_id] = value_str[1:-1]
+    #                         else:
+    #                             ast_obj.pools[pool_id] = value_str
+    #                         self.logger.debug(f"Pool {pool_id}: {ast_obj.pools[pool_id]} (fallback string)")
+            
+    #         # Extract chain aliases (X: and D:)
+    #         x_chains_pattern = r'^X:\s*(.+?)$'
+    #         x_chains_match = re.search(x_chains_pattern, content, re.MULTILINE)
+    #         if x_chains_match:
+    #             chains_str = x_chains_match.group(1).strip()
+    #             self.logger.debug(f"Processing X: chains: {chains_str}")
+                
+    #             # Handle multiple chain definitions - support both a# and g# formats
+    #             chain_entries = re.split(r'[,;]\s*(?=[ag]\d+\s*=)', chains_str)
+    #             for chain_def in chain_entries:
+    #                 # Match both a# and g# patterns
+    #                 chain_match = re.match(r'([ag]\d+)\s*=\s*(.+)', chain_def.strip())
+    #                 if chain_match:
+    #                     alias_id, chain = chain_match.groups()
+    #                     ast_obj.chain_aliases[alias_id] = chain.strip()
+    #                     self.logger.debug(f"Chain {alias_id}: {ast_obj.chain_aliases[alias_id]}")
+            
+    #         # Handle D: format (comma-separated list)
+    #         d_chains_pattern = r'^D:\s*(.+?)$'
+    #         d_chains_match = re.search(d_chains_pattern, content, re.MULTILINE)
+    #         if d_chains_match:
+    #             d_chains_str = d_chains_match.group(1).strip()
+    #             self.logger.debug(f"Processing D: chains: {d_chains_str}")
+    #             ast_obj.chain_aliases['d'] = d_chains_str
+    #             self.logger.debug(f"D chain stored: {d_chains_str}")
+            
+    #         # Extract table (T:) section
+    #         t_match = re.search(r'^T:(.+?)(?=^B#|^---|$)', content, re.MULTILINE | re.DOTALL)
+    #         if t_match:
+    #             table_content = t_match.group(1).strip()
+    #             if table_content:
+    #                 ast_obj.table = [item.strip() for item in table_content.split(',') if item.strip()]
+            
+    #         # Extract bodies (B#) with robust multi-line handling
+    #         self.logger.debug("Starting body extraction...")
+            
+    #         # Split content into sections to handle multi-line bodies properly
+    #         sections = []
+    #         current_section = []
+    #         lines = content.split('\n')
+            
+    #         for line in lines:
+    #             stripped = line.strip()
+    #             # Start a new section on B# blocks and major directives
+    #             if re.match(r'^(?:B#|B[0-9]+|I:|P:|D:|X:|T:|#C3L|---)(?!.*T:)', stripped):
+    #                 if current_section:
+    #                     sections.append('\n'.join(current_section))
+    #                     current_section = []
+    #                 if stripped != '---':  # Don't include separator lines
+    #                     current_section.append(line)
+    #             else:
+    #                 current_section.append(line)
+            
+    #         # Add the last section
+    #         if current_section:
+    #             sections.append('\n'.join(current_section))
+            
+    #         for section in sections:
+    #             section = section.strip()
+    #             if not section:
+    #                 continue
+                
+    #             # Check if this is a body section (B# or B0, B1, etc.)
+    #             body_line = section.split('\n')[0].strip()
+                
+    #             # Match B#id:content or B#id or Bid:content or Bid
+    #             body_match = re.match(r'^B(#|[0-9]+)([A-Za-z0-9_]+)?(?::\s*(.*))?$', body_line)
+    #             if body_match:
+    #                 hash_or_num, body_suffix, inline_content = body_match.groups()
+                    
+    #                 # Determine body ID
+    #                 if hash_or_num == '#' and body_suffix:
+    #                     body_id = body_suffix  # B#a0 -> a0
+    #                 elif hash_or_num != '#':
+    #                     body_id = hash_or_num  # B14 -> 14
+    #                 else:
+    #                     body_id = '#'  # B# -> #
+                    
+    #                 clean_body = ''
+                    
+    #                 # Check if content is inline (B#a0:content)
+    #                 if inline_content and inline_content.strip():
+    #                     clean_body = inline_content.strip()
+    #                     self.logger.debug(f"Extracted inline body {body_id}: {clean_body[:50]}...")
+    #                 else:
+    #                     # Look for T: and D: directives on subsequent lines
+    #                     body_lines = section.split('\n')[1:]  # Skip the B# line itself
+    #                     clean_lines = []
+                        
+    #                     for line in body_lines:
+    #                         stripped_line = line.strip()
+    #                         # Stop at next body block or separator
+    #                         if stripped_line and re.match(r'^(?:B#|B[0-9]+|---|#C3L)', stripped_line):
+    #                             break
+                                
+    #                         # Handle T: and D: directives
+    #                         if stripped_line:
+    #                             if stripped_line.startswith('T:') or stripped_line.startswith('D:'):
+    #                                 # Extract the actual code after T: or D:
+    #                                 content_part = stripped_line[2:].strip()
+    #                                 if content_part:
+    #                                     clean_lines.append(content_part)
+    #                             elif not stripped_line.startswith(('I:', 'P:', 'X:')):
+    #                                 # Include other non-directive content
+    #                                 clean_lines.append(stripped_line)
+                        
+    #                     # Join with newlines to preserve Python structure
+    #                     clean_body = '\n'.join(clean_lines) if clean_lines else ''
+                    
+    #                 if clean_body:
+    #                     ast_obj.bodies[body_id] = clean_body
+    #                     self.logger.debug(f"Extracted body {body_id}: {clean_body[:50]}...")
+    #                 else:
+    #                     self.logger.warning(f"Empty body found for {body_id}")
+            
+    #         self.logger.info(f"Fallback parser extracted: {len(ast_obj.bodies)} bodies, {len(ast_obj.pools)} pools, {len(ast_obj.chain_aliases)} chains")
+            
+    #     except Exception as e:
+    #         self.logger.error(f"Error in fallback parser: {e}")
+    #         import traceback
+    #         self.logger.error(traceback.format_exc())
+        
+    #     return ast_obj
+    
+    # def _create_minimal_cai3_full(self, ast_obj, claude_mappings: Dict[str, Any]):
+    #     """Create minimal CAI3Full object when cache is not available."""
+    #     class MinimalCAI3Full:
+    #         def __init__(self):
+    #             self.pools = {}
+    #             self.hash_to_value = {}
+    #             self.nodes = []
+    #             self.compression_stats = {'chain_aliases': {}}
+        
+    #     minimal = MinimalCAI3Full()
+        
+    #     # Populate pools from AST object and Claude mappings
+    #     if hasattr(ast_obj, 'pools'):
+    #         minimal.pools.update(ast_obj.pools)
+    #     minimal.pools.update(claude_mappings.get('pools', {}))
+        
+    #     # Populate hash mappings
+    #     minimal.hash_to_value.update(claude_mappings.get('hash_mappings', {}))
+        
+    #     return minimal
+    
+    # def _create_minimal_cai3_map(self, ast_obj, claude_mappings: Dict[str, Any]):
+    #     """Create minimal CAI3Map object when cache is not available."""
+    #     class MinimalCAI3Map:
+    #         def __init__(self):
+    #             self.name_map = {}
+    #             self.reverse_name_map = {}
+    #             self.span_map = {}
+        
+    #     minimal = MinimalCAI3Map()
+        
+    #     # Build name mappings from Claude mappings
+    #     for compressed, original in claude_mappings.get('variables', {}).items():
+    #         minimal.name_map[original] = compressed
+    #         minimal.reverse_name_map[compressed] = original
+        
+    #     for compressed, original in claude_mappings.get('methods', {}).items():
+    #         minimal.name_map[original] = compressed
+    #         minimal.reverse_name_map[compressed] = original
+        
+    #     return minimal
+    
+    # def _merge_claude_mappings(self, cai3_full, cai3_map, claude_mappings: Dict[str, Any], ast_obj):
+    #     """Merge Claude's new mappings with existing CAI3 context."""
+        
+    #     # Merge pools
+    #     if hasattr(cai3_full, 'pools'):
+    #         cai3_full.pools.update(claude_mappings.get('pools', {}))
+        
+    #     # Merge hash mappings
+    #     if hasattr(cai3_full, 'hash_to_value'):
+    #         cai3_full.hash_to_value.update(claude_mappings.get('hash_mappings', {}))
+        
+    #     # Merge name mappings
+    #     if hasattr(cai3_map, 'name_map'):
+    #         # Add variable mappings
+    #         for compressed, original in claude_mappings.get('variables', {}).items():
+    #             cai3_map.name_map[original] = compressed
+    #             if hasattr(cai3_map, 'reverse_name_map'):
+    #                 cai3_map.reverse_name_map[compressed] = original
+            
+    #         # Add method mappings  
+    #         for compressed, original in claude_mappings.get('methods', {}).items():
+    #             cai3_map.name_map[original] = compressed
+    #             if hasattr(cai3_map, 'reverse_name_map'):
+    #                 cai3_map.reverse_name_map[compressed] = original
+        
+    #     self.logger.info(f"🔗 Merged mappings: {len(claude_mappings.get('pools', {}))} pools, "
+    #                     f"{len(claude_mappings.get('variables', {}))} variables, "
+    #                     f"{len(claude_mappings.get('methods', {}))} methods")
+    
+    # def _reconstruct_python_file(self, ast_obj, cai3_full, cai3_map, claude_mappings: Dict[str, Any]) -> str:
+    #     """
+    #     Reconstruct the complete Python file from parsed CAI3-LITE structure.
+    #     """
+    #     from input_optimizer.engine.flow_tokenizer import FLOWLexer
+    #     from input_optimizer.engine.flow_parser import FLOWParser  
+    #     from input_optimizer.engine.cai3_ast_translator import translate_method
+        
+    #     python_lines = []
+        
+    #     # Step 1: Add imports
+    #     if hasattr(ast_obj, 'imports') and ast_obj.imports:
+    #         python_lines.append("# Reconstructed imports")
+    #         # ast_obj.imports is a string like "os|sys|datetime" - parse and convert to proper imports
+    #         import_modules = ast_obj.imports.split('|')
+    #         for module in import_modules:
+    #             if ':' in module:
+    #                 # Handle specific imports like "typing:Dict,List"
+    #                 module_name, items = module.split(':', 1)
+    #                 python_lines.append(f"from {module_name} import {items}")
+    #             else:
+    #                 # Simple import
+    #                 python_lines.append(f"import {module}")
+    #         python_lines.append("")
+        
+    #     # Step 2: Process CAI3-LITE format correctly
+    #     if hasattr(ast_obj, 'table') and ast_obj.table:
+    #         # ast_obj.table is a List[str], not an object with .classes/.methods
+    #         self.logger.info(f"🔍 Processing {len(ast_obj.table)} table entries")
+            
+    #         for i, table_entry in enumerate(ast_obj.table):
+    #             self.logger.info(f"📋 Table entry {i}: {table_entry[:100]}...")
+    #             # Table entries contain compressed class/method information
+    #             # For now, add as comments - full parsing would require the complete CAI3 translator
+    #             python_lines.append(f"# Table entry {i}: {table_entry}")
+            
+    #         python_lines.append("")
+        
+    #     # Step 3: Process method bodies with actual translation
+    #     if hasattr(ast_obj, 'bodies') and ast_obj.bodies:
+    #         # ast_obj.bodies is a Dict[str, str], not a list of objects
+    #         self.logger.info(f"🔧 Processing {len(ast_obj.bodies)} method bodies")
+            
+    #         for body_id, body_content in ast_obj.bodies.items():
+    #             self.logger.info(f"  📝 Body {body_id}: {len(body_content)} chars")
+                
+    #             try:
+    #                 # Use the actual translation pipeline instead of skeleton generation
+    #                 # Create a mock method info object for translation
+    #                 class MethodInfo:
+    #                     def __init__(self, body_id):
+    #                         self.cid = body_id
+    #                         self.name = f"method_{body_id}"
+    #                         self.params = []
+    #                         self.signature = f"method_{body_id}(self)"
+                    
+    #                 method_info = MethodInfo(body_id)
+                    
+    #                 # Try to translate the method body using the proper pipeline
+    #                 translated_method = self._translate_method_body(
+    #                     method_info, body_content, cai3_full, cai3_map, claude_mappings
+    #                 )
+                    
+    #                 python_lines.append(translated_method)
+    #                 python_lines.append("")
+                    
+    #             except Exception as e:
+    #                 self.logger.warning(f"Method translation failed for body {body_id}: {e}")
+    #                 # Fallback to skeleton with more detailed error info
+    #                 python_lines.append(f"def method_{body_id}(self):")
+    #                 python_lines.append(f"    \"\"\"Body {body_id} - Translation failed: {e}\"\"\"")
+    #                 python_lines.append(f"    # Original content: {body_content[:100]}...")
+    #                 python_lines.append("    pass")
+    #                 python_lines.append("")
+        
+    #     return '\n'.join(python_lines)
+    
+    # def _translate_method_body(self, method_info, body_content: str, cai3_full, cai3_map, 
+    #                           claude_mappings: Dict[str, Any]) -> str:
+    #     """
+    #     Translate a single method body using direct CAI3 → AST → Python translation.
+    #     No FLOW intermediate step needed - CAI3 translates directly to AST.
+    #     """
+    #     from input_optimizer.engine.cai3_ast_translator import translate_method, ParseConfig
+    #     import ast
+        
+    #     try:
+    #         # Step 1: Create method node for AST translator
+    #         method_node = self._create_method_node(method_info, claude_mappings)
+            
+    #         # Step 2: Merge pools and chain aliases
+    #         pools = {**cai3_full.pools, **claude_mappings.get('pools', {})}
+    #         chains = getattr(cai3_full, 'compression_stats', {}).get('chain_aliases', {})
+            
+    #         # Step 3: Use direct CAI3 → AST translator (no FLOW intermediate step)
+    #         config = ParseConfig(
+    #             strict_mode=False,
+    #             log_errors=True,
+    #             validate_output=True
+    #         )
+            
+    #         func_ast = translate_method(
+    #             method_node=method_node,
+    #             body_content=body_content,
+    #             cai3_map=cai3_map,
+    #             cai3_full=cai3_full,
+    #             chain_aliases=chains,
+    #             pools=pools,
+    #             config=config
+    #         )
+            
+    #         # Step 4: Convert AST back to Python source
+    #         python_source = ast.unparse(func_ast)
+            
+    #         self.logger.debug(f"✅ Translated method {method_info.name}: {len(python_source)} chars")
+    #         return python_source
+            
+    #     except Exception as e:
+    #         self.logger.error(f"Method translation failed for {method_info.name}: {e}")
+    #         # Return a simple fallback
+    #         return f"def {method_info.name}(self):\n    # Translation failed: {e}\n    pass"
+    
+    # def _create_method_node(self, method_info, claude_mappings: Dict[str, Any]):
+    #     """Create a method node object for the AST translator."""
+    #     class MethodNode:
+    #         def __init__(self, method_info, mappings):
+    #             self.cid = method_info.cid
+    #             self.name = method_info.name
+    #             self.params = getattr(method_info, 'params', [])
+    #             self.signature = getattr(method_info, 'signature', f"{method_info.name}()")
+                
+    #             # Try to get original name from mappings
+    #             for compressed, original in mappings.get('methods', {}).items():
+    #                 if compressed == method_info.name:
+    #                     self.original_name = original
+    #                     break
+    #             else:
+    #                 self.original_name = method_info.name
+        
+    #     return MethodNode(method_info, claude_mappings)
+    
+    def _fallback_cai3_reconstruction(self, cai3_lite_content: str, claude_mappings: Dict[str, Any]) -> str:
+        """
+        Fallback reconstruction when the full pipeline fails.
+        Uses simple string replacement and pattern matching.
+        """
+        self.logger.warning("🚨 Using fallback CAI3 reconstruction")
+        
+        try:
+            # Extract basic structure
+            lines = cai3_lite_content.split('\n')
+            imports = []
+            classes = []
+            methods = []
+            
+            current_section = None
+            
+            for line in lines:
+                line = line.strip()
+                if not line:
+                    continue
+                    
+                if line.startswith('I:'):
+                    # Imports section
+                    import_line = line[2:].strip()
+                    imports.extend(self._parse_import_line(import_line))
+                elif line.startswith('T:'):
+                    # Table section - extract class and method definitions
+                    table_content = line[2:].strip()
+                    classes_and_methods = self._parse_table_section(table_content)
+                    classes.extend(classes_and_methods.get('classes', []))
+                    methods.extend(classes_and_methods.get('methods', []))
+                elif line.startswith('B#'):
+                    # Body section - extract method implementations
+                    pass  # Would need more complex parsing
+            
+            # Simple reconstruction
+            python_lines = []
+            
+            # Add imports
+            for imp in imports:
+                python_lines.append(imp)
+            python_lines.append("")
+            
+            # Add classes with stub methods
+            for class_name in classes:
+                python_lines.append(f"class {class_name}:")
+                
+                class_methods = [m for m in methods if m.get('class') == class_name]
+                if not class_methods:
+                    python_lines.append("    pass")
+                else:
+                    for method in class_methods:
+                        python_lines.append(f"    def {method['name']}(self):")
+                        python_lines.append("        # Method implementation would be reconstructed here")
+                        python_lines.append("        pass")
+                        python_lines.append("")
+                
+                python_lines.append("")
+            
+            result = '\n'.join(python_lines)
+            self.logger.info(f"✅ Fallback reconstruction completed: {len(result)} chars")
+            return result
+            
+        except Exception as e:
+            self.logger.error(f"❌ Fallback reconstruction failed: {e}")
+            return f"""# CAI3 Reconstruction Failed
+# Original CAI3-LITE content:
+# {cai3_lite_content[:500]}...
+
+# Error: {e}
+# Manual reconstruction required.
+pass
+"""

@@ -6,7 +6,7 @@ import os
 # Add the parent directory to the path to import the CAI3 modules
 sys.path.append(os.path.join(os.path.dirname(__file__), '..', '..'))
 
-from input_optimizer.engine.cai3_translator import CAI3Translator
+from input_optimizer.engine.cai3_ast_translator import CAI3Translator
 from input_optimizer.engine.cai3_waterfall_integration import CAI3WaterfallEnhancement, enhance_waterfall_with_cai3
 from input_optimizer.engine.waterfall_compressor import WaterfallCompressor
 

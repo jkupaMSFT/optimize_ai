@@ -13,7 +13,7 @@ parent_dir = os.path.dirname(os.path.dirname(current_dir))
 sys.path.insert(0, parent_dir)
 
 from integrations.claude_wrapper.claude_proxy import ClaudeCodeProxy
-from input_optimizer.engine.cai3_translator import CAI3Translator
+from input_optimizer.engine.cai3_ast_translator import CAI3Translator
 
 def test_full_cai3_translation():
     """Test translating full CAI3-LITE output back to Python."""

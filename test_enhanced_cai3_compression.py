@@ -740,7 +740,7 @@ def test_cai3_translation():
     
     try:
         # Import the CAI3Translator from the current codebase
-        from optimize_ai.input_optimizer.engine.cai3_translator import CAI3Translator
+        from optimize_ai.input_optimizer.engine.cai3_ast_translator import CAI3Translator
 
         #translator = CAI3Translator()
 

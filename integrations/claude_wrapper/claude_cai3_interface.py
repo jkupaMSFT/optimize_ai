@@ -25,6 +25,20 @@ B#a1:another_method_body_here
 B#a2:function_body_content_here
 ```
 
+VALID SECTION IDENTIFIERS ONLY:
+- #C3L (header)
+- I: (imports)
+- D: (chain aliases)
+- X: (CID aliases)
+- P: (pools)
+- T: (table)
+- B# (bodies)
+- --- (separator)
+
+FORBIDDEN SECTIONS:
+- R: (raw data) - NEVER ALLOWED
+- Any other section identifiers not listed above
+
 CRITICAL FORMAT RULES:
 - Bodies MUST use format: B#aliasId:content (e.g., B#a0:return x + y)
 - Table entries MUST use: C:className, M:className.method#alias, F:function#alias
@@ -53,11 +67,11 @@ from pathlib import Path
 
 try:
     from optimize_ai.input_optimizer.engine.cai3_structures import CAI3Full, CAI3Map, CAI3Lite
-    from optimize_ai.input_optimizer.engine.cai3_translator import CAI3Translator
+    from optimize_ai.input_optimizer.engine.cai3_ast_translator import CAI3Translator
 except ImportError:
     try:
         from input_optimizer.engine.cai3_structures import CAI3Full, CAI3Map, CAI3Lite
-        from input_optimizer.engine.cai3_translator import CAI3Translator
+        from input_optimizer.engine.cai3_ast_translator import CAI3Translator
     except ImportError:
         # Fallback for development
         class CAI3Full:
@@ -251,11 +265,10 @@ class ClaudeCAI3Interface:
         pool_constraint = "You may create new pools (p##) as needed. All pools must be defined in P: section."
         identifier_constraint = "ANY new variable MUST be listed in MAPPINGS section"
         
-        # Create the constrained prompt
-        prompt = f"""CAI3-LITE MODIFICATION REQUEST
+        # Create the constrained prompt with stronger directives
+        prompt = f"""🚨 CRITICAL: RESPOND ONLY IN THE EXACT FORMAT BELOW 🚨
 
-MANDATORY OUTPUT FORMAT:
-Your response must be in exactly this format:
+You MUST start your response with exactly these headers:
 
 === MAPPINGS ===
 new_identifier: original_name
@@ -266,56 +279,39 @@ p23: "original_variable_name"
 === CAI3-LITE ===
 [Your modified CAI3-LITE code here]
 
-STRICT CONSTRAINTS:
+❌ FORBIDDEN: NO explanatory text, NO prose, NO comments outside these sections.
+
+EXAMPLE CORRECT RESPONSE:
+=== MAPPINGS ===
+hash_1234: calculate_total
+p25: "user_email_address"
+
+=== CAI3-LITE ===
+#C3L v2 py=3.11 f=example.py
+P:p0="value1",p1="value2"
+X:a0=hash1,a1=hash2
+T:C:MyClass,M:MyClass.method#a0
+---
+B#a0:return x + y
+
+CONSTRAINTS (VIOLATION = FAILURE):
 1. {hash_constraint}
 2. {pool_constraint}
 3. {identifier_constraint}
-4. NEW HASHES: If you create new hash_XXXX references, add them to MAPPINGS with their original Python names
-5. NEW POOLS: If you create new pools (p##), add them to MAPPINGS with their original variable names in quotes
-6. Method names MUST be valid Python identifiers
-7. NO parentheticals like "(was ...)" or "(originally ...)"
-8. NO truncation markers like "..." anywhere
-9. Maintain exact CAI3-LITE syntax: #C3L header, P: pools, X: aliases, etc.
-
-EXACT CAI3-LITE FORMAT REQUIRED:
-```
-#C3L v2 py=3.11 f=filename.py
-I:import1|import2|module:class,func
-D:g0=ClassName|g1=function_name
-X:a0=hash1,a1=hash2,a2=hash3
-P:p0=pool_value1,p1=pool_value2
-T:C:g0,M:g0.method#a0,M:g0.method2#a1,F:g1#a2
----
-B#a0:method_body_content_here
-B#a1:another_method_body_here
-B#a2:function_body_content_here
-```
-
-CRITICAL FORMAT RULES:
-- Bodies MUST use format: B#aliasId:content (e.g., B#a0:return x + y)
-- Table entries MUST use: C:className, M:className.method#alias, F:function#alias
-- NO spaces around colons in body definitions
-- Pools use format: p0=value,p1=value (comma separated)
-- Aliases use format: a0=hash1,a1=hash2 (comma separated)
-- Separator between header and bodies MUST be exactly: ---
-
-VALIDATION REQUIREMENTS:
-- All referenced pools (p0, p1, etc.) must be defined in P: section
-- All new hashes and pools must have corresponding entries in MAPPINGS section
-- Bracket balance: {{ }} must match exactly
-- Complete try-except structures: T{{...}}X{{...}}
-
-MAPPING EXAMPLES:
-- If you create hash_5678, add: hash_5678: calculate_total
-- If you create p25, add: p25: "user_email_address"
-- If you create new_var, add: new_var: optimized_function_name
+4. ALL new identifiers → MAPPINGS section
+5. Method names = valid Python identifiers ONLY
+6. NO "(was ...)" or "(originally ...)" text ANYWHERE
+7. NO "..." truncation markers ANYWHERE
+8. Exact CAI3-LITE syntax required
+9. ONLY VALID SECTIONS: #C3L, I:, D:, X:, P:, T:, B# - NO R: or other sections
+10. NO raw data, base64, or R: sections allowed
 
 TASK: {task}
 
 EXISTING CAI3-LITE:
 {cai3_lite}
 
-CRITICAL: Follow the MANDATORY OUTPUT FORMAT exactly. Use the EXACT CAI3-LITE FORMAT shown above. Any new identifiers, hashes, or pools not in the original constraints must be mapped to their original Python names in the MAPPINGS section for proper translation back to Python code."""
+🚨 REMINDER: Start with "=== MAPPINGS ===" then "=== CAI3-LITE ===" - NO other text allowed."""
 
         return prompt
     
@@ -498,6 +494,14 @@ B#a1:# Optimized validation logic here
         self.logger.info(f"  - CAI3 content: {len(cai3_content)} chars")
         self.logger.info(f"  - Has valid CAI3: {bool(cai3_content.strip())}")
         
+        # Immediate format validation
+        if not cai3_content.strip():
+            self.logger.error("❌ CRITICAL FORMAT ERROR: Empty CAI3 content - Claude ignored format instructions!")
+        elif '=== MAPPINGS ===' not in response:
+            self.logger.warning("⚠️ FORMAT WARNING: Missing 'MAPPINGS' section header")
+        elif '=== CAI3-LITE ===' not in response:
+            self.logger.warning("⚠️ FORMAT WARNING: Missing 'CAI3-LITE' section header")
+        
         if mappings:
             self.logger.info(f"📋 Sample mappings: {dict(list(mappings.items())[:5])}")
         
@@ -565,6 +569,12 @@ B#a1:# Optimized validation logic here
         format_violations = self._validate_cai3_format(cai3_output)
         violations.extend(format_violations)
         self.logger.info(f"  Result: {len(format_violations)} format violations")
+        
+        # 6. Validate section identifiers
+        self.logger.info("🏷️ Validating section identifiers...")
+        section_violations = self._validate_section_identifiers(cai3_output)
+        violations.extend(section_violations)
+        self.logger.info(f"  Result: {len(section_violations)} section violations")
         
         # Log violation details for debugging
         if violations:
@@ -841,7 +851,9 @@ B#a1:# Optimized validation logic here
             ('(was ', 'parentheticals'),
             ('(originally ', 'parentheticals'), 
             ('...)', 'ellipsis'),
-            ('p...', 'truncated_pools')
+            ('p...', 'truncated_pools'),
+            ('R:', 'raw_sections'),
+            ('raw_', 'raw_data')
         ]
         
         for pattern, violation_name in forbidden_patterns:
@@ -853,6 +865,39 @@ B#a1:# Optimized validation logic here
                     suggested_fix=f"Remove all instances of {pattern}",
                     severity="critical"
                 ))
+        
+        return violations
+    
+    def _validate_section_identifiers(self, cai3_output: str) -> List[ConstraintViolation]:
+        """Validate that only allowed CAI3-LITE section identifiers are used."""
+        violations = []
+        
+        # Define valid CAI3-LITE section identifiers
+        valid_sections = {'#C3L', 'I:', 'D:', 'X:', 'P:', 'T:', 'B#', '---'}
+        
+        lines = cai3_output.split('\n')
+        for line_num, line in enumerate(lines, 1):
+            line = line.strip()
+            if not line or line.startswith('#'):
+                continue
+                
+            # Check if line starts with a section identifier
+            if ':' in line:
+                section_prefix = line.split(':')[0] + ':'
+                
+                # Skip body sections (B#) as they have different format
+                if line.startswith('B#'):
+                    continue
+                    
+                # Check if it's a valid section
+                if section_prefix not in valid_sections:
+                    violations.append(ConstraintViolation(
+                        violation_type="invalid_section_identifier",
+                        description=f"Invalid section identifier '{section_prefix}' - only allowed: {', '.join(sorted(valid_sections))}",
+                        location=f"Line {line_num}: {line[:50]}...",
+                        suggested_fix=f"Remove or replace '{section_prefix}' with a valid CAI3-LITE section identifier",
+                        severity="critical"
+                    ))
         
         return violations
     
@@ -870,6 +915,30 @@ B#a1:# Optimized validation logic here
                 # Remove ellipsis markers
                 repaired = repaired.replace('...)', ')')
                 repaired = repaired.replace('p...', '')
+                
+            elif violation.violation_type == "forbidden_raw_sections":
+                # Remove R: sections entirely
+                repaired = re.sub(r'^R:.*$', '', repaired, flags=re.MULTILINE)
+                
+            elif violation.violation_type == "forbidden_raw_data":
+                # Remove lines containing raw_ data
+                repaired = re.sub(r'^.*raw_.*$', '', repaired, flags=re.MULTILINE)
+                
+            elif violation.violation_type == "invalid_section_identifier":
+                # Remove lines with invalid section identifiers
+                # This handles R: sections and other invalid identifiers
+                invalid_lines = []
+                for line in repaired.split('\n'):
+                    if ':' in line and not line.startswith('#') and not line.startswith('B#'):
+                        section_prefix = line.split(':')[0] + ':'
+                        valid_sections = {'I:', 'D:', 'X:', 'P:', 'T:', '---:'}
+                        if section_prefix not in valid_sections:
+                            invalid_lines.append(line)
+                
+                # Remove all invalid lines
+                for invalid_line in invalid_lines:
+                    repaired = repaired.replace(invalid_line + '\n', '')
+                    repaired = repaired.replace(invalid_line, '')
                 
             elif violation.violation_type == "missing_header":
                 # Add missing header
@@ -901,24 +970,30 @@ B#a1:# Optimized validation logic here
         
         violations_text = '\n'.join(violation_details)
         
-        fix_prompt = f"""CAI3-LITE CONSTRAINT VIOLATION REPAIR
+        fix_prompt = f"""🚨 FORMAT VIOLATION - IMMEDIATE CORRECTION REQUIRED 🚨
 
-Your previous output violated constraints. Please fix these issues:
+Your previous response was REJECTED because it did not follow the format.
 
+🔴 WHAT YOU DID WRONG:
 {violations_text}
 
-ORIGINAL TASK: {original_task}
+✅ CORRECT FORMAT REQUIRED:
+You must start your response with exactly these lines:
 
-PREVIOUS OUTPUT (needs fixing):
-{cai3_output}
+=== MAPPINGS ===
+[your mappings here]
 
-REQUIREMENTS FOR FIXED OUTPUT:
-1. Use the same MANDATORY OUTPUT FORMAT with MAPPINGS and CAI3-LITE sections
-2. Fix all critical constraint violations listed above
-3. Maintain the original functionality and task requirements
-4. Ensure all referenced pools, hashes, and identifiers follow constraints
+=== CAI3-LITE ===
+[your CAI3 code here]
 
-Please provide the corrected version following the exact same format as before."""
+❌ NO other text allowed before, between, or after these sections.
+
+TASK: {original_task}
+
+YOUR PREVIOUS INCORRECT OUTPUT:
+{cai3_output[:500]}...
+
+🚨 CRITICAL: Respond ONLY with the format above. Start with "=== MAPPINGS ===" immediately."""
 
         return fix_prompt
     

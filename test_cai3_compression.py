@@ -20,7 +20,7 @@ from optimize_ai.input_optimizer.engine.flow_language import FLOWCompiler
 from optimize_ai.input_optimizer.engine.cai3_waterfall_integration import (
     CAI3WaterfallEnhancement, enhance_waterfall_with_cai3
 )
-from optimize_ai.input_optimizer.engine.cai3_translator import CAI3Translator
+from optimize_ai.input_optimizer.engine.cai3_ast_translator import CAI3Translator
 from optimize_ai.input_optimizer.engine.waterfall_compressor import WaterfallCompressor
 
 

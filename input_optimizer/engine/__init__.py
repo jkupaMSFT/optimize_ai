@@ -17,7 +17,7 @@ from .translators.sudo_lang_translator import python_to_sudolang, ast_to_sudolan
 from .translators.synth_lang_translator import python_to_synthlang
 
 # Import CAI3 integration
-from .cai3_integration import CAI3CompilerV2, compile_to_cai3, decompress_from_cai3, validate_cai3_roundtrip
+from .cai3_integration_depreciated import CAI3CompilerV2, compile_to_cai3, decompress_from_cai3, validate_cai3_roundtrip
 
 # Import mapping utilities
 from .mapping.ast_map import ASTMapper, walk_ast_and_map, MappedNode

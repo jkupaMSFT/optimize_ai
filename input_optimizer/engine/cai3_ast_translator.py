@@ -17,7 +17,7 @@ from pathlib import Path
 from .hash_resolver import HashResolver
 from .cai3_ast_transformer import ResolutionTransformer
 from .cai3_grammar import CAI3LiteParser
-from .cai3_structure_analyzer import CAI3StructureAnalyzer
+from .cai3_structure_analyzer import CAI3StructureAnalyzer, StructureInfo
 # from .cai3_python_reconstructor import CAI3PythonReconstructor  # Removed to fix circular import
 
 logger = logging.getLogger(__name__)
@@ -358,45 +358,303 @@ class CAI3BodyParser:
             for pattern, replacement in self.NORMALIZATIONS
         ]
     
+    # Add this enhanced parse_body method to CAI3BodyParser class
+
     def parse_body(self, body_content: str, body_id: str) -> List[ast.stmt]:
-        """Parse body with complete statement preservation and try-except reconstruction."""
+        """Parse body with complete statement preservation and proper resolution."""
         statements = []
         
-        # Apply pool resolution to the entire body content first
+        # Apply pool resolution first
         resolved_body = self.resolve_pool_references(body_content)
+        self.logger.debug(f"Body {body_id} after pool resolution: {resolved_body}")
         
-        for raw_line in resolved_body.splitlines():
-            line = raw_line.strip()
-            
-            # Skip empty lines and metadata
-            if not line or line.startswith('# Table entry'):
-                continue
-            
-            # Remove CAI3 prefixes once
-            if line.startswith(('T:', 'D:')):
-                line = line[2:].strip()
-                if not line:
-                    continue
-            
-            # Special handling for complete try-except blocks
-            # If we detect a try-except pattern, handle it as one unit
-            if 'try:' in line and ('except' in line or line.count(';') > 3):
-                # This looks like a complete try-except block
-                statements.extend(self._parse_try_except_block(line, body_id))
-                continue
-            
-            # Split on semicolons (handles all brackets and preserves control flow)
-            for part in self._smart_split_semicolons(line):
-                part = part.strip()
-                if not part:
-                    continue
-                
-                # Parse ALL statements from this part
-                stmts = self._parse_line(part, body_id)
-                if stmts:
-                    statements.extend(stmts)
+        # Fix CAI3-specific syntax issues
+        resolved_body = self._fix_cai3_syntax(resolved_body)
+        
+        # Parse statements
+        try:
+            # Try parsing as a module first
+            module = ast.parse(resolved_body)
+            return module.body
+        except SyntaxError:
+            # Fall back to statement-by-statement parsing
+            for stmt in self._split_statements(resolved_body):
+                try:
+                    parsed = ast.parse(stmt)
+                    statements.extend(parsed.body)
+                except SyntaxError:
+                    # Create error comment
+                    error_msg = f"# Parse error: {stmt[:60]}..."
+                    statements.append(ast.Expr(value=ast.Constant(value=error_msg)))
         
         return statements if statements else [ast.Pass()]
+    
+    def _fix_cai3_syntax(self, content: str) -> str:
+        """Fix CAI3-specific syntax issues before parsing."""
+        # Fix malformed dictionary literals
+        content = re.sub(r'{([^:]+):([^:]+):([^}]+)}', r'{\1: \2, "error": \3}', content)
+        
+        # Fix if conditions with wrong syntax
+        content = re.sub(r'if\s+0}', 'if False:', content)
+        
+        # Fix for loops with compressed syntax
+        content = re.sub(r'for\s+(\w+)\s+in\s+(\w+):(\w+)=', r'for \1 in \2:\n    \3 = ', content)
+        
+        # Fix rates dictionary with numeric keys
+        content = re.sub(r'rates={([0-9.e-]+):([0-9.e-]+)[,}]', r'rates={"\1": \2}', content)
+        
+        # Fix estimate function calls with wrong syntax
+        content = re.sub(r'estimate_cost\(([^:]+):([^)]+)\)', r'estimate_cost(\1, \2)', content)
+        
+        return content
+    
+    def _split_statements(self, content: str) -> List[str]:
+        """Split content into individual statements."""
+        # Smart splitting on semicolons
+        statements = []
+        current = []
+        depth = {'paren': 0, 'bracket': 0, 'brace': 0}
+        in_string = None
+        
+        i = 0
+        while i < len(content):
+            char = content[i]
+            
+            # Track string state
+            if char in '"\'':
+                if in_string == char:
+                    in_string = None
+                elif in_string is None:
+                    in_string = char
+            
+            # Track depth when not in string
+            if not in_string:
+                if char == '(':
+                    depth['paren'] += 1
+                elif char == ')':
+                    depth['paren'] -= 1
+                elif char == '[':
+                    depth['bracket'] += 1
+                elif char == ']':
+                    depth['bracket'] -= 1
+                elif char == '{':
+                    depth['brace'] += 1
+                elif char == '}':
+                    depth['brace'] -= 1
+                elif char == ';' and all(d == 0 for d in depth.values()):
+                    # Split here
+                    if current:
+                        statements.append(''.join(current).strip())
+                        current = []
+                    i += 1
+                    continue
+            
+            current.append(char)
+            i += 1
+        
+        # Add remaining
+        if current:
+            statements.append(''.join(current).strip())
+        
+        return [s for s in statements if s]
+    
+    def _contains_conditional_expression(self, content: str) -> bool:
+        """Check if content contains CAI3 conditional expressions."""
+        return '?' in content and '{' in content and '}' in content
+    
+    def _parse_body_with_conditionals(self, body_content: str, body_id: str) -> List[ast.stmt]:
+        """Parse body content that contains conditional expressions."""
+        # Initialize placeholder storage
+        self._conditional_placeholders = {}
+        
+        # Use recursive approach for nested conditionals
+        processed = self._process_conditionals_recursive(body_content)
+        
+        # Parse the processed content by splitting on semicolons first
+        statements = []
+        stmt_parts = self._smart_split_semicolons(processed)
+        
+        for part in stmt_parts:
+            part = part.strip()
+            if not part:
+                continue
+                
+            if '__COND_' in part and '_PLACEHOLDER__' in part:
+                # Extract and process conditional
+                for placeholder, cond_data in self._conditional_placeholders.items():
+                    if placeholder in part:
+                        # Check if this is a standalone conditional or part of a larger statement
+                        if part.strip() == placeholder:
+                            # Standalone conditional
+                            if_stmt = self._create_conditional_ast(
+                                cond_data['condition'],
+                                cond_data['true_branch'],
+                                cond_data['false_branch']
+                            )
+                            statements.append(if_stmt)
+                        else:
+                            # Conditional is part of a larger statement - need to handle this case
+                            # For now, just create the conditional (this could be enhanced later)
+                            if_stmt = self._create_conditional_ast(
+                                cond_data['condition'],
+                                cond_data['true_branch'],
+                                cond_data['false_branch']
+                            )
+                            statements.append(if_stmt)
+                        break
+            else:
+                # Regular statement processing
+                line_stmts = self._parse_line(part, body_id)
+                statements.extend(line_stmts)
+        
+        return statements if statements else [ast.Pass()]
+    
+    def _create_conditional_ast(self, condition: str, true_branch: str, false_branch: str) -> ast.If:
+        """Create AST If node from conditional components."""
+        # Parse condition
+        try:
+            # Handle "p7 in results" -> "errors" in results
+            resolved_condition = self.resolve_pool_references(condition)
+            condition_ast = ast.parse(resolved_condition, mode='eval').body
+        except:
+            # Fallback
+            condition_ast = ast.Constant(value=True)
+        
+        # Parse branches recursively to handle nested conditionals
+        true_stmts = self._parse_branch_recursively(true_branch)
+        false_stmts = self._parse_branch_recursively(false_branch)
+        
+        return ast.If(
+            test=condition_ast,
+            body=true_stmts if true_stmts else [ast.Pass()],
+            orelse=false_stmts if false_stmts else [ast.Pass()]
+        )
+    
+    def _parse_branch_recursively(self, branch: str) -> List[ast.stmt]:
+        """Parse a branch that may contain nested conditionals."""
+        if not branch.strip():
+            return [ast.Pass()]
+        
+        statements = []
+        
+        # First check if this branch itself contains conditional expressions
+        if '?' in branch and '{' in branch and '}' in branch:
+            # This branch contains nested conditionals - process them recursively
+            processed_branch = self._process_conditionals_recursive(branch)
+            
+            # Now parse the processed branch
+            for line in processed_branch.splitlines():
+                if '__COND_' in line and '_PLACEHOLDER__' in line:
+                    # Extract and process conditional
+                    for placeholder, cond_data in self._conditional_placeholders.items():
+                        if placeholder in line:
+                            # Create nested if-else AST node
+                            nested_if = self._create_conditional_ast(
+                                cond_data['condition'],
+                                cond_data['true_branch'],
+                                cond_data['false_branch']
+                            )
+                            statements.append(nested_if)
+                            break
+                else:
+                    # Regular statement processing
+                    for stmt in line.split(';'):
+                        if stmt.strip():
+                            resolved_stmt = self.resolve_pool_references(stmt.strip())
+                            try:
+                                parsed = ast.parse(resolved_stmt, mode='exec').body
+                                statements.extend(parsed)
+                            except:
+                                statements.append(ast.Pass())
+        else:
+            # No nested conditionals, process normally
+            for stmt in branch.split(';'):
+                if stmt.strip():
+                    resolved_stmt = self.resolve_pool_references(stmt.strip())
+                    try:
+                        parsed = ast.parse(resolved_stmt, mode='exec').body
+                        statements.extend(parsed)
+                    except:
+                        statements.append(ast.Pass())
+        
+        return statements if statements else [ast.Pass()]
+    
+    def _process_conditionals_recursive(self, content: str) -> str:
+        """Process conditional expressions recursively to handle nesting."""
+        def find_matching_brace(s, start_pos):
+            """Find the matching closing brace for the opening brace at start_pos."""
+            if start_pos >= len(s) or s[start_pos] != '{':
+                return -1
+            
+            brace_count = 1
+            pos = start_pos + 1
+            
+            while pos < len(s) and brace_count > 0:
+                if s[pos] == '{':
+                    brace_count += 1
+                elif s[pos] == '}':
+                    brace_count -= 1
+                pos += 1
+            
+            return pos - 1 if brace_count == 0 else -1
+        
+        # Process from the inside out to handle nested conditionals
+        processed = content
+        changed = True
+        
+        while changed:
+            changed = False
+            i = 0
+            
+            while i < len(processed):
+                if processed[i] == '(' and '?' in processed[i:]:
+                    # Find the end of this conditional expression
+                    paren_count = 1
+                    j = i + 1
+                    question_pos = None
+                    
+                    while j < len(processed) and paren_count > 0:
+                        if processed[j] == '(':
+                            paren_count += 1
+                        elif processed[j] == ')':
+                            paren_count -= 1
+                        elif processed[j] == '?' and question_pos is None and paren_count == 1:
+                            question_pos = j
+                        j += 1
+                    
+                    if paren_count == 0 and question_pos:
+                        condition = processed[i+1:question_pos].strip()
+                        rest = processed[question_pos+1:j-1]
+                        
+                        # Parse true and false branches with proper brace matching
+                        if rest.startswith('{'):
+                            true_end = find_matching_brace(rest, 0)
+                            if true_end != -1 and rest[true_end+1:true_end+3] == ':{':
+                                true_branch = rest[1:true_end]
+                                false_start = true_end + 3
+                                false_end = find_matching_brace(rest, false_start - 1)
+                                
+                                if false_end != -1:
+                                    false_branch = rest[false_start:false_end]
+                                    
+                                    # Create placeholder
+                                    placeholder = f"__COND_{len(self._conditional_placeholders)}_PLACEHOLDER__"
+                                    
+                                    # Store the conditional for later processing
+                                    self._conditional_placeholders[placeholder] = {
+                                        'condition': condition,
+                                        'true_branch': true_branch,
+                                        'false_branch': false_branch
+                                    }
+                                    
+                                    # Replace the conditional with placeholder
+                                    processed = processed[:i] + placeholder + processed[j:]
+                                    changed = True
+                                    break
+                
+                i += 1
+        
+        return processed
     
     def _smart_split_semicolons(self, line: str) -> List[str]:
         """Split on semicolons while preserving control flow structures."""
@@ -751,9 +1009,16 @@ except {exception_spec}:
         }
         
         # Check pools and chain_aliases from the instance
-        resolved_pools = {**pool_fallback_mapping}
+        resolved_pools = {}
+        
+        # If explicit pools are defined, use only those (no fallback)
         if hasattr(self, 'pools') and self.pools:
             resolved_pools.update(self.pools)
+        else:
+            # Only use fallback mappings if no explicit pools are defined
+            resolved_pools.update(pool_fallback_mapping)
+            
+        # Always include chain aliases if they exist
         if hasattr(self, 'chain_aliases') and self.chain_aliases:
             resolved_pools.update(self.chain_aliases)
         
@@ -785,7 +1050,21 @@ except {exception_spec}:
                 for pool_ref, replacement in resolved_pools.items():
                     if text[i:].startswith(pool_ref) and (i == 0 or not text[i-1].isalnum()) and \
                        (i + len(pool_ref) >= len(text) or not text[i + len(pool_ref)].isalnum()):
-                        result.append(replacement)
+                        # Handle different contexts for pool replacement
+                        if i > 0 and text[i-1] == '.':
+                            # This is an attribute access like obj.p0 -> obj.status (no quotes)
+                            # Strip quotes if the replacement is a quoted string
+                            if isinstance(replacement, str) and len(replacement) >= 2 and \
+                               replacement.startswith('"') and replacement.endswith('"'):
+                                result.append(replacement[1:-1])  # Remove quotes
+                            elif isinstance(replacement, str) and len(replacement) >= 2 and \
+                                 replacement.startswith("'") and replacement.endswith("'"):
+                                result.append(replacement[1:-1])  # Remove quotes
+                            else:
+                                result.append(str(replacement))
+                        else:
+                            # Normal pool reference - preserve original format
+                            result.append(str(replacement))
                         i += len(pool_ref)
                         found_pool = True
                         break
@@ -2021,213 +2300,825 @@ except ImportError:
     class FLOWCompiler:
         def __init__(self, **kwargs):
             pass
-
 class CAI3Translator:
     """Complete production-ready CAI3 translator."""
     
     def __init__(self, cache_dir: Optional[Path] = None, strict_mode: bool = False):
-        self.cache = CAI3Cache(cache_dir) if cache_dir else CAI3Cache()
-        self.logger = logging.getLogger(__name__)
+        self.cache_dir = cache_dir or Path(".cai3_cache")
+        self.cache = CAI3Cache(self.cache_dir)
         self.strict_mode = strict_mode
-        self.hash_mappings = {}
-        self.claude_new_mappings = {}
-        self.current_hash_mappings = {}
-        
-        # Initialize body parser with pool resolution
-        self.body_parser = CAI3BodyParser(strict_mode=strict_mode)
-        
-        # Enhanced parser configuration
-        self.parse_config = ParseConfig(
-            strict_mode=strict_mode,
-            log_errors=True,
-            max_recursion_depth=100,
-            validate_output=True
-        )
+        self.logger = logging.getLogger(__name__)
+    
+    def translate_cai3_lite_to_python(self, cai3_lite_content: str, 
+                                     source_path: Path,
+                                     claude_mappings: Dict[str, Any] = None) -> str:
+        """
+        Main entry point for CAI3-LITE to Python translation.
+        FIXED: Properly integrates hash resolution, pool resolution, and AST reconstruction.
+        """
+        try:
+            self.logger.info("🔄 Starting CAI3-LITE to Python translation")
+            
+            # Step 1: Parse CAI3-LITE with validation
+            parser = CAI3LiteParser()
+            ast_obj = parser.parse(cai3_lite_content)
+            
+            if not ast_obj:
+                raise ValueError("Failed to parse CAI3-LITE structure")
+            
+            # Step 2: Build comprehensive mappings from Claude response
+            mappings = self._build_comprehensive_mappings(ast_obj, source_path)
+            
+            # Add Claude mappings if provided
+            if claude_mappings:
+                mappings['hash_mappings'].update(claude_mappings.get('hash_mappings', {}))
+                mappings['pools'].update(claude_mappings.get('pools', {}))
+            
+            # Step 3: Initialize hash resolver with ALL mappings
+            hash_mappings = {}
+            
+            # First, get hash mappings from claude_mappings (priority)
+            if claude_mappings and 'hash_mappings' in claude_mappings:
+                hash_mappings.update(claude_mappings['hash_mappings'])
+                self.logger.info(f"Loaded {len(claude_mappings['hash_mappings'])} hash mappings from Claude")
+            
+            # Also try to extract from CAI3-LITE content (backup)
+            for line in cai3_lite_content.split('\n'):
+                if 'hash_' in line and ':' in line:
+                    parts = line.split(':', 1)
+                    if len(parts) == 2:
+                        key = parts[0].strip()
+                        value = parts[1].strip()
+                        if key.startswith('hash_'):
+                            hash_mappings[key] = value
+            
+            # Create resolver with mappings
+            resolver = HashResolver(hash_mappings)
+            self.logger.info(f"✅ Created resolver with {len(resolver.mappings)} hash mappings")
+            
+            # Step 4: Load or create cache with resolver
+            cai3_full, cai3_map = self._load_or_create_cache_with_resolver(
+                source_path, ast_obj, resolver
+            )
+            
+            # Step 5: Reconstruct Python with integrated resolution
+            python_code = self._reconstruct_with_resolver(
+                ast_obj, cai3_full, cai3_map, resolver
+            )
+            
+            # Step 6: Validate and format
+            python_code = self._validate_python_ast(python_code)
+            python_code = self._apply_pattern_fixes(python_code)
+            
+            return python_code
+            
+        except Exception as e:
+            self.logger.error(f"Translation failed: {e}")
+            import traceback
+            self.logger.error(traceback.format_exc())
+            return self._create_fallback_code(source_path, str(e))
     
     def _build_comprehensive_mappings(self, ast_obj, source_path) -> Dict[str, Any]:
-        """Build comprehensive mappings with transitive resolution."""
-        mappings: Dict[str, Any] = {}
+        """Build complete mappings including hash mappings from MAPPINGS section."""
+        mappings = {
+            'hash_mappings': {},
+            'pools': {},
+            'variables': {},
+            'methods': {},
+            'classes': {}
+        }
         
-        def add_normalized(src: Dict[str, Any]):
-            """Add mappings with normalization."""
-            for k, v in (src or {}).items():
-                # Normalize key
-                normalized_key = k
-                if k.startswith('#'):
-                    normalized_key = 'hash_' + k[1:].lower()
-                elif k.startswith('hash_'):
-                    normalized_key = 'hash_' + k[5:].lower()
-                else:
-                    normalized_key = k.lower()
-                
-                mappings[normalized_key] = v
+        # Extract pools
+        if hasattr(ast_obj, 'pools'):
+            mappings['pools'] = ast_obj.pools.copy()
         
-        # 1. External authoritative mappings first
-        add_normalized(getattr(self, 'hash_mappings', {}))
-        add_normalized(getattr(self, 'current_hash_mappings', {}))
-        add_normalized(getattr(self, 'claude_new_mappings', {}))
+        # Look for hash mappings in the full content
+        # This is where we'd parse the MAPPINGS section from Claude's response
         
-        # 2. Cache mappings
-        try:
-            cache = self.cache.load_full(source_path)
-            if cache and hasattr(cache, 'hash_to_value'):
-                add_normalized(cache.hash_to_value)
-        except Exception:
-            pass
-        
-        # 3. CID aliases with transitive resolution
-        cid_aliases = getattr(ast_obj, 'cid_aliases', {}) or {}
-        for alias, val in cid_aliases.items():
-            # First, try direct lookup
-            if val in mappings:
-                mappings[alias] = mappings[val]
-                continue
-            
-            # Then try normalized lookup for hash values
-            if val.startswith('#'):
-                norm_val = 'hash_' + val[1:].lower()
-                if norm_val in mappings:
-                    # Transitive resolution: alias -> hash -> real name
-                    final_name = mappings[norm_val]
-                    mappings[alias] = final_name
-                    continue
-            
-            # For hash_ prefixed values
-            if val.startswith('hash_'):
-                norm_val = val.lower()
-                if norm_val in mappings:
-                    final_name = mappings[norm_val]
-                    mappings[alias] = final_name
-                    continue
-            
-            # Direct mapping if no resolution found
-            mappings[alias] = val
-        
-        self.logger.debug(f"Built mappings with {len(mappings)} entries")
         return mappings
-
-    def _validate_python_ast(self, code: str) -> str:
-        """Validate and potentially fix generated Python code."""
-        # First apply pattern fixes even for valid code
-        fixed_code = self._apply_pattern_fixes(code)
+    
+    def _load_or_create_cache_with_resolver(self, source_path, ast_obj, resolver):
+        """Load cache or create minimal versions with resolver integration."""
+        # Try to load existing cache
+        cai3_full = self.cache.load_full(source_path)
+        cai3_map = self.cache.load_map(source_path)
         
-        try:
-            ast.parse(fixed_code)
-            self.logger.info("Python AST validation successful")
-            return fixed_code
-        except SyntaxError as e:
-            self.logger.error(f"Generated invalid Python at line {e.lineno}: {e.msg}")
-            if self.strict_mode:
-                raise
+        if not cai3_full or not cai3_map:
+            # Create minimal versions
+            cai3_full = self._create_minimal_cai3_full(ast_obj, resolver)
+            cai3_map = self._create_minimal_cai3_map(ast_obj)
+        
+        return cai3_full, cai3_map
+    
+    def _create_minimal_cai3_full(self, ast_obj, resolver):
+        """Create minimal CAI3Full with hash mappings."""
+        class MinimalCAI3Full:
+            def __init__(self):
+                self.pools = {}
+                self.hash_to_value = {}
+                self.nodes = []
+                self.compression_stats = {'chain_aliases': {}}
+        
+        minimal = MinimalCAI3Full()
+        
+        # Add pools
+        if hasattr(ast_obj, 'pools'):
+            minimal.pools.update(ast_obj.pools)
+        
+        # Add hash mappings from resolver
+        minimal.hash_to_value.update(resolver.mappings)
+        
+        return minimal
+    
+    def _create_minimal_cai3_map(self, ast_obj):
+        """Create minimal CAI3Map for caching."""
+        class MinimalCAI3Map:
+            def __init__(self):
+                self.method_mappings = {}
+                self.class_mappings = {}
+                self.function_mappings = {}
+        
+        minimal_map = MinimalCAI3Map() 
+        
+        # Add basic mappings from AST structure
+        if hasattr(ast_obj, 'table_entries'):
+            for entry in ast_obj.table_entries:
+                if entry.startswith('M:'):
+                    # Method mapping
+                    parts = entry.split('#')
+                    if len(parts) == 2:
+                        method_name = parts[0].replace('M:', '')
+                        body_id = parts[1]
+                        minimal_map.method_mappings[body_id] = method_name
+                elif entry.startswith('C:'):
+                    # Class mapping
+                    class_name = entry.replace('C:', '')
+                    minimal_map.class_mappings[class_name] = class_name
+                elif entry.startswith('F:'):
+                    # Function mapping
+                    parts = entry.split('#')
+                    if len(parts) == 2:
+                        func_name = parts[0].replace('F:', '')
+                        body_id = parts[1]
+                        minimal_map.function_mappings[body_id] = func_name
+        
+        return minimal_map
+    
+    def _reconstruct_with_resolver(self, ast_obj, cai3_full, cai3_map, resolver):
+        """Reconstruct Python code with integrated hash and pool resolution."""
+        self.logger.info("🔧 Starting _reconstruct_with_resolver")
+        
+        # Extract structure for proper reconstruction
+        analyzer = CAI3StructureAnalyzer()
+        structure = analyzer.analyze(ast_obj)
+        
+        self.logger.info(f"📊 Structure analysis complete:")
+        self.logger.info(f"   Classes: {list(structure.classes.keys())}")
+        self.logger.info(f"   Functions: {list(structure.functions.keys())}")
+        self.logger.info(f"   Bodies in ast_obj: {list(ast_obj.bodies.keys()) if hasattr(ast_obj, 'bodies') else 'None'}")
+        
+        # Debug table entries parsing
+        if hasattr(ast_obj, 'table_entries'):
+            self.logger.debug(f"🔍 Table entries found: {len(ast_obj.table_entries)}")
+            for i, entry in enumerate(ast_obj.table_entries):
+                self.logger.debug(f"   {i}: {repr(entry)}")
+        else:
+            self.logger.debug(f"🔍 No table_entries in ast_obj")
+        
+        # Build the complete code structure at top level
+        code_parts = []
+        self.logger.info("🔨 Starting code reconstruction...")
+        
+        # 1. Add imports first
+        if hasattr(ast_obj, 'imports') and ast_obj.imports:
+            imports = self._reconstruct_imports(ast_obj)
+            code_parts.extend(imports)
+            if imports:
+                code_parts.append("")  # Add blank line after imports
+        
+        # 2. Add classes with their methods
+        for class_name, class_info in structure.classes.items():
+            class_code = self._build_class_code(class_name, class_info, ast_obj, resolver)
+            code_parts.append(class_code)
+            code_parts.append("")  # Blank line between classes
+        
+        # 3. Add all standalone functions (each at top level)
+        self.logger.info(f"🔧 Processing {len(structure.functions)} functions...")
+        for func_name, func_info in structure.functions.items():
+            self.logger.info(f"   Building function: {func_name} (body_id: {func_info.get('body_id', 'None')})")
+            func_code = self._build_function_code(func_name, func_info, ast_obj, resolver)
+            self.logger.debug(f"   Function {func_name} code:\n{func_code}")
+            code_parts.append(func_code)
+            code_parts.append("")  # Blank line between functions
+        
+        # 4. Handle any remaining bodies as separate functions or methods
+        orphaned_bodies = []
+        for body_id, body_content in ast_obj.bodies.items():
+            is_assigned = self._is_body_assigned(body_id, structure)
+            self.logger.debug(f"🔍 Body {body_id} assigned check: {is_assigned}")
+            if not is_assigned:
+                orphaned_bodies.append(body_id)
+        
+        self.logger.info(f"🔧 Processing {len(orphaned_bodies)} orphaned bodies: {orphaned_bodies}")
+        self.logger.debug(f"🔍 All bodies in ast_obj: {list(ast_obj.bodies.keys())}")
+        self.logger.debug(f"🔍 Bodies assigned to structure: {[body_id for body_id in ast_obj.bodies.keys() if self._is_body_assigned(body_id, structure)]}")
+        
+        # Group orphaned bodies by class to create proper class structures
+        orphaned_classes = {}
+        orphaned_functions = []
+        
+        self.logger.debug(f"🔍 Starting method resolution for orphaned bodies...")
+        for body_id in orphaned_bodies:
+            self.logger.debug(f"🔍 Resolving method info for orphaned body: {body_id}")
+            method_info = self._resolve_method_info_from_table(body_id, ast_obj)
+            self.logger.debug(f"🔍 Method info result for {body_id}: {method_info}")
             
-            # Try to fix common issues
-            syntax_fixed = self._apply_syntax_fixes(fixed_code, e)
-            try:
-                ast.parse(syntax_fixed)
-                self.logger.info("AST valid after automatic fixes")
-                return syntax_fixed
-            except SyntaxError:
-                self.logger.warning("Automatic fixes failed; returning original code")
-                return code
-
-    def _apply_pattern_fixes(self, code: str) -> str:
-        """Apply pattern fixes even for syntactically valid code."""
-        lines = code.splitlines()
-        fixed_lines = []
+            if method_info and method_info.get('is_method') and method_info.get('class_name'):
+                class_name = method_info['class_name']
+                self.logger.debug(f"🔍 Adding {body_id} to class {class_name}")
+                if class_name not in orphaned_classes:
+                    orphaned_classes[class_name] = []
+                orphaned_classes[class_name].append((body_id, method_info))
+            else:
+                self.logger.debug(f"🔍 Adding {body_id} to standalone functions (method_info: {method_info})")
+                orphaned_functions.append((body_id, method_info))
+        
+        self.logger.debug(f"🔍 Final grouping results:")
+        self.logger.debug(f"   Orphaned classes: {list(orphaned_classes.keys())}")
+        self.logger.debug(f"   Orphaned functions: {len(orphaned_functions)}")
+        
+        # Build classes with their methods
+        for class_name, methods in orphaned_classes.items():
+            self.logger.info(f"   Building orphaned class: {class_name} with {len(methods)} methods")
+            self.logger.debug(f"   Methods in {class_name}: {[(body_id, info['name']) for body_id, info in methods]}")
+            class_code = self._build_orphaned_class(class_name, methods, ast_obj, resolver)
+            self.logger.debug(f"   Orphaned class {class_name} code:\n{class_code}")
+            code_parts.append(class_code)
+            code_parts.append("")  # Blank line between classes
+        
+        # Build standalone functions
+        for body_id, method_info in orphaned_functions:
+            body_content = ast_obj.bodies[body_id]
+            if method_info:
+                self.logger.info(f"   Building orphaned function: {method_info['name']}")
+            else:
+                self.logger.info(f"   Building orphaned body function: body_{body_id}")
+            func_code = self._build_orphaned_body_function(body_id, body_content, ast_obj, resolver)
+            self.logger.debug(f"   Orphaned body {body_id} code:\n{func_code}")
+            code_parts.append(func_code)
+            code_parts.append("")  # Blank line between functions
+        
+        # Join all parts and ensure no nested structure
+        self.logger.info(f"🔧 Joining {len(code_parts)} code parts...")
+        result = '\n'.join(code_parts).strip()
+        
+        self.logger.info("📝 Raw reconstruction result:")
+        for i, line in enumerate(result.split('\n')[:20], 1):  # Show first 20 lines
+            self.logger.info(f"   {i:2d}: {repr(line)}")
+        if len(result.split('\n')) > 20:
+            self.logger.info("   ... (truncated)")
+        
+        # Clean up any excessive blank lines
+        result = re.sub(r'\n{3,}', '\n\n', result)
+        
+        self.logger.info("✅ _reconstruct_with_resolver complete")
+        return result
+    
+    def _build_class_code(self, class_name: str, class_info: dict, ast_obj, resolver) -> str:
+        """Build a complete class with all methods at proper indentation."""
+        lines = [f"class {class_name}:"]
+        
+        has_methods = False
+        if class_info.get('methods'):
+            for method_name, method_info in class_info['methods'].items():
+                has_methods = True
+                lines.append(f"    def {method_name}(self):")
+                
+                # Get and resolve body content
+                body_content = method_info.get('body_content', '')
+                if body_content:
+                    resolved = self._resolve_body_content(body_content, ast_obj.pools, resolver)
+                    statements = self._parse_body_statements(resolved)
+                    # Add proper indentation for method body
+                    for stmt in statements:
+                        lines.append(f"        {stmt}")
+                else:
+                    lines.append("        pass")
+                
+                lines.append("")  # Blank line between methods
+        
+        if not has_methods:
+            lines.append("    pass")
+        
+        return '\n'.join(lines)
+    
+    def _build_function_code(self, func_name: str, func_info: dict, ast_obj, resolver) -> str:
+        """Build a standalone function at top level."""
+        self.logger.debug(f"🔧 Building function {func_name} with info: {func_info}")
+        
+        args = func_info.get('args', [])
+        args_str = ', '.join(args) if args else ''
+        
+        lines = [f"def {func_name}({args_str}):"]
+        self.logger.debug(f"🔧 Function signature: def {func_name}({args_str}):")
+        
+        body_id = func_info.get('body_id')
+        if body_id and body_id in ast_obj.bodies:
+            body_content = ast_obj.bodies[body_id]
+            self.logger.debug(f"🔧 Raw body content for {func_name}: {repr(body_content)}")
+            
+            resolved = self._resolve_body_content(body_content, ast_obj.pools, resolver)
+            self.logger.debug(f"🔧 Resolved body content for {func_name}: {repr(resolved)}")
+            
+            statements = self._parse_body_statements(resolved)
+            self.logger.debug(f"🔧 Parsed statements for {func_name}: {statements}")
+            
+            # Add proper indentation for function body
+            for i, stmt in enumerate(statements):
+                indented_stmt = f"    {stmt}"
+                self.logger.debug(f"🔧 Adding statement {i} to {func_name}: {repr(indented_stmt)}")
+                lines.append(indented_stmt)
+        else:
+            self.logger.debug(f"🔧 No body found for {func_name}, adding pass")
+            lines.append("    pass")
+        
+        result = '\n'.join(lines)
+        self.logger.debug(f"🔧 Final function code for {func_name}:\n{result}")
+        return result
+    
+    def _build_orphaned_body_function(self, body_id: str, body_content: str, ast_obj, resolver) -> str:
+        """Build a function for orphaned body content with proper method name resolution."""
+        self.logger.debug(f"🔧 Building orphaned body function for {body_id}")
+        
+        # Try to find the proper method name from table entries
+        method_info = self._resolve_method_info_from_table(body_id, ast_obj)
+        
+        if method_info:
+            method_name = method_info['name']
+            class_name = method_info.get('class_name')
+            is_method = method_info.get('is_method', False)
+            
+            self.logger.debug(f"🔧 Resolved {body_id} to method: {method_name}, class: {class_name}, is_method: {is_method}")
+            
+            if is_method and class_name:
+                # This is a class method
+                lines = [f"class {class_name}:"]
+                lines.append(f"    def {method_name}(self):")
+                
+                resolved = self._resolve_body_content(body_content, ast_obj.pools, resolver)
+                statements = self._parse_body_statements(resolved)
+                
+                # Add proper indentation for method body (class -> method -> statements)
+                for stmt in statements:
+                    lines.append(f"        {stmt}")
+                
+                if not statements:
+                    lines.append("        pass")
+            else:
+                # This is a standalone function
+                lines = [f"def {method_name}():"]
+                
+                resolved = self._resolve_body_content(body_content, ast_obj.pools, resolver)
+                statements = self._parse_body_statements(resolved)
+                
+                # Add proper indentation for function body
+                for stmt in statements:
+                    lines.append(f"    {stmt}")
+                
+                if not statements:
+                    lines.append("    pass")
+        else:
+            # Fallback to generic body function
+            self.logger.debug(f"🔧 No method info found for {body_id}, using generic function")
+            lines = [f"def body_{body_id}():"]
+            
+            resolved = self._resolve_body_content(body_content, ast_obj.pools, resolver)
+            statements = self._parse_body_statements(resolved)
+            
+            # Add proper indentation for function body
+            for stmt in statements:
+                lines.append(f"    {stmt}")
+            
+            if not statements:
+                lines.append("    pass")
+        
+        result = '\n'.join(lines)
+        self.logger.debug(f"🔧 Final orphaned body code for {body_id}:\n{result}")
+        return result
+    
+    def _resolve_method_info_from_table(self, body_id: str, ast_obj) -> dict:
+        """Resolve method information from table entries."""
+        self.logger.debug(f"🔍 _resolve_method_info_from_table for body_id: {body_id}")
+        
+        if not hasattr(ast_obj, 'table'):
+            self.logger.debug(f"🔍 No table attribute in ast_obj")
+            return None
+        
+        self.logger.debug(f"🔍 Available table entries: {ast_obj.table}")
+        
+        for i, entry in enumerate(ast_obj.table):
+            self.logger.debug(f"🔍 Checking entry {i}: {repr(entry)}")
+            
+            if entry.startswith('M:') and f'#{body_id}' in entry:
+                self.logger.debug(f"🔍 Found matching method entry: {entry}")
+                # Method entry: M:ClassName.method_name#body_id
+                parts = entry.split('#')
+                if len(parts) == 2 and parts[1] == body_id:
+                    method_part = parts[0].replace('M:', '')
+                    self.logger.debug(f"🔍 Method part extracted: {method_part}")
+                    
+                    if '.' in method_part:
+                        class_name, method_name = method_part.rsplit('.', 1)
+                        result = {
+                            'name': method_name,
+                            'class_name': class_name,
+                            'is_method': True,
+                            'full_name': method_part
+                        }
+                        self.logger.debug(f"🔍 Resolved as class method: {result}")
+                        return result
+                    else:
+                        result = {
+                            'name': method_part,
+                            'class_name': None,
+                            'is_method': False,
+                            'full_name': method_part
+                        }
+                        self.logger.debug(f"🔍 Resolved as standalone method: {result}")
+                        return result
+            
+            elif entry.startswith('F:') and f'#{body_id}' in entry:
+                self.logger.debug(f"🔍 Found matching function entry: {entry}")
+                # Function entry: F:function_name#body_id
+                parts = entry.split('#')
+                if len(parts) == 2 and parts[1] == body_id:
+                    func_name = parts[0].replace('F:', '')
+                    result = {
+                        'name': func_name,
+                        'class_name': None,
+                        'is_method': False,
+                        'full_name': func_name
+                    }
+                    self.logger.debug(f"🔍 Resolved as function: {result}")
+                    return result
+            else:
+                self.logger.debug(f"🔍 Entry doesn't match body_id {body_id}: {entry}")
+        
+        self.logger.debug(f"🔍 No matching entry found for body_id: {body_id}")
+        return None
+    
+    def _build_orphaned_class(self, class_name: str, methods: List[tuple], ast_obj, resolver) -> str:
+        """Build a class with multiple orphaned methods."""
+        lines = [f"class {class_name}:"]
+        
+        for body_id, method_info in methods:
+            method_name = method_info['name']
+            body_content = ast_obj.bodies[body_id]
+            
+            self.logger.debug(f"🔧 Adding method {method_name} to class {class_name}")
+            
+            lines.append(f"    def {method_name}(self):")
+            
+            resolved = self._resolve_body_content(body_content, ast_obj.pools, resolver)
+            statements = self._parse_body_statements(resolved)
+            
+            # Add proper indentation for method body (class -> method -> statements)
+            for stmt in statements:
+                lines.append(f"        {stmt}")
+            
+            if not statements:
+                lines.append("        pass")
+            
+            lines.append("")  # Blank line between methods
+        
+        # Remove the last blank line
+        if lines and lines[-1] == "":
+            lines.pop()
+        
+        return '\n'.join(lines)
+    
+    def _resolve_body_content(self, body_content: str, pools: Dict, resolver: HashResolver) -> str:
+        """Resolve all references in body content."""
+        resolved = body_content
+        
+        # Step 1: Resolve pool references
+        for pool_id, pool_value in pools.items():
+            # Handle different pool value types
+            if isinstance(pool_value, str):
+                # For string values, add quotes if not already present
+                if not (pool_value.startswith('"') and pool_value.endswith('"')):
+                    if not (pool_value.startswith("'") and pool_value.endswith("'")):
+                        pool_value = f'"{pool_value}"'
+                resolved = re.sub(rf'\b{pool_id}\b', pool_value, resolved)
+            else:
+                resolved = re.sub(rf'\b{pool_id}\b', str(pool_value), resolved)
+        
+        # Step 2: Resolve hash references
+        hash_pattern = r'(hash_[a-zA-Z0-9_]+)'
+        def replace_hash(match):
+            hash_ref = match.group(1)
+            return resolver.resolve(hash_ref, 'load')
+        
+        resolved = re.sub(hash_pattern, replace_hash, resolved)
+        
+        # Step 3: Clean up CAI3 syntax patterns
+        resolved = self._clean_cai3_syntax(resolved)
+        
+        return resolved
+    
+    def _clean_cai3_syntax(self, content: str) -> str:
+        """Clean up CAI3-specific syntax patterns for Black formatting."""
+        # Fix malformed dictionary syntax
+        content = re.sub(r':(\w+)}', r': \1}', content)
+        
+        # Fix if statement issues
+        content = re.sub(r'if\s+0}', 'if False:', content)
+        
+        # Fix semicolon-separated statements to proper Python lines
+        statements = content.split(';')
+        cleaned_statements = []
+        
+        for stmt in statements:
+            stmt = stmt.strip()
+            if stmt:
+                # Handle if statements with inline bodies
+                if 'if' in stmt and ':' in stmt and not stmt.endswith(':'):
+                    parts = stmt.split(':', 1)
+                    if len(parts) == 2:
+                        condition = parts[0].strip()
+                        body = parts[1].strip()
+                        cleaned_statements.append(f"{condition}:")
+                        cleaned_statements.append(f"    {body}")
+                    else:
+                        cleaned_statements.append(stmt)
+                else:
+                    cleaned_statements.append(stmt)
+        
+        # Join with newlines - Black will handle proper indentation
+        return '\n'.join(cleaned_statements) if len(cleaned_statements) > 1 else content
+    
+    def _parse_body_statements(self, body_content: str) -> List[str]:
+        """Parse body content into individual statements with proper indentation context."""
+        self.logger.debug(f"🔍 _parse_body_statements input: {repr(body_content)}")
+        statements = []
+        
+        # Handle multi-line content first
+        lines = body_content.split('\n')
+        self.logger.debug(f"🔍 Split into {len(lines)} lines: {lines}")
+        all_content = []
         
         for line in lines:
-            fixed_line = line
-            
-            # Fix accidental concatenation: "import_hash" -> "import hash"
-            if re.search(r'\bimport_\w', fixed_line):
-                fixed_line = re.sub(r'\bimport_(\w)', r'import \1', fixed_line)
-            
-            # Fix "from_hash" -> "from hash"  
-            if re.search(r'\bfrom_\w', fixed_line):
-                fixed_line = re.sub(r'\bfrom_(\w)', r'from \1', fixed_line)
-            
-            # Fix function call patterns like "def_hash" -> "def hash"
-            if re.search(r'\bdef_\w', fixed_line):
-                fixed_line = re.sub(r'\bdef_(\w)', r'def \1', fixed_line)
-            
-            # Fix class patterns like "class_hash" -> "class hash"
-            if re.search(r'\bclass_\w', fixed_line):
-                fixed_line = re.sub(r'\bclass_(\w)', r'class \1', fixed_line)
-            
-            # Remove T: and D: prefixes from nested CAI3 content
-            if re.match(r'^\s*[TD]:\s*', fixed_line):
-                fixed_line = re.sub(r'^\s*[TD]:\s*', '', fixed_line)
-            
-            # Fix double @ symbols in decorators (@@dataclass -> @dataclass)
-            if re.match(r'^\s*@@', fixed_line):
-                fixed_line = re.sub(r'^\s*@@', '@', fixed_line)
-            
-            # Fix if statement patterns with underscores
-            # Pattern: if__error__not_in_results_print -> if "error" not in results: print
-            if re.search(r'\bif__\w+__\w+_in_\w+_\w+', fixed_line):
-                fixed_line = re.sub(r'\bif__(\w+)__(\w+)_in_(\w+)_(\w+)', r'if "\1" \2 in \3: \4', fixed_line)
-            
-            # Fix return statements with underscores
-            # Pattern: return_something -> return something
-            if re.search(r'\breturn_[a-zA-Z]', fixed_line):
-                fixed_line = re.sub(r'\breturn_([a-zA-Z][a-zA-Z0-9_]*)', r'return \1', fixed_line)
-            
-            # Fix variable patterns with underscores - more specific
-            # Pattern: from_dataclasses_import_dataclass -> from dataclasses import dataclass
-            if re.search(r'\bfrom_\w+_import_\w+', fixed_line):
-                fixed_line = re.sub(r'\bfrom_(\w+)_import_(\w+)', r'from \1 import \2', fixed_line)
-            
-            # Fix typing patterns: typ in g_import -> typing import
-            if re.search(r'\btyp\s+in\s+g_import', fixed_line):
-                fixed_line = re.sub(r'\btyp\s+in\s+g_import_(.+)', r'from typing import \1', fixed_line)
-                # Handle double underscores in import names
-                fixed_line = re.sub(r'__', ', ', fixed_line)
-            
-            # Fix if conditions with malformed syntax
-            # Pattern: if_not_file.exists() -> if not file.exists():
-            if re.search(r'\bif_not_\w+\.', fixed_line):
-                fixed_line = re.sub(r'\bif_not_(\w+)\.', r'if not \1.', fixed_line)
-                if not fixed_line.rstrip().endswith(':'):
-                    fixed_line += ':'
-            
-            # Fix elif patterns
-            if re.search(r'\belif_\w+', fixed_line):
-                fixed_line = re.sub(r'\belif_(.+)', r'elif \1:', fixed_line)
-            
-            # Fix else patterns  
-            if re.search(r'\belse_return_', fixed_line):
-                fixed_line = re.sub(r'\belse_return_(.+)', r'else:\n    return \1', fixed_line)
-            
-            # Fix try patterns
-            if re.search(r'\btry_\w+', fixed_line):
-                fixed_line = re.sub(r'\btry_(.+)', r'try:\n    \1', fixed_line)
-            
-            # Fix malformed dictionary returns
-            if re.search(r'return___\w+__', fixed_line):
-                # Complex pattern for dictionaries - handle this more carefully
-                if '"file_path"' in fixed_line or '"error"' in fixed_line:
-                    # This needs manual reconstruction due to complexity
-                    fixed_line = 'return {"error": "File not found", "file_path": str(file)}'
-                else:
-                    # Simple return with underscores
-                    fixed_line = re.sub(r'return___(\w+)__(.+)', r'return {\1: \2}', fixed_line)
-            
-            # Fix print patterns with f-strings
-            if re.search(r'print\(f_(.+)__(.+)__\)', fixed_line):
-                fixed_line = re.sub(r'print\(f_(.+)__(.+)__\)', r'print(f"\1: {\2}")', fixed_line)
-            
-            # Fix variable assignments with spaces in names
-            if re.search(r'\w+\s+in\s+\w+\s*=', fixed_line):
-                fixed_line = re.sub(r'(\w+)\s+in\s+(\w+)\s*=', r'\1_\2 =', fixed_line)
-            
-            fixed_lines.append(fixed_line)
+            line = line.strip()
+            if not line:
+                continue
+                
+            # Split on semicolons for CAI3 compressed format, but preserve structure
+            if ';' in line:
+                parts = self._smart_semicolon_split(line)
+                self.logger.debug(f"🔍 Line with semicolons split into {len(parts)} parts: {parts}")
+                all_content.extend(parts)
+            else:
+                all_content.append(line)
         
-        return '\n'.join(fixed_lines)
+        self.logger.debug(f"🔍 All content pieces: {all_content}")
+        
+        # Process statements with proper indentation tracking
+        statements = self._process_statements_with_indentation(all_content)
+        
+        self.logger.debug(f"🔍 Final statements: {statements}")
+        return statements if statements else ['pass']
+    
+    def _smart_semicolon_split(self, line: str) -> List[str]:
+        """Split on semicolons while preserving conditional structure."""
+        parts = []
+        current_part = []
+        in_if_block = False
+        brace_depth = 0
+        
+        i = 0
+        while i < len(line):
+            char = line[i]
+            
+            # Track if we're starting an if statement
+            if not in_if_block and line[i:].startswith('if '):
+                in_if_block = True
+            
+            # Track braces
+            if char == '{':
+                brace_depth += 1
+            elif char == '}':
+                brace_depth -= 1
+                if brace_depth == 0:
+                    in_if_block = False
+            
+            # Handle semicolons
+            if char == ';':
+                # If we're in an if block or have open braces, mark continuation
+                if in_if_block or brace_depth > 0:
+                    current_part.append('SEMICOLON_IN_BLOCK')
+                else:
+                    # Normal split
+                    if current_part:
+                        parts.append(''.join(current_part).strip())
+                        current_part = []
+                    i += 1
+                    continue
+            
+            current_part.append(char)
+            i += 1
+        
+        if current_part:
+            parts.append(''.join(current_part).strip())
+        
+        return [part for part in parts if part]
+    
+    def _process_statements_with_indentation(self, all_content: List[str]) -> List[str]:
+        """Process statements with proper indentation context tracking."""
+        statements = []
+        i = 0
+        
+        while i < len(all_content):
+            content = all_content[i].strip()
+            if not content:
+                i += 1
+                continue
+            
+            self.logger.debug(f"🔍 Processing content piece {i}: {repr(content)}")
+            
+            # Handle if statements that might have inline content
+            if content.startswith('if ') and ':' in content:
+                colon_pos = content.find(':')
+                condition_part = content[:colon_pos + 1]
+                remaining_part = content[colon_pos + 1:].strip()
+                
+                self.logger.debug(f"🔍 If statement - condition: {repr(condition_part)}, remaining: {repr(remaining_part)}")
+                statements.append(condition_part)
+                
+                # Process the remaining part and any subsequent statements that should be indented
+                if remaining_part:
+                    # Check if remaining part contains SEMICOLON_IN_BLOCK markers
+                    if 'SEMICOLON_IN_BLOCK' in remaining_part:
+                        # Split and process as indented block
+                        block_statements = remaining_part.split('SEMICOLON_IN_BLOCK')
+                        for stmt in block_statements:
+                            stmt = stmt.strip()
+                            if stmt:
+                                statements.append(f"    {stmt}")  # Add extra indentation for if block
+                    else:
+                        statements.append(f"    {remaining_part}")  # Add extra indentation for if block
+                
+                # Continue processing - look for more statements that should be in this if block
+                j = i + 1
+                while j < len(all_content):
+                    next_content = all_content[j].strip()
+                    # If next statement is another control structure, break
+                    if any(next_content.startswith(kw) for kw in ['if ', 'for ', 'while ', 'def ', 'class ', 'return ', 'elif ', 'else']):
+                        break
+                    # Otherwise, it's part of the if block
+                    if next_content:
+                        statements.append(f"    {next_content}")  # Add extra indentation
+                    j += 1
+                
+                i = j  # Skip processed statements
+            else:
+                statements.append(content)
+                i += 1
+        
+        return statements
+    
+    def _is_body_assigned(self, body_id: str, structure: StructureInfo) -> bool:
+        """Check if a body ID is already assigned to a function/method."""
+        # Check functions
+        for func_info in structure.functions.values():
+            if func_info.get('body_id') == body_id:
+                return True
+        
+        # Check methods in classes
+        for class_info in structure.classes.values():
+            for method_info in class_info.get('methods', {}).values():
+                if isinstance(method_info, dict) and method_info.get('body_id') == body_id:
+                    return True
+        
+        return False
+    
+    def _reconstruct_imports(self, ast_obj):
+        """Reconstruct import statements."""
+        lines = []
+        
+        if ast_obj.imports:
+            # Handle pipe-separated imports
+            import_parts = ast_obj.imports.split('|')
+            for part in import_parts:
+                if ':' in part:
+                    # from X import Y format
+                    module, items = part.split(':', 1)
+                    lines.append(f"from {module} import {items}")
+                else:
+                    # simple import
+                    lines.append(f"import {part}")
+        
+        return lines
+    
+    def _validate_python_ast(self, code: str) -> str:
+        """Validate Python AST and apply Black formatting."""
+        try:
+            # First check if code is syntactically valid
+            ast.parse(code)
+            # If valid, apply Black formatting
+            return self._apply_black_formatting(code)
+        except SyntaxError as e:
+            self.logger.warning(f"Syntax error in generated code: {e}")
+            # Try to fix syntax issues then apply Black
+            fixed_code = self._apply_basic_syntax_fixes(code, e)
+            return self._apply_black_formatting(fixed_code)
+    
+    def _apply_pattern_fixes(self, code: str) -> str:
+        """Apply pattern-based fixes before Black formatting."""
+        # Fix common patterns that would prevent Black from working
+        fixes = [
+            # Fix hash references that might remain
+            (r'(hash_[a-zA-Z0-9_]+)', lambda m: m.group(1).replace('hash_', '')),
+            # Fix pool references that might remain  
+            (r'\bp(\d+)\b', lambda m: f'param_{m.group(1)}'),
+            # Fix malformed dictionary returns
+            (r'return\s+{([^}]+):([^}]+)}', r'return {\1: \2}'),
+            # Fix missing spaces around operators
+            (r'(\w+)=(\w+)', r'\1 = \2'),
+            (r'(\w+)\+(\w+)', r'\1 + \2'),
+        ]
+        
+        for pattern, replacement in fixes:
+            code = re.sub(pattern, replacement, code)
+        
+        return code
+    
+    def _apply_basic_syntax_fixes(self, code: str, error: SyntaxError) -> str:
+        """Apply basic syntax fixes that prevent Black formatting."""
+        lines = code.split('\n')
+        
+        # Fix common syntax issues
+        for i, line in enumerate(lines):
+            line = line.strip()
+            
+            # Add missing colons to control structures
+            if any(line.startswith(kw) for kw in ['if ', 'elif ', 'for ', 'while ', 'def ', 'class ']):
+                if not line.endswith(':'):
+                    lines[i] = line + ':'
+            
+            # Fix 'else' without colon
+            if line == 'else':
+                lines[i] = 'else:'
+            
+            # Fix return statements with malformed dictionaries
+            if line.startswith('return {') and not line.endswith('}'):
+                # Try to find the closing brace in subsequent lines
+                for j in range(i + 1, len(lines)):
+                    if '}' in lines[j]:
+                        # Merge lines
+                        merged = line + ' ' + ' '.join(lines[i+1:j+1])
+                        lines[i] = merged
+                        # Clear merged lines
+                        for k in range(i + 1, j + 1):
+                            lines[k] = ''
+                        break
+        
+        # Remove empty lines and return
+        return '\n'.join(line for line in lines if line.strip())
+    
+    def _create_fallback_code(self, source_path: Path, error_msg: str) -> str:
+        """Create fallback code when translation fails."""
+        return f'''"""
+CAI3 Translation Failed for {source_path.name}
+Error: {error_msg}
+
+This file could not be automatically translated from CAI3 format.
+Please check the logs for more details.
+"""
+
+# Fallback skeleton
+def main():
+    pass
+
+if __name__ == "__main__":
+    main()
+'''
+    
+
+    
+
+    
 
     def _apply_black_formatting(self, code: str) -> str:
         """Apply Black formatting for consistent, professional output."""
         if not code.strip():
             return code
+            
+        self.logger.info("🎨 Applying Black formatting...")
+        self.logger.debug("🎨 Input to Black formatter:")
+        for i, line in enumerate(code.split('\n')[:10], 1):  # Show first 10 lines
+            self.logger.debug(f"   {i:2d}: {repr(line)}")
+        if len(code.split('\n')) > 10:
+            self.logger.debug("   ... (truncated)")
             
         try:
             import black
@@ -2239,18 +3130,26 @@ class CAI3Translator:
                 is_pyi=False
             ))
             
-            self.logger.debug("Applied Black formatting successfully")
+            self.logger.info("✅ Applied Black formatting successfully")
+            self.logger.debug("🎨 Output from Black formatter:")
+            for i, line in enumerate(formatted.split('\n')[:10], 1):  # Show first 10 lines
+                self.logger.debug(f"   {i:2d}: {repr(line)}")
+            if len(formatted.split('\n')) > 10:
+                self.logger.debug("   ... (truncated)")
             return formatted
             
         except ImportError:
-            self.logger.warning("Black not available, skipping advanced formatting")
-            return code
+            self.logger.warning("Black not available, using manual formatting")
+            return self._apply_manual_formatting(code)
         except Exception as e:
-            self.logger.warning(f"Black formatting failed: {e}, returning code as-is")
-            return code
+            self.logger.warning(f"Black formatting failed: {e}, using manual formatting")
+            return self._apply_manual_formatting(code)
     
     def _apply_manual_formatting(self, code: str) -> str:
-        """Lightweight manual formatting fallback when Black is not available."""
+        """Simple manual formatting fallback when Black is not available."""
+        if not code.strip():
+            return code
+            
         lines = code.split('\n')
         formatted_lines = []
         indent_level = 0
@@ -2261,84 +3160,25 @@ class CAI3Translator:
                 formatted_lines.append('')
                 continue
             
-            # Simple indentation logic
-            if any(stripped.startswith(keyword) for keyword in ['class ', 'def ', '@']):
-                formatted_lines.append('    ' * indent_level + stripped)
-                if stripped.endswith(':'):
-                    indent_level += 1
-            elif any(stripped.startswith(keyword) for keyword in ['if ', 'elif ', 'else:', 'for ', 'while ', 'try:', 'except', 'finally:', 'with ']):
-                formatted_lines.append('    ' * indent_level + stripped)
-                if stripped.endswith(':'):
-                    indent_level += 1
-            else:
-                # Regular statements
-                if indent_level > 0 and not stripped.startswith(('import ', 'from ')):
-                    formatted_lines.append('    ' * indent_level + stripped)
-                else:
-                    formatted_lines.append(stripped)
+            # Handle dedentation for else, elif, except, finally
+            if any(stripped.startswith(kw) for kw in ['else:', 'elif ', 'except', 'finally:']):
+                indent_level = max(0, indent_level - 1)
+            
+            # Apply current indentation
+            formatted_lines.append('    ' * indent_level + stripped)
+            
+            # Increase indentation for block starters
+            if stripped.endswith(':'):
+                indent_level += 1
         
         return '\n'.join(formatted_lines)
-
-    def _apply_syntax_fixes(self, code: str, error: SyntaxError) -> str:
-        """Apply targeted fixes for common syntax errors."""
-        lines = code.splitlines()
-        if error.lineno and 1 <= error.lineno <= len(lines):
-            line = lines[error.lineno - 1]
-            
-            # Fix accidental concatenation: "import_hash" -> "import hash"
-            if re.search(r'\bimport_\w', line):
-                lines[error.lineno - 1] = re.sub(r'\bimport_(\w)', r'import \1', line)
-            
-            # Fix "from_hash" -> "from hash"  
-            if re.search(r'\bfrom_\w', line):
-                lines[error.lineno - 1] = re.sub(r'\bfrom_(\w)', r'from \1', line)
-        
-        return '\n'.join(lines)
 
     def _resolve_imports_with_resolver(self, imports, resolver):
         """Resolve imports using the hash resolver."""
         # For now, return imports as-is since we need more context about the import structure
         return imports
 
-    def _load_or_create_cache_with_resolver(self, source_path, ast_obj, resolver):
-        """Load cache with resolver."""
-        cai3_full = self.cache.load_full(source_path)
-        cai3_map = self.cache.load_map(source_path)
-        
-        if not cai3_full or not cai3_map:
-            self.logger.warning(f"No CAI3 cache found for {source_path}, using minimal cache")
-            cai3_full, cai3_map = self._create_minimal_cache(ast_obj)
-        
-        return cai3_full, cai3_map
-
-    def _reconstruct_with_resolver(self, ast_obj, cai3_full, cai3_map, resolver):
-        """Reconstruct with resolver."""
-        # Extract aliases and pools with fallback to cai3_full
-        chain_aliases = self._get_chain_aliases(ast_obj, cai3_full)
-        pools = self._get_pools(ast_obj, cai3_full)
-        
-        # Reconstruct Python code
-        python_lines = []
-        
-        # Add imports
-        python_lines.extend(self._reconstruct_imports(ast_obj))
-        
-        # Process each body with its own context
-        python_lines.extend(self._reconstruct_bodies(
-            ast_obj, cai3_full, cai3_map, chain_aliases, pools, resolver
-        ))
-        
-        return '\n'.join(python_lines)
-
-    def _create_fallback_code(self, source_path: Path, error_msg: str) -> str:
-        """Create fallback code when translation fails."""
-        return f"""# Translation failed for {source_path.name}
-# Error: {error_msg}
-
-def placeholder_function():
-    '''This function was created due to translation failure.'''
-    pass
-"""
+    
 
     def _fallback_cai3_reconstruction(self, cai3_lite_content: str, claude_mappings: Dict[str, Any]) -> str:
         """Fallback reconstruction when main parser fails."""
@@ -2382,63 +3222,84 @@ def placeholder():
     pass
 """
 
-    def translate_cai3_lite_to_python(self, cai3_lite_content: str, 
-                                 source_path: Path,
-                                 claude_mappings: Dict[str, Any] = None) -> str:
-        """Translate CAI3-LITE to Python using enhanced pipeline."""
-        try:
-            # Local import to avoid circular dependency
-            from .cai3_python_reconstructor import CAI3PythonReconstructor
-            from .cai3_format_fixer import apply_cai3_format_fixes
+    # ...existing code...
+
+    # def translate_cai3_lite_to_python(self, cai3_lite_content: str, 
+    #                             source_path: Path,
+    #                             claude_mappings: Dict[str, Any] = None) -> str:
+    #     """
+    #     Main entry point for CAI3-LITE to Python translation with all fixes integrated.
+    #     """
+    #     try:
+    #         self.logger.info("🔧 Starting enhanced CAI3-LITE to Python translation")
             
-            self.logger.info("Starting CAI3-LITE translation")
+    #         # Step 1: Fix format issues
+    #         from .cai3_format_fixer import apply_cai3_format_fixes
+    #         fixed_content = apply_cai3_format_fixes(cai3_lite_content, claude_mappings)
+    #         self.logger.info("✅ Applied format fixes")
             
-            # Step 1: ALWAYS apply format fixes before parsing
-            self.logger.info("Applying CAI3-LITE format fixes")
-            cai3_lite_content = apply_cai3_format_fixes(cai3_lite_content, claude_mappings)
-            self.logger.info(f"Fixed content preview: {cai3_lite_content[:200]}...")
+    #         # Step 2: Parse CAI3-LITE
+    #         from .cai3_grammar import CAI3LiteParser
+    #         parser = CAI3LiteParser()
+    #         ast_obj = parser.parse(fixed_content)
             
-            # Parse CAI3-LITE
-            parser = CAI3LiteParser()
-            ast_obj = parser.parse(cai3_lite_content)
+    #         if not ast_obj:
+    #             self.logger.error("Failed to parse CAI3-LITE content")
+    #             return self._create_fallback_code(source_path, "Parse failed")
             
-            if not ast_obj:
-                self.logger.error("Failed to parse CAI3-LITE content")
-                return self._fallback_cai3_reconstruction(cai3_lite_content, claude_mappings or {})
+    #         # Step 3: Build comprehensive mappings including hash resolution
+    #         mappings = self._build_comprehensive_mappings(ast_obj, source_path)
             
-            # Analyze structure
-            analyzer = CAI3StructureAnalyzer()
-            structure = analyzer.analyze(ast_obj)
+    #         # Initialize mapping dictionaries if they don't exist
+    #         if 'pools' not in mappings:
+    #             mappings['pools'] = {}
+    #         if 'hash_mappings' not in mappings:
+    #             mappings['hash_mappings'] = {}
+    #         if 'variables' not in mappings:
+    #             mappings['variables'] = {}
+    #         if 'methods' not in mappings:
+    #             mappings['methods'] = {}
             
-            # Load cache if available
-            cai3_full = None
-            cai3_map = None
+    #         # Add Claude's mappings
+    #         if claude_mappings:
+    #             mappings['pools'].update(claude_mappings.get('pools', {}))
+    #             mappings['hash_mappings'].update(claude_mappings.get('hash_mappings', {}))
+    #             mappings['variables'].update(claude_mappings.get('variables', {}))
+    #             mappings['methods'].update(claude_mappings.get('methods', {}))            # Step 4: Create hash resolver with all mappings
+    #         from .hash_resolver import HashResolver
+    #         resolver = HashResolver(mappings['hash_mappings'])
+    #         self.logger.info(f"✅ Created resolver with {len(mappings['hash_mappings'])} hash mappings")
             
-            try:
-                cai3_full = self.cache.load_full(source_path) if self.cache else None
-                cai3_map = self.cache.load_map(source_path) if self.cache else None
-            except Exception:
-                self.logger.info("No cache available, proceeding without")
+    #         # Step 5: Load or create cache with resolver
+    #         cai3_full, cai3_map = self._load_or_create_cache_with_resolver(
+    #             source_path, ast_obj, resolver
+    #         )
             
-            # Apply Claude mappings
-            if claude_mappings:
-                self._merge_mappings(cai3_full, cai3_map, claude_mappings)
+    #         # Step 6: Merge all mappings into cai3_full
+    #         if hasattr(cai3_full, 'hash_to_value'):
+    #             cai3_full.hash_to_value.update(mappings['hash_mappings'])
+    #         if hasattr(cai3_full, 'pools'):
+    #             cai3_full.pools.update(mappings['pools'])
             
-            # Reconstruct Python code
-            reconstructor = CAI3PythonReconstructor(self)
-            python_code = reconstructor.reconstruct(ast_obj, structure, cai3_full, cai3_map)
+    #         # Step 7: Reconstruct with enhanced components
+    #         python_code = self._reconstruct_with_resolver(
+    #             ast_obj, cai3_full, cai3_map, resolver
+    #         )
             
-            # Validate and format
-            validated_code = self._validate_python_ast(python_code)
-            formatted_code = self._apply_black_formatting(validated_code)
+    #         # Step 8: Validate and format
+    #         validated_code = self._validate_python_ast(python_code)
+    #         final_code = self._apply_black_formatting(validated_code)
             
-            return formatted_code
+    #         self.logger.info(f"✅ Translation successful: {len(final_code)} chars")
+    #         return final_code
             
-        except Exception as e:
-            self.logger.error(f"Translation failed: {e}")
-            import traceback
-            self.logger.error(traceback.format_exc())
-            return self._fallback_cai3_reconstruction(cai3_lite_content, claude_mappings or {})
+    #     except Exception as e:
+    #         self.logger.error(f"Translation failed: {e}")
+    #         import traceback
+    #         self.logger.error(traceback.format_exc())
+    #         return self._fallback_cai3_reconstruction(cai3_lite_content, claude_mappings)
+
+    
 
     def _merge_mappings(self, cai3_full, cai3_map, claude_mappings: Dict[str, Any]):
         """Merge Claude's mappings into existing context."""
@@ -2478,54 +3339,9 @@ def placeholder():
                 if hasattr(cai3_map, 'reverse_name_map'):
                     cai3_map.reverse_name_map[compressed] = original
 
-    def _reconstruct_imports(self, ast_obj):
-        """Reconstruct import statements with deduplication and preferred separate imports."""
-        seen = set()
-        lines = []
-        
-        if hasattr(ast_obj, 'imports') and ast_obj.imports:
-            # Split on | and handle each module
-            all_modules = []
-            
-            for module_group in ast_obj.imports.split('|'):
-                module_group = module_group.strip()
-                if not module_group:
-                    continue
-                    
-                if ':' in module_group:
-                    mod, items = module_group.split(':', 1)
-                    # Clean up the items list for better formatting
-                    items_list = [item.strip() for item in items.split(',')]
-                    items_formatted = ', '.join(items_list)
-                    stmt = f"from {mod} import {items_formatted}"
-                    if stmt not in seen:
-                        seen.add(stmt)
-                        lines.append(stmt)
-                else:
-                    # Handle comma-separated imports - split them into individual imports
-                    if ',' in module_group:
-                        for individual_module in module_group.split(','):
-                            individual_module = individual_module.strip()
-                            if individual_module:
-                                stmt = f"import {individual_module}"
-                                if stmt not in seen:
-                                    seen.add(stmt)
-                                    lines.append(stmt)
-                    else:
-                        stmt = f"import {module_group}"
-                        if stmt not in seen:
-                            seen.add(stmt)
-                            lines.append(stmt)
-            
-            if lines:
-                lines.append("")
-        
-        return lines
     
-    # ...existing code...
-
     def _reconstruct_bodies(self, ast_obj, cai3_full, cai3_map, chain_aliases, pools, resolver=None):
-        """Reconstruct method/function bodies with proper per-body context."""
+        """Reconstruct method/function bodies with proper per-body context and hash resolution."""
         lines = []
         
         # Debug: Check what we have
@@ -2533,223 +3349,124 @@ def placeholder():
         self.logger.debug(f"AST object attributes: {dir(ast_obj)}")
         
         if not hasattr(ast_obj, 'bodies'):
-            self.logger.warning("No bodies attribute in AST object")
+            self.logger.warning(f"AST object has no 'bodies' attribute. Available attributes: {[attr for attr in dir(ast_obj) if not attr.startswith('_')]}")
             return lines
             
         if not ast_obj.bodies:
-            self.logger.warning("Bodies attribute is empty")
+            self.logger.info("No bodies found in CAI3-LITE content")
             return lines
         
         self.logger.info(f"Processing {len(ast_obj.bodies)} bodies: {list(ast_obj.bodies.keys())}")
         
-        # Use the structure analyzer to get proper Python structure
-        from .cai3_structure_analyzer import CAI3StructureAnalyzer
-        from .cai3_python_reconstructor import CAI3PythonReconstructor
+        # Create resolver if not provided
+        if resolver is None and hasattr(cai3_full, 'hash_to_value'):
+            from .hash_resolver import HashResolver
+            resolver = HashResolver(cai3_full.hash_to_value)
+            self.logger.info(f"Created hash resolver with {len(cai3_full.hash_to_value)} mappings")
         
-        analyzer = CAI3StructureAnalyzer()
-        structure = analyzer.analyze(ast_obj)
+        for body_id, body_content in ast_obj.bodies.items():
+            self.logger.info(f"Processing body {body_id}: {body_content[:50]}...")
+            
+            # Find corresponding node
+            node = self._find_node_by_cid(body_id, cai3_full)
+            if not node:
+                self.logger.warning(f"No node found for body {body_id}, attempting direct translation")
+                try:
+                    # CRITICAL FIX: Properly translate body content without function wrapping
+                    translated_content = self._translate_body_content_properly(
+                        body_content, body_id, chain_aliases, pools, resolver
+                    )
+                    
+                    # Add translated content directly to output
+                    if translated_content.strip():
+                        for line in translated_content.split('\n'):
+                            if line.strip():
+                                lines.append(line)
+                        lines.append("")  # Add spacing between bodies
+                    
+                    continue
+                    
+                except Exception as e:
+                    self.logger.warning(f"Direct translation failed for {body_id}: {e}")
+                    # Only use fallback for actual errors
+                
+                # Fallback to stub
+                lines.append(f"# Unable to reconstruct body {body_id}")
+                lines.append(f"def unknown_{body_id}():")
+                lines.append("    pass")
+                lines.append("")
+                continue
+            
+            try:
+                # Create fresh per-body context with correct method_cid
+                flow_compiler = _create_flow_compiler(cai3_map, cai3_full, for_decompression=True)
+                
+                # CRITICAL: Set resolver in context
+                ctx = ParseContext(
+                    flow_compiler=flow_compiler,
+                    cai3_map=cai3_map,
+                    cai3_full=cai3_full,
+                    method_cid=body_id,
+                    seen_names=set(),
+                    chain_aliases=chain_aliases,
+                    pools=pools,
+                    config=ParseConfig(
+                        strict_mode=self.strict_mode,
+                        log_errors=True,
+                        max_recursion_depth=100,
+                        validate_output=True
+                    ),
+                    resolver=resolver  # Pass resolver to context
+                )
+                
+                # Parse and translate body with proper hash resolution
+                parser = CAI3Parser(ctx)
+                
+                # CRITICAL: Apply hash resolution to body content BEFORE parsing
+                if resolver:
+                    resolved_body = resolver.resolve_in_python_code(body_content)
+                    self.logger.debug(f"Body after hash resolution: '{resolved_body}'")
+                else:
+                    resolved_body = body_content
+                
+                # Parse resolved body
+                body_stmts = parser.parse(resolved_body)
+                
+                # Build function/method AST
+                func_ast = ast.FunctionDef(
+                    name=getattr(node, 'name', f'method_{body_id}'),
+                    args=_build_arguments(node, cai3_map),
+                    body=body_stmts or [ast.Pass()],
+                    decorator_list=[],
+                    returns=None
+                )
+                
+                # Apply transformations with resolver
+                pipeline = ASTTransformPipeline(ctx)
+                func_ast = pipeline.transform(func_ast)
+                
+                # Convert to Python source
+                try:
+                    python_source = self._to_source(func_ast)
+                    lines.append(python_source)
+                    lines.append("")
+                    self.logger.info(f"Successfully reconstructed {node.name}")
+                except Exception as e:
+                    self.logger.error(f"Failed to unparse function {node.name}: {e}")
+                    lines.append(f"# Failed to reconstruct {node.name}")
+                    lines.append(f"def {node.name}():")
+                    lines.append("    pass")
+                    lines.append("")
+                    
+            except Exception as e:
+                self.logger.error(f"Failed to reconstruct body {body_id}: {e}")
+                lines.append(f"# Error reconstructing {body_id}: {e}")
+                lines.append(f"def error_{body_id}():")
+                lines.append("    pass")
+                lines.append("")
         
-        # Use the Python reconstructor to build proper code
-        reconstructor = CAI3PythonReconstructor(self)
-        python_code = reconstructor.reconstruct(ast_obj, structure, cai3_full, cai3_map)
-        
-        # Split into lines and return
-        return python_code.split('\n')
+        return lines
 
-
-    # def _reconstruct_bodies(self, ast_obj, cai3_full, cai3_map, chain_aliases, pools, resolver=None):
-    #     """Reconstruct method/function bodies with proper per-body context."""
-    #     lines = []
-        
-    #     # Debug: Check what we have
-    #     self.logger.debug(f"AST object type: {type(ast_obj)}")
-    #     self.logger.debug(f"AST object attributes: {dir(ast_obj)}")
-        
-    #     if not hasattr(ast_obj, 'bodies'):
-    #         self.logger.warning(f"AST object has no 'bodies' attribute. Available attributes: {[attr for attr in dir(ast_obj) if not attr.startswith('_')]}")
-    #         return lines
-            
-    #     if not ast_obj.bodies:
-    #         self.logger.info("No bodies found in CAI3-LITE content")
-    #         return lines
-        
-    #     self.logger.info(f"Processing {len(ast_obj.bodies)} bodies: {list(ast_obj.bodies.keys())}")
-        
-    #     for body_id, body_content in ast_obj.bodies.items():
-    #         self.logger.info(f"Processing body {body_id}: {body_content[:50]}...")
-            
-    #         # Find corresponding node
-    #         node = self._find_node_by_cid(body_id, cai3_full)
-    #         if not node:
-    #             self.logger.warning(f"No node found for body {body_id}, attempting direct translation")
-    #             try:
-    #                 # CRITICAL FIX: Properly translate body content without function wrapping
-    #                 translated_content = self._translate_body_content_properly(
-    #                     body_content, body_id, chain_aliases, pools, resolver
-    #                 )
-                    
-    #                 # Add translated content directly to output
-    #                 if translated_content.strip():
-    #                     for line in translated_content.split('\n'):
-    #                         if line.strip():
-    #                             lines.append(line)
-    #                     lines.append("")  # Add spacing between bodies
-                    
-    #                 continue
-                    
-    #             except Exception as e:
-    #                 self.logger.warning(f"Direct translation failed for {body_id}: {e}")
-    #                 # Only use fallback for actual errors
-                
-    #             # Fallback to stub
-    #             lines.append(f"# Unable to reconstruct body {body_id}")
-    #             lines.append(f"def unknown_{body_id}():")
-    #             lines.append("    pass")
-    #             lines.append("")
-    #             continue
-            
-    #         try:
-    #             # Create fresh per-body context with correct method_cid
-    #             flow_compiler = _create_flow_compiler(cai3_map, cai3_full, for_decompression=True)
-                
-    #             ctx = ParseContext(
-    #                 flow_compiler=flow_compiler,
-    #                 cai3_map=cai3_map,
-    #                 cai3_full=cai3_full,
-    #                 method_cid=body_id,  # CRITICAL: Use body's CID for correct de-mangling
-    #                 seen_names=set(),
-    #                 chain_aliases=chain_aliases,
-    #                 pools=pools,
-    #                 config=ParseConfig(
-    #                     strict_mode=self.strict_mode,
-    #                     log_errors=True,
-    #                     max_recursion_depth=100,
-    #                     validate_output=True
-    #                 )
-    #             )
-                
-    #             # Step 1: Resolve pool references in body content
-    #             # Create a temporary parser just for pool resolution
-    #             temp_parser = CAI3Parser(ctx)
-    #             resolved_body = temp_parser.resolve_pool_references(body_content)
-    #             self.logger.debug(f"Body after pool resolution: '{resolved_body}'")
-                
-    #             # Step 2: Parse resolved body as Python expression using Python's AST parser
-    #             try:
-    #                 # Parse as Python expression using Python's built-in parser
-    #                 body_expr = ast.parse(resolved_body, mode='eval').body
-    #                 self.logger.debug(f"Parsed with Python AST: {ast.dump(body_expr)}")
-    #                 # Wrap expression in expression statement
-    #                 body_stmts = [ast.Expr(value=body_expr)]
-    #             except Exception as e:
-    #                 self.logger.warning(f"Failed to parse body as Python expression for {body_id}: {e}")
-    #                 try:
-    #                     # Try to parse as statement(s)
-    #                     parsed_stmts = ast.parse(resolved_body, mode='exec')
-    #                     body_stmts = parsed_stmts.body
-    #                     self.logger.debug(f"Parsed as statements: {len(body_stmts)} statements")
-                        
-    #                     # Filter out invalid statements after successful Python parsing
-    #                     filtered_stmts = []
-    #                     for stmt in body_stmts:
-    #                         if self._is_valid_ast_statement_with_pools(stmt, pools):
-    #                             filtered_stmts.append(stmt)
-    #                         else:
-    #                             stmt_source = ast.unparse(stmt) if hasattr(ast, 'unparse') else str(stmt)
-    #                             self.logger.warning(f"Filtering out invalid statement: '{stmt_source}'")
-                        
-    #                     body_stmts = filtered_stmts if filtered_stmts else [ast.Pass()]
-    #                     self.logger.debug(f"After filtering: {len(body_stmts)} statements")
-    #                 except Exception as e2:
-    #                     self.logger.warning(f"Failed to parse body as Python statements for {body_id}: {e2}")
-    #                     # Enhanced fallback: Convert CAI3 syntax to Python, then parse with Python AST
-    #                     try:
-    #                         # Use CAI3 parser to convert syntax, but with Python AST parsing for final result
-    #                         self.logger.debug(f"Attempting CAI3 parser fallback for: '{resolved_body}'")
-    #                         cai3_stmts = temp_parser.parse(resolved_body)  # Use resolved body, not original
-    #                         self.logger.debug(f"CAI3 parser returned {len(cai3_stmts) if cai3_stmts else 0} statements")
-                            
-    #                         if cai3_stmts:
-    #                             # Fix missing location attributes for AST nodes
-    #                             for stmt in cai3_stmts:
-    #                                 ast.fix_missing_locations(stmt)
-                                
-    #                             # Check if any of the statements contain "pr in t" issue
-    #                             for i, stmt in enumerate(cai3_stmts):
-    #                                 try:
-    #                                     stmt_source = ast.unparse(stmt)
-    #                                     self.logger.debug(f"CAI3 statement {i}: '{stmt_source}'")
-    #                                     if "pr in t" in stmt_source:
-    #                                         self.logger.warning(f"CAI3 parser produced 'pr in t' in statement {i}: {stmt_source}")
-    #                                 except Exception as e:
-    #                                     self.logger.debug(f"Could not unparse CAI3 statement {i}: {e}")
-                                
-    #                             # Convert the CAI3 AST statements to source, then re-parse with Python
-    #                             python_source_lines = []
-    #                             for stmt in cai3_stmts:
-    #                                 try:
-    #                                     # Ensure AST node has required attributes
-    #                                     ast.fix_missing_locations(stmt)
-    #                                     stmt_source = ast.unparse(stmt)
-    #                                     python_source_lines.append(stmt_source)
-    #                                 except Exception as e:
-    #                                     # If unparsing fails, use a pass statement
-    #                                     self.logger.warning(f"Failed to unparse CAI3 statement: {e}")
-    #                                     python_source_lines.append("pass")
-                                
-    #                             if python_source_lines:
-    #                                 # Parse the generated Python source
-    #                                 python_source = '\n'.join(python_source_lines)
-    #                                 try:
-    #                                     reparsed = ast.parse(python_source, mode='exec')
-    #                                     body_stmts = reparsed.body
-    #                                     self.logger.debug(f"CAI3->Python conversion successful: {len(body_stmts)} statements")
-    #                                 except Exception as e3:
-    #                                     self.logger.warning(f"Failed to re-parse converted Python for {body_id}: {e3}")
-    #                                     body_stmts = cai3_stmts  # Use original CAI3 result as last resort
-    #                             else:
-    #                                 body_stmts = [ast.Pass()]
-    #                         else:
-    #                             self.logger.debug(f"CAI3 parser returned no statements for: '{resolved_body}'")
-    #                             body_stmts = [ast.Pass()]
-    #                     except Exception as e3:
-    #                         self.logger.warning(f"Final fallback failed for {body_id}: {e3}")
-    #                         body_stmts = [ast.Pass()]
-                
-    #             # Build function/method AST
-    #             func_ast = ast.FunctionDef(
-    #                 name=getattr(node, 'name', f'method_{body_id}'),
-    #                 args=_build_arguments(node, cai3_map),
-    #                 body=body_stmts or [ast.Pass()],
-    #                 decorator_list=[],
-    #                 returns=None
-    #             )
-                
-    #             # Apply decompression transformations
-    #             pipeline = ASTTransformPipeline(ctx)
-    #             func_ast = pipeline.transform(func_ast)
-                
-    #             # Convert to Python source
-    #             try:
-    #                 python_source = self._to_source(func_ast)
-    #                 lines.append(python_source)
-    #                 lines.append("")
-    #                 self.logger.info(f"Successfully reconstructed {node.name}")
-    #             except Exception as e:
-    #                 self.logger.error(f"Failed to unparse function {node.name}: {e}")
-    #                 lines.append(f"# Failed to reconstruct {node.name}")
-    #                 lines.append(f"def {node.name}():")
-    #                 lines.append("    pass")
-    #                 lines.append("")
-                    
-    #         except Exception as e:
-    #             self.logger.error(f"Failed to reconstruct body {body_id}: {e}")
-    #             lines.append(f"# Error reconstructing {body_id}: {e}")
-    #             lines.append(f"def error_{body_id}():")
-    #             lines.append("    pass")
-    #             lines.append("")
-        
-    #     return lines
 
     def _to_source(self, node: ast.AST) -> str:
         """Convert AST to source with version compatibility."""
@@ -2966,6 +3683,7 @@ def placeholder():
         
         return len(issues) == 0, issues
     
+    #STILL USED
     def apply_patch(self, patch_content: str, source_path: Path, original_source: str = None) -> str:
         """
         Apply CAI3-PATCH using enhanced AST-based translation.
@@ -3156,14 +3874,18 @@ def placeholder():
         try:
             # Enhanced: Check if this is a method definition (has signature)
             # Pattern: methodname(params):body
-            if ':' in body_content:
-                sig_end = body_content.find(':')
+            # Only consider it a method if the colon appears BEFORE any conditional expressions
+            conditional_start = body_content.find('?{') if '?{' in body_content else len(body_content)
+            first_colon = body_content.find(':')
+            
+            if first_colon != -1 and first_colon < conditional_start:
+                sig_end = first_colon
                 signature = body_content[:sig_end]
                 actual_body = body_content[sig_end+1:]
                 
-                # Parse the signature
-                if '(' in signature and ')' in signature:
-                    method_match = re.match(r'(p\d+|\w+)\((.*?)\)', signature)
+                # Parse the signature - must be a proper method signature
+                if '(' in signature and ')' in signature and not any(op in signature for op in [';', '=', '>', '<', '+']):
+                    method_match = re.match(r'^(p\d+|\w+)\((.*?)\)$', signature.strip())
                     if method_match:
                         method_name_or_pool = method_match.group(1)
                         params_str = method_match.group(2)

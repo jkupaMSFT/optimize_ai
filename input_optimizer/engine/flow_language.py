@@ -1462,7 +1462,7 @@ class FLOWCompiler:
         """
         if not lines:
             return None, 0
-        
+    
         line = lines[0].strip()
         
         # Check for RAW block first
@@ -1473,6 +1473,10 @@ class FLOWCompiler:
         line = self._fix_operator_spacing(line)
         
         try:
+            # Check for conditional expression FIRST before other patterns
+            if self._is_conditional_expression(line):
+                return self._parse_conditional_expression(line), 1
+        
             # Handle inline blocks first
             if '{' in line and '}' in line:
                 return self._parse_inline_statement(line), 1
@@ -1569,15 +1573,96 @@ class FLOWCompiler:
             return self._parse_expression(line), 1
             
         except Exception as parse_error:
-            # Use deterministic fallback from _parse_flow_statement_safe
-            error_id = self._stable_hash(line, 6)
-            logger.warning(f"Parse fail [{error_id}]: {line[:50]}...")
+            self.logger.warning(f"Failed to parse statement: {parse_error}")
+            return self._safe_parse_statement(line), 1
+
+    def _is_conditional_expression(self, line: str) -> bool:
+        """Check if line contains a conditional expression pattern."""
+        # Pattern: (condition?{true}:{false}) or variants
+        return '?' in line and '{' in line and '}' in line and ':' in line
+
+    def _parse_conditional_expression(self, expr: str) -> ast.AST:
+        """Parse CAI3 conditional expression (condition?{true}:{false}) to Python if-else."""
+        # Extract the conditional expression pattern
+        # Handle nested braces properly
+        pattern = r'\(([^?]+)\?\{([^}]+)\}:\{([^}]+)\}\)'
+        match = re.search(pattern, expr)
+        
+        if not match:
+            # Try simpler pattern without outer parens
+            pattern = r'([^?]+)\?\{([^}]+)\}:\{([^}]+)\}'
+            match = re.search(pattern, expr)
+        
+        if match:
+            condition_str = match.group(1).strip()
+            true_body = match.group(2).strip()
+            false_body = match.group(3).strip()
             
-            # Deterministic fallback: preserve as comment
-            comment_value = f"UNPARSED_{error_id}: {line}"
-            expr_node = ast.Expr(value=ast.Constant(value=comment_value))
-            return self._fix_ast_node_attributes(expr_node), 1
-    
+            # Parse the condition
+            condition = self._parse_condition_string(condition_str)
+            
+            # Parse the true and false branches
+            true_stmts = self._parse_conditional_body(true_body)
+            false_stmts = self._parse_conditional_body(false_body)
+            
+            # Create If node
+            return ast.If(
+                test=condition,
+                body=true_stmts,
+                orelse=false_stmts
+            )
+        
+        # Fallback for malformed conditional
+        return ast.Pass()
+
+    def _parse_conditional_body(self, body_str: str) -> List[ast.AST]:
+        """Parse body of conditional expression which may have multiple statements."""
+        statements = []
+        
+        # Split by semicolons for multiple statements
+        parts = body_str.split(';')
+        
+        for part in parts:
+            part = part.strip()
+            if not part:
+                continue
+                
+            # Handle special cases
+            if part == 'return':
+                statements.append(ast.Return(value=None))
+            elif part.startswith('return '):
+                # Parse return value
+                value_str = part[7:].strip()
+                try:
+                    value_ast = ast.parse(value_str, mode='eval').body
+                    statements.append(ast.Return(value=value_ast))
+                except:
+                    statements.append(ast.Return(value=ast.Constant(value=value_str)))
+            elif part.startswith('print('):
+                # Parse print statement
+                try:
+                    stmt_ast = ast.parse(part, mode='exec').body[0]
+                    statements.append(stmt_ast)
+                except:
+                    # Fallback: create print with string
+                    statements.append(
+                        ast.Expr(value=ast.Call(
+                            func=ast.Name(id='print', ctx=ast.Load()),
+                            args=[ast.Constant(value=part)],
+                            keywords=[]
+                        ))
+                    )
+            else:
+                # Try to parse as Python statement
+                try:
+                    parsed = ast.parse(part, mode='exec').body
+                    statements.extend(parsed)
+                except:
+                    # Fallback: expression statement
+                    statements.append(ast.Expr(value=ast.Constant(value=f"# {part}")))
+        
+        return statements if statements else [ast.Pass()]
+
     def _parse_inline_statement(self, line: str) -> ast.AST:
         """Parse an inline statement with braces"""
         # Extract the main part and the inline body

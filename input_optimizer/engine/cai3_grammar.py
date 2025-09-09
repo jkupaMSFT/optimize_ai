@@ -226,16 +226,15 @@ class CAI3LiteParser:
             try:
                 # Try to evaluate as Python literal for proper type conversion
                 value = _ast.literal_eval(value_str)
-                result[pool_id] = value
-            except (ValueError, SyntaxError):
-                # If literal_eval fails, handle as string
-                if (value_str.startswith('"') and value_str.endswith('"')) or \
-                   (value_str.startswith("'") and value_str.endswith("'")):
-                    # Remove outer quotes
-                    result[pool_id] = value_str[1:-1]
+                # For string literals, we want to preserve the original quoted format
+                # so that pool resolution can handle different contexts appropriately
+                if isinstance(value, str):
+                    result[pool_id] = value_str  # Keep original quoted format
                 else:
-                    # Keep as-is for identifiers, hex values, etc.
-                    result[pool_id] = value_str
+                    result[pool_id] = value_str  # Keep original format for non-strings
+            except (ValueError, SyntaxError):
+                # If literal_eval fails, keep as-is for identifiers, hex values, etc.
+                result[pool_id] = value_str
         
         return result
 

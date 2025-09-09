@@ -30,7 +30,7 @@ class CAI3StructureAnalyzer:
         """Extract complete Python structure from CAI3-LITE AST."""
         structure = StructureInfo(
             classes={},
-            functions={},  # This will now be properly populated
+            functions={},
             dataclasses={},
             enums={},
             main_block=None,
@@ -42,8 +42,14 @@ class CAI3StructureAnalyzer:
             if entry.startswith('D:'):
                 self._process_definition(entry[2:].strip(), ast_obj, structure)
             elif entry.startswith('F:'):
-                # CRITICAL FIX: Process as function, not for-loop
+                # Process function entries
                 self._process_function_entry(entry, ast_obj, structure)
+            elif entry.startswith('C:'):
+                # NEW: Process class entries
+                self._process_class_entry(entry, ast_obj, structure)
+            elif entry.startswith('M:'):
+                # NEW: Process method entries
+                self._process_method_entry(entry, ast_obj, structure)
             elif entry.startswith('X:'):
                 if '__name__' in entry:
                     # Extract main block content after the condition
@@ -52,19 +58,16 @@ class CAI3StructureAnalyzer:
                     if ':' in main_content:
                         main_content = main_content.split(':', 1)[1].strip()
                     structure.main_block = main_content
-    
+
         # Extract imports
         if hasattr(ast_obj, 'imports') and ast_obj.imports:
             structure.imports = self._parse_imports(ast_obj.imports)
         
-        # CRITICAL NEW: Process body-based class/function definitions
+        # Process body-based definitions if needed
         self._process_body_definitions(ast_obj, structure)
         
-        # NOTE: _map_bodies_to_structures disabled - replaced by _process_body_definitions
-        # self._map_bodies_to_structures(ast_obj, structure)
-        
         return structure
-    
+
     def _process_definition(self, def_content: str, ast_obj, structure: StructureInfo):
         """Process a D: section definition."""
         # Enum definition pattern: p29(p5):p30=1;p31=2;p32=3
@@ -522,3 +525,75 @@ class CAI3StructureAnalyzer:
                 parameters.append(param_name)
         
         return parameters
+
+    def _process_class_entry(self, entry: str, ast_obj, structure: StructureInfo):
+        """Process C: class entries like 'C:ClassName' or 'C:ClassName(Parent)'."""
+        # Remove 'C:' prefix
+        content = entry[2:].strip()
+        
+        # Parse class with optional parent
+        parent_match = re.match(r'(\w+)\((\w+)\)', content)
+        if parent_match:
+            class_name = parent_match.group(1)
+            parent_name = parent_match.group(2)
+            structure.classes[class_name] = {
+                'methods': {},
+                'parent': parent_name
+            }
+        else:
+            # Simple class without parent
+            class_name = content.split()[0] if ' ' in content else content
+            structure.classes[class_name] = {
+                'methods': {},
+                'parent': None
+            }
+        
+        self.logger.debug(f"Added class from T: entry: {class_name}")
+
+    def _process_method_entry(self, entry: str, ast_obj, structure: StructureInfo):
+        """Process M: method entries like 'M:ClassName.method#bodyId' or 'M:ClassName.method(args)#bodyId'."""
+        # Pattern: M:ClassName.method_name#body_id or M:ClassName.method_name(args)#body_id
+        pattern = r'M:([A-Za-z_]\w*)\.([A-Za-z_]\w*)(?:\(([^)]*)\))?(?:#([A-Za-z0-9_]+))?'
+        match = re.match(pattern, entry)
+        
+        if match:
+            class_name = match.group(1)
+            method_name = match.group(2)
+            args_str = match.group(3) or ''
+            body_id = match.group(4)
+            
+            # Ensure class exists
+            if class_name not in structure.classes:
+                structure.classes[class_name] = {'methods': {}, 'parent': None}
+            
+            # Parse arguments
+            args = ['self']  # Default for instance methods
+            if args_str:
+                # Parse additional args
+                for arg in args_str.split(','):
+                    arg = arg.strip()
+                    if arg and arg != 'self':
+                        # Resolve pool references
+                        if arg.startswith('p') and arg[1:].isdigit():
+                            args.append(ast_obj.pools.get(arg, arg))
+                        else:
+                            args.append(arg)
+            
+            # Get body content
+            body_content = ''
+            if body_id:
+                # Look for body with B# prefix
+                body_key = body_id if body_id in ast_obj.bodies else f'B#{body_id}'
+                if body_key in ast_obj.bodies:
+                    body_content = ast_obj.bodies[body_key]
+                elif body_id in ast_obj.bodies:
+                    body_content = ast_obj.bodies[body_id]
+            
+            # Add method to class
+            structure.classes[class_name]['methods'][method_name] = {
+                'args': args,
+                'body_id': body_id,
+                'body_content': body_content
+            }
+            
+            self.logger.debug(f"Added method from T: entry: {class_name}.{method_name}")

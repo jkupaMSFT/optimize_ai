@@ -14,9 +14,10 @@ logger = logging.getLogger(__name__)
 class CAI3PythonReconstructor:
     """Reconstructs Python source code from CAI3 structure."""
     
-    def __init__(self, cai3_translator=None):
+    def __init__(self, cai3_translator=None, resolution_pipeline=None):
         self.logger = logging.getLogger(__name__)
         self.cai3_translator = cai3_translator
+        self.resolution_pipeline = resolution_pipeline  # NEW: Add resolution pipeline
     
     def reconstruct(self, ast_obj, structure: StructureInfo, 
                    cai3_full=None, cai3_map=None) -> str:
@@ -132,44 +133,72 @@ class CAI3PythonReconstructor:
         args = func_def.get('args', [])
         
         if not body_content and body_id:
-            body_content = ast_obj.bodies.get(body_id, '')
+            # Look up body content
+            body_key = body_id if body_id in ast_obj.bodies else f'B#{body_id}'
+            body_content = ast_obj.bodies.get(body_key, '')
         
         if not body_content:
-            # Empty function
             return [f"def {func_name}({', '.join(args)}):", "    pass"]
         
-        # Translate the body
-        if self.cai3_translator:
-            try:
-                # Use the body translation logic
-                translated_body = self._translate_function_body(
-                    func_name, args, body_content, body_id, 
-                    ast_obj.pools, ast_obj.chain_aliases
-                )
-                return translated_body.split('\n')
-            except Exception as e:
-                self.logger.warning(f"Failed to translate function {func_name}: {e}")
+        # Use resolution pipeline if available
+        if self.resolution_pipeline:
+            # Resolve and convert
+            resolved = self.resolution_pipeline.resolve_content(body_content)
+            py_body = self.resolution_pipeline.convert_cai3_body_to_python(resolved)
+            
+            # Build function
+            lines = [f"def {func_name}({', '.join(args)}):"]
+            for line in py_body.split('\n'):
+                if line.strip():
+                    lines.append(f"    {line}")
+                
+            if len(lines) == 1:
+                lines.append("    pass")
+            
+            return lines
         
-        # Fallback
-        return [
-            f"def {func_name}({', '.join(args)}):",
-            f"    # Body translation failed for {body_id}",
-            "    pass"
-        ]
+        # Fallback to existing logic
+        return [f"def {func_name}({', '.join(args)}):", "    # Translation pending", "    pass"]
     
     def _translate_method_body(self, method_name: str, method_info: Dict, ast_obj, cai3_full, cai3_map) -> List[str]:
-        """Translate method body for class methods."""
+        """Translate method body using resolution pipeline."""
         try:
-            body_content = method_info.get('body', '')
+            body_content = method_info.get('body_content', method_info.get('body', ''))
             
-            if method_name == '__init__':
-                # Handle constructor
-                return self._translate_init_method(method_info, ast_obj)
+            if not body_content:
+                return [f"def {method_name}(self):", "    pass"]
+            
+            # Use resolution pipeline if available
+            if self.resolution_pipeline:
+                # Step 1: Resolve references
+                resolved = self.resolution_pipeline.resolve_content(body_content)
+                
+                # Step 2: Convert CAI3 syntax to Python
+                py_body = self.resolution_pipeline.convert_cai3_body_to_python(resolved)
+                
+                # Step 3: Build method with proper structure
+                args = method_info.get('args', ['self'])
+                method_lines = [f"def {method_name}({', '.join(args)}):"]
+                
+                # Add body lines with proper indentation
+                for line in py_body.split('\n'):
+                    if line.strip():
+                        method_lines.append(f"    {line}")
+                
+                if len(method_lines) == 1:  # Only method def
+                    method_lines.append("    pass")
+                    
+                return method_lines
+                
             else:
-                # Handle regular method
-                return self._translate_regular_method(method_name, method_info, ast_obj)
+                # Fallback to existing logic
+                if method_name == '__init__':
+                    return self._translate_init_method(method_info, ast_obj)
+                else:
+                    return self._translate_regular_method(method_name, method_info, ast_obj)
+                
         except Exception as e:
-            self.logger.error(f"Error translating method body: {e}")
+            self.logger.error(f"Error translating method {method_name}: {e}")
             return [f"def {method_name}(self):", "    pass"]
     
     def _translate_init_method(self, method_info: Dict, ast_obj) -> List[str]:

@@ -2084,74 +2084,154 @@ B#a1:# Enhanced validation with optimized logic here
             return self.cai3_interface.get_constraint_statistics()
         return None
 
+    # Add this method implementation to claude_proxy.py
+
     def _extract_claude_mappings(self, claude_output: str) -> Dict[str, Any]:
         """
-        Extract mappings from Claude's response that Claude added/modified to fix bugs.
+        Extract mappings from Claude's response including MAPPINGS section and inline definitions.
         
         Returns:
-            Dict containing pool mappings, variable mappings, method mappings, etc.
+            Dict containing hash_mappings, pools, variables, and methods
         """
         mappings = {
+            'hash_mappings': {},
             'pools': {},
             'variables': {},
-            'methods': {},
-            'classes': {},
-            'hash_mappings': {}
+            'methods': {}
         }
         
-        try:
-            import yaml
+        # Pattern 1: Extract from "=== MAPPINGS ===" section
+        mappings_pattern = r'===\s*MAPPINGS\s*===\s*\n(.*?)(?:===|$)'
+        mappings_match = re.search(mappings_pattern, claude_output, re.DOTALL)
+        
+        if mappings_match:
+            mappings_content = mappings_match.group(1)
+            self.logger.info(f"Found MAPPINGS section with {len(mappings_content)} chars")
             
-            # Look for MAPPINGS section in YAML format
-            yaml_pattern = r'## MAPPINGS\s*```yaml\s*(.*?)\s*```'
-            yaml_match = re.search(yaml_pattern, claude_output, re.DOTALL | re.IGNORECASE)
+            # Parse each line in MAPPINGS section
+            for line in mappings_content.split('\n'):
+                line = line.strip()
+                if not line or line.startswith('#'):
+                    continue
+                    
+                # Parse mapping entries like "hash_0a21: dataclasses"
+                if ':' in line:
+                    key, value = line.split(':', 1)
+                    key = key.strip()
+                    value = value.strip()
+                    
+                    # Normalize hash keys
+                    if key.startswith('hash_') or key.startswith('#'):
+                        # Normalize: #0a21 -> hash_0a21, hash_0A21 -> hash_0a21
+                        normalized_key = key.replace('#', 'hash_').lower()
+                        if not normalized_key.startswith('hash_'):
+                            normalized_key = f'hash_{normalized_key}'
+                        mappings['hash_mappings'][normalized_key] = value
+                        self.logger.debug(f"Added hash mapping: {normalized_key} -> {value}")
+                    
+                    # Pool mappings (p0, p1, etc.)
+                    elif re.match(r'^p\d+$', key):
+                        # Ensure string values are quoted
+                        if value and not (value.startswith('"') or value.startswith("'")):
+                            # Check if it's a Python literal that needs quoting
+                            if not value.replace('.', '').replace('_', '').isalnum():
+                                value = f'"{value}"'
+                        mappings['pools'][key] = value
+                        self.logger.debug(f"Added pool mapping: {key} -> {value}")
+                    
+                    # Variable/identifier mappings
+                    else:
+                        mappings['variables'][key] = value
+        
+        # Pattern 2: Extract pools from P: section in CAI3 block
+        cai3_pattern = r'```(?:C3L|CAI3|cai3)?\s*\n(.*?)```'
+        cai3_match = re.search(cai3_pattern, claude_output, re.DOTALL | re.IGNORECASE)
+        
+        if cai3_match:
+            cai3_content = cai3_match.group(1)
             
-            if yaml_match:
-                yaml_content = yaml_match.group(1)
-                self.logger.info(f"🔍 Found MAPPINGS section ({len(yaml_content)} chars)")
+            # Extract P: section
+            p_section_pattern = r'^P:\s*(.+?)(?=^[A-Z]:|^B#|^---|$)'
+            p_match = re.search(p_section_pattern, cai3_content, re.MULTILINE | re.DOTALL)
+            
+            if p_match:
+                pool_content = p_match.group(1).strip()
+                # Parse pool assignments like p0="value",p1="value2"
+                pool_pattern = r'(p\d+)=("(?:[^"\\]|\\.)*"|\'(?:[^\'\\]|\\.)*\'|[^,\n]+)'
                 
-                try:
-                    parsed_mappings = yaml.safe_load(yaml_content)
-                    if isinstance(parsed_mappings, dict) and 'cai3_to_python' in parsed_mappings:
-                        cai3_mappings = parsed_mappings['cai3_to_python']
-                        
-                        # Handle properly structured YAML with categories
-                        for category, items in cai3_mappings.items():
-                            if category in ['pools', 'variables', 'methods', 'classes', 'hash_mappings']:
-                                # Direct category mapping
-                                if isinstance(items, dict):
-                                    mappings[category].update(items)
-                            elif category.startswith('p') and category[1:].isdigit():
-                                # Pool reference like p0, p1 (flat structure)
-                                mappings['pools'][category] = items
-                            elif category.startswith('#') or 'hash' in category.lower():
-                                # Hash mapping (flat structure)
-                                mappings['hash_mappings'][category] = items
-                            else:
-                                # Try to categorize individual items (flat structure)
-                                if isinstance(items, str):
-                                    if any(keyword in items.lower() for keyword in ['class', 'analyzer', 'tier']):
-                                        mappings['classes'][category] = items
-                                    elif any(keyword in items.lower() for keyword in ['method', 'function', 'init', 'get', 'analyze']):
-                                        mappings['methods'][category] = items
-                                    else:
-                                        mappings['variables'][category] = items
-                        
-                        self.logger.info(f"✅ Extracted mappings: {len(mappings['pools'])} pools, "
-                                       f"{len(mappings['variables'])} variables, {len(mappings['methods'])} methods, "
-                                       f"{len(mappings['classes'])} classes, {len(mappings['hash_mappings'])} hashes")
-                        
-                except yaml.YAMLError as e:
-                    self.logger.warning(f"Failed to parse YAML mappings: {e}")
-            
-            # Also look for inline mappings in comments or text
-            self._extract_inline_mappings(claude_output, mappings)
-            
-        except ImportError:
-            self.logger.warning("PyYAML not available, using fallback mapping extraction")
-            self._extract_inline_mappings(claude_output, mappings)
+                for match in re.finditer(pool_pattern, pool_content):
+                    pool_id = match.group(1)
+                    pool_value = match.group(2).strip()
+                    
+                    # Don't override if already in mappings from MAPPINGS section
+                    if pool_id not in mappings['pools']:
+                        mappings['pools'][pool_id] = pool_value
+                        self.logger.debug(f"Added pool from P: section: {pool_id} -> {pool_value}")
+        
+        # Log summary
+        self.logger.info(f"Extracted mappings summary: "
+                        f"{len(mappings['hash_mappings'])} hashes, "
+                        f"{len(mappings['pools'])} pools, "
+                        f"{len(mappings['variables'])} variables")
         
         return mappings
+
+    def _translate_cai3_to_python(self, cai3_lite_content: str, source_path: Path, 
+                                claude_mappings: Dict[str, Any]) -> str:
+        """
+        Translate CAI3-LITE to Python with Claude's mappings properly integrated.
+        """
+        self.logger.info(f"Starting CAI3 to Python translation with {len(claude_mappings.get('hash_mappings', {}))} hash mappings")
+        
+        try:
+            # Forward to translator with mappings
+            python_code = self.cai3_translator.translate_cai3_lite_to_python(
+                cai3_lite_content,
+                source_path,
+                claude_mappings  # Pass the full mappings dict
+            )
+            
+            return python_code
+            
+        except Exception as e:
+            self.logger.error(f"CAI3 to Python translation failed: {e}")
+            import traceback
+            self.logger.error(traceback.format_exc())
+            
+            # Fallback
+            return self._fallback_cai3_reconstruction(cai3_lite_content, claude_mappings)
+
+    # Update _process_full_cai3_output to properly extract and pass mappings
+    def _process_full_cai3_output(self, claude_output: str, metadata: Dict) -> str:
+        """Process full CAI3-LITE output from Claude with proper mapping extraction."""
+        self.logger.info("🔄 Processing full CAI3-LITE output...")
+        
+        # Extract mappings FIRST
+        claude_mappings = self._extract_claude_mappings(claude_output)
+        
+        # Extract CAI3 content
+        cai3_content = self._extract_cai3_content(claude_output)
+        
+        if not cai3_content:
+            self.logger.error("❌ No CAI3 content found in Claude output")
+            return self._extract_python_code_directly(claude_output, metadata)
+        
+        if not self.source_path:
+            self.logger.error("❌ No source path set for translation")
+            return self._format_error_output(claude_output, Exception("No source path"), metadata)
+        
+        try:
+            # Translate with mappings
+            python_code = self._translate_cai3_to_python(cai3_content, self.source_path, claude_mappings)
+            
+            self.logger.info(f"✅ CAI3 translation successful: {len(python_code)} chars")
+            return self._format_full_translation_output(claude_output, python_code, metadata)
+            
+        except Exception as e:
+            self.logger.error(f"❌ CAI3 translation failed: {e}")
+            import traceback
+            self.logger.error(traceback.format_exc())
+            return self._format_error_output(claude_output, e, metadata)
     
     def _extract_inline_mappings(self, text: str, mappings: Dict[str, Any]):
         """Extract mappings from inline comments and patterns in the text."""
@@ -2185,34 +2265,7 @@ B#a1:# Enhanced validation with optimized logic here
                         
     # Update the _translate_cai3_to_python method
 
-    def _translate_cai3_to_python(self, cai3_lite_content: str, source_path: Path, 
-                                 claude_mappings: Dict[str, Any]) -> str:
-        """
-        Translate CAI3-LITE to Python using the improved pipeline.
-        """
-        try:
-            self.logger.info("🔄 Starting CAI3-LITE to Python translation")
-            
-            # Extract mappings from Claude response
-            if not claude_mappings:
-                claude_mappings = self._extract_claude_mappings(cai3_lite_content)
-            
-            # Use the improved translator
-            translator = self.cai3_translator
-            python_code = translator.translate_cai3_lite_to_python(
-                cai3_lite_content,
-                source_path,
-                claude_mappings
-            )
-            
-            self.logger.info(f"✅ Translation completed: {len(python_code)} chars")
-            return python_code
-            
-        except Exception as e:
-            self.logger.error(f"Translation failed: {e}")
-            import traceback
-            self.logger.error(traceback.format_exc())
-            return self._fallback_cai3_reconstruction(cai3_lite_content, claude_mappings)
+
 
     
     def _fallback_cai3_reconstruction(self, cai3_lite_content: str, claude_mappings: Dict[str, Any]) -> str:

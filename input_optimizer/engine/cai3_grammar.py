@@ -102,8 +102,8 @@ class CAI3LiteParser:
                 else:
                     ast.cid_aliases = self._parse_assignments(x_content)
             
-            # Parse P: section (pools) - CRITICAL SECTION
-            p_match = re.search(r'^P:\s*(.+?)(?=^[A-Z]:|^B\d+:|^B#|^---|$)', content, re.MULTILINE | re.DOTALL)
+            # Parse P: section (pools) OR POOLS: section - CRITICAL SECTION
+            p_match = re.search(r'^(?:P:|POOLS:)\s*(.+?)(?=^(?:[A-Z]+:|[A-Z]:|B\d+:|B#|---|$))', content, re.MULTILINE | re.DOTALL)
             if p_match:
                 pool_content = p_match.group(1)
                 
@@ -141,17 +141,34 @@ class CAI3LiteParser:
                 
                 ast.pools = self._parse_pool_assignments(pool_content)
             
-            # Parse T: section (table)
-            t_match = re.search(r'^T:\s*(.+?)(?=^[A-Z]:|^B\d+:|^B#|^---|$)', content, re.MULTILINE | re.DOTALL)
+            # Parse T: section (table) OR TABLE: section
+            t_match = re.search(r'^(?:T:|TABLE:)\s*(.+?)(?=^(?:[A-Z]+:|[A-Z]:|B\d+:|B#|---|$))', content, re.MULTILINE | re.DOTALL)
             if t_match:
                 table_content = t_match.group(1).strip()
                 if table_content:
-                    ast.table.extend([item.strip() for item in table_content.split(',') if item.strip()])
+                    # Handle both comma-separated and line-separated entries
+                    if '\n' in table_content:
+                        # Multi-line format
+                        ast.table.extend([item.strip() for item in table_content.split('\n') if item.strip()])
+                    else:
+                        # Comma-separated format
+                        ast.table.extend([item.strip() for item in table_content.split(',') if item.strip()])
             
-            # Parse B# and B0-B9 sections (bodies) - CRITICAL FIX
-            # This pattern now correctly handles multi-line body content including I: conditions
-            body_pattern = r'^(B#[A-Za-z0-9_]+|B\d+):\s*(.+?)(?=^(?:B#[A-Za-z0-9_]+:|B\d+:|D:|X:|F:|P:|I:|T:|---|$))'
+            # Parse B# and B0-B9 sections (bodies) OR BODIES: section - CRITICAL FIX
+            # Handle both old format (B#id: or B0:) and new format (BODIES: b1={...})
+            body_pattern = r'^(B#[A-Za-z0-9_]+|B\d+):\s*(.+?)(?=^(?:B#[A-Za-z0-9_]+:|B\d+:|D:|X:|F:|P:|I:|T:|[A-Z]+:|---|$))'
             body_matches = list(re.finditer(body_pattern, content, re.MULTILINE | re.DOTALL))
+            
+            # Also check for BODIES: section format
+            bodies_match = re.search(r'^BODIES:\s*(.+?)(?=^(?:[A-Z]+:|---|$))', content, re.MULTILINE | re.DOTALL)
+            if bodies_match:
+                bodies_content = bodies_match.group(1).strip()
+                # Parse entries like: b1={...}, b2={...}
+                body_entry_pattern = r'([a-zA-Z0-9_]+)=\{([^}]+)\}'
+                for match in re.finditer(body_entry_pattern, bodies_content):
+                    body_id = match.group(1)
+                    body_content = match.group(2).strip()
+                    ast.bodies[body_id] = body_content
             
             for body_match in body_matches:
                 body_id = body_match.group(1)

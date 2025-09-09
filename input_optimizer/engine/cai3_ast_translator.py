@@ -2309,74 +2309,146 @@ class CAI3Translator:
         self.strict_mode = strict_mode
         self.logger = logging.getLogger(__name__)
     
+    # Update the translate_cai3_lite_to_python method in CAI3Translator
+
     def translate_cai3_lite_to_python(self, cai3_lite_content: str, 
-                                     source_path: Path,
-                                     claude_mappings: Dict[str, Any] = None) -> str:
+                                    source_path: Path,
+                                    claude_mappings: Dict[str, Any] = None) -> str:
         """
-        Main entry point for CAI3-LITE to Python translation.
-        FIXED: Properly integrates hash resolution, pool resolution, and AST reconstruction.
+        Main entry point with proper Claude mappings integration.
         """
         try:
-            self.logger.info("🔄 Starting CAI3-LITE to Python translation")
+            self.logger.info("🔧 Starting CAI3-LITE to Python translation")
+            self.logger.info(f"Claude mappings provided: {bool(claude_mappings)}")
+            if claude_mappings:
+                self.logger.info(f"  - Hash mappings: {len(claude_mappings.get('hash_mappings', {}))}")
+                self.logger.info(f"  - Pool mappings: {len(claude_mappings.get('pools', {}))}")
             
-            # Step 1: Parse CAI3-LITE with validation
+            # Step 1: Fix format issues
+            from .cai3_format_fixer import apply_cai3_format_fixes
+            fixed_content = apply_cai3_format_fixes(cai3_lite_content, 
+                                                claude_mappings.get('pools', {}) if claude_mappings else None)
+            
+            # Step 2: Parse CAI3-LITE
+            from .cai3_grammar import CAI3LiteParser
             parser = CAI3LiteParser()
-            ast_obj = parser.parse(cai3_lite_content)
+            ast_obj = parser.parse(fixed_content)
             
             if not ast_obj:
-                raise ValueError("Failed to parse CAI3-LITE structure")
+                self.logger.error("Failed to parse CAI3-LITE content")
+                return self._create_fallback_code(source_path, "Parse failed")
             
-            # Step 2: Build comprehensive mappings from Claude response
-            mappings = self._build_comprehensive_mappings(ast_obj, source_path)
-            
-            # Add Claude mappings if provided
+            # Step 3: Merge Claude mappings with parsed content
+            # This is crucial - merge Claude's mappings into the AST pools and create hash mappings
             if claude_mappings:
-                mappings['hash_mappings'].update(claude_mappings.get('hash_mappings', {}))
-                mappings['pools'].update(claude_mappings.get('pools', {}))
+                # Merge pools
+                if hasattr(ast_obj, 'pools') and claude_mappings.get('pools'):
+                    ast_obj.pools.update(claude_mappings['pools'])
+                    self.logger.info(f"Merged {len(claude_mappings['pools'])} pools from Claude")
+                
+                # Store hash mappings for later use
+                hash_mappings = claude_mappings.get('hash_mappings', {})
+            else:
+                hash_mappings = {}
             
-            # Step 3: Initialize hash resolver with ALL mappings
-            hash_mappings = {}
+            # Step 4: Create resolution pipeline with all mappings
+            from .cai3_resolution_pipeline import CAI3ResolutionPipeline
+            resolution_pipeline = CAI3ResolutionPipeline(hash_mappings, ast_obj.pools)
+            self.logger.info(f"Created resolution pipeline with {len(hash_mappings)} hash mappings")
             
-            # First, get hash mappings from claude_mappings (priority)
-            if claude_mappings and 'hash_mappings' in claude_mappings:
-                hash_mappings.update(claude_mappings['hash_mappings'])
-                self.logger.info(f"Loaded {len(claude_mappings['hash_mappings'])} hash mappings from Claude")
+            # Step 5: Analyze structure
+            from .cai3_structure_analyzer import CAI3StructureAnalyzer
+            analyzer = CAI3StructureAnalyzer()
+            structure = analyzer.analyze(ast_obj)
             
-            # Also try to extract from CAI3-LITE content (backup)
-            for line in cai3_lite_content.split('\n'):
-                if 'hash_' in line and ':' in line:
-                    parts = line.split(':', 1)
-                    if len(parts) == 2:
-                        key = parts[0].strip()
-                        value = parts[1].strip()
-                        if key.startswith('hash_'):
-                            hash_mappings[key] = value
+            # Step 6: Reconstruct Python with resolution pipeline
+            from .cai3_python_reconstructor import CAI3PythonReconstructor
+            reconstructor = CAI3PythonReconstructor(resolution_pipeline=resolution_pipeline)
             
-            # Create resolver with mappings
-            resolver = HashResolver(hash_mappings)
-            self.logger.info(f"✅ Created resolver with {len(resolver.mappings)} hash mappings")
+            python_code = reconstructor.reconstruct(ast_obj, structure, None, None)
             
-            # Step 4: Load or create cache with resolver
-            cai3_full, cai3_map = self._load_or_create_cache_with_resolver(
-                source_path, ast_obj, resolver
-            )
+            # Step 7: Final hash resolution pass
+            python_code = resolution_pipeline.hash_resolver.resolve_in_python_code(python_code)
             
-            # Step 5: Reconstruct Python with integrated resolution
-            python_code = self._reconstruct_with_resolver(
-                ast_obj, cai3_full, cai3_map, resolver
-            )
+            # Step 8: Format with Black
+            try:
+                import black
+                python_code = black.format_str(python_code, mode=black.Mode())
+            except Exception as e:
+                self.logger.warning(f"Black formatting failed: {e}")
             
-            # Step 6: Validate and format
-            python_code = self._validate_python_ast(python_code)
-            python_code = self._apply_pattern_fixes(python_code)
-            
+            self.logger.info(f"✅ Translation successful: {len(python_code)} chars")
             return python_code
             
         except Exception as e:
             self.logger.error(f"Translation failed: {e}")
             import traceback
             self.logger.error(traceback.format_exc())
-            return self._create_fallback_code(source_path, str(e))
+            
+            # Enhanced fallback
+            return self._enhanced_fallback_reconstruction(cai3_lite_content, claude_mappings)
+
+    def _enhanced_fallback_reconstruction(self, cai3_lite_content: str, 
+                                        claude_mappings: Dict[str, Any]) -> str:
+        """Enhanced fallback with manual reconstruction."""
+        self.logger.warning("Using enhanced fallback reconstruction")
+        
+        lines = []
+        lines.append("# CAI3 Translation (Fallback Mode)")
+        lines.append("# Some features may be incomplete")
+        lines.append("")
+        
+        try:
+            # Parse what we can
+            from .cai3_grammar import CAI3LiteParser
+            parser = CAI3LiteParser()
+            ast_obj = parser.parse(cai3_lite_content)
+            
+            if ast_obj and claude_mappings:
+                # Apply mappings manually
+                pools = ast_obj.pools.copy()
+                pools.update(claude_mappings.get('pools', {}))
+                
+                hash_mappings = claude_mappings.get('hash_mappings', {})
+                
+                # Process imports
+                if ast_obj.imports:
+                    import_parts = ast_obj.imports.split(',')
+                    for imp in import_parts:
+                        imp = imp.strip()
+                        # Resolve hash references in imports
+                        for hash_ref, value in hash_mappings.items():
+                            imp = imp.replace(hash_ref, value)
+                            imp = imp.replace(hash_ref.replace('hash_', '#'), value)
+                        lines.append(f"import {imp}")
+                    lines.append("")
+                
+                # Process structure from table
+                for entry in ast_obj.table:
+                    if entry.startswith('F:') and '#' in entry:
+                        # Function definition
+                        func_match = re.match(r'F:(\w+).*#(\w+)', entry)
+                        if func_match:
+                            func_name = func_match.group(1)
+                            body_id = func_match.group(2)
+                            body = ast_obj.bodies.get(body_id, '# Body not found')
+                            
+                            # Apply resolutions
+                            for pool_id, value in pools.items():
+                                body = body.replace(pool_id, str(value))
+                            for hash_ref, value in hash_mappings.items():
+                                body = body.replace(hash_ref, value)
+                                body = body.replace(hash_ref.replace('hash_', '#'), value)
+                            
+                            lines.append(f"def {func_name}():")
+                            lines.append(f"    {body}")
+                            lines.append("")
+                
+            return '\n'.join(lines)
+            
+        except Exception as e:
+            self.logger.error(f"Enhanced fallback also failed: {e}")
+            return f"# Translation failed: {str(e)}\n# Please check the CAI3 format"
     
     def _build_comprehensive_mappings(self, ast_obj, source_path) -> Dict[str, Any]:
         """Build complete mappings including hash mappings from MAPPINGS section."""

@@ -27,44 +27,133 @@ class CAI3StructureAnalyzer:
         self.logger = logging.getLogger(__name__)
     
     def analyze(self, ast_obj) -> StructureInfo:
-        """Extract complete Python structure from CAI3-LITE AST."""
+        """Extract complete Python structure with FIXED hierarchy."""
+        self.logger.info("🔍 Starting structure analysis...")
+        
         structure = StructureInfo(
             classes={},
-            functions={},  # This will now be properly populated
+            functions={},
             dataclasses={},
             enums={},
             main_block=None,
             imports=[]
         )
         
-        # Process table entries
+        # Debug: Log the AST object content
+        self.logger.info(f"📊 AST Object - hasattr table: {hasattr(ast_obj, 'table')}")
+        self.logger.info(f"📊 AST Object - hasattr bodies: {hasattr(ast_obj, 'bodies')}")
+        if hasattr(ast_obj, 'table'):
+            self.logger.info(f"📊 Table entries: {ast_obj.table}")
+        if hasattr(ast_obj, 'bodies'):
+            self.logger.info(f"📊 Body IDs: {list(ast_obj.bodies.keys())}")
+        
+        # Build mappings first
+        table_to_body = {}  # Map table entries to body IDs
+        class_methods = {}  # Map class names to their methods
+        
+        # First pass: Build mappings from table
+        self.logger.info("🔄 First pass: Building mappings from table...")
         for entry in getattr(ast_obj, 'table', []):
-            if entry.startswith('D:'):
-                self._process_definition(entry[2:].strip(), ast_obj, structure)
+            self.logger.info(f"🏷️  Processing table entry: {entry}")
+            
+            if entry.startswith('C:'):
+                # Class definition: C:ClassName
+                class_name = entry[2:].strip()
+                self.logger.info(f"🏗️  Found class: {class_name}")
+                structure.classes[class_name] = {
+                    'methods': {},
+                    'parent': None
+                }
+                class_methods[class_name] = []
+                
+            elif entry.startswith('M:'):
+                # Method definition: M:ClassName.method#body_id
+                match = re.match(r'M:([^.]+)\.([^#]+)#(\w+)', entry)
+                if match:
+                    class_name = match.group(1)
+                    method_name = match.group(2)
+                    body_id = match.group(3)
+                    
+                    self.logger.info(f"⚙️  Found method: {class_name}.{method_name} -> body #{body_id}")
+                    
+                    # Track method for class
+                    if class_name not in class_methods:
+                        class_methods[class_name] = []
+                    class_methods[class_name].append((method_name, body_id))
+                    table_to_body[body_id] = ('method', class_name, method_name)
+                else:
+                    self.logger.warning(f"⚠️  Failed to parse method entry: {entry}")
+                    
             elif entry.startswith('F:'):
-                # CRITICAL FIX: Process as function, not for-loop
-                self._process_function_entry(entry, ast_obj, structure)
-            elif entry.startswith('X:'):
-                if '__name__' in entry:
-                    # Extract main block content after the condition
-                    main_content = entry[2:].strip()
-                    # Remove the __name__ check part
-                    if ':' in main_content:
-                        main_content = main_content.split(':', 1)[1].strip()
-                    structure.main_block = main_content
+                # Function definition: F:function_name#body_id
+                match = re.match(r'F:([^#]+)(?:#(\w+))?', entry)
+                if match:
+                    func_name = match.group(1)
+                    body_id = match.group(2)
+                    
+                    self.logger.info(f"🔧 Found function: {func_name} -> body #{body_id}")
+                    
+                    structure.functions[func_name] = {
+                        'name': func_name,
+                        'body_id': body_id,
+                        'body_content': ''
+                    }
+                    if body_id:
+                        table_to_body[body_id] = ('function', func_name)
+                else:
+                    self.logger.warning(f"⚠️  Failed to parse function entry: {entry}")
+            else:
+                self.logger.info(f"❓ Unknown table entry type: {entry}")
+        
+        # Second pass: Assign bodies to correct structures
+        self.logger.info("🔄 Second pass: Assigning bodies to structures...")
+        self.logger.info(f"📋 Table to body mappings: {table_to_body}")
+        
+        if hasattr(ast_obj, 'bodies'):
+            for body_id, body_content in ast_obj.bodies.items():
+                self.logger.info(f"🔗 Processing body {body_id}: {body_content[:100]}...")
+                
+                if body_id in table_to_body:
+                    entry_type = table_to_body[body_id][0]
+                    self.logger.info(f"📍 Body {body_id} mapped to {entry_type}")
+                    
+                    if entry_type == 'method':
+                        _, class_name, method_name = table_to_body[body_id]
+                        if class_name in structure.classes:
+                            self.logger.info(f"➕ Adding method {method_name} to class {class_name}")
+                            structure.classes[class_name]['methods'][method_name] = {
+                                'args': self._infer_method_args(method_name, body_content),
+                                'body_content': body_content,
+                                'body_id': body_id
+                            }
+                        else:
+                            self.logger.error(f"❌ Class {class_name} not found for method {method_name}")
+                            
+                    elif entry_type == 'function':
+                        _, func_name = table_to_body[body_id]
+                        if func_name in structure.functions:
+                            self.logger.info(f"➕ Adding body to function {func_name}")
+                            structure.functions[func_name]['body_content'] = body_content
+                        else:
+                            self.logger.error(f"❌ Function {func_name} not found for body {body_id}")
+                else:
+                    self.logger.warning(f"🔍 Orphaned body {body_id} - no table mapping found")
     
         # Extract imports
         if hasattr(ast_obj, 'imports') and ast_obj.imports:
+            self.logger.info(f"📦 Processing imports: {ast_obj.imports}")
             structure.imports = self._parse_imports(ast_obj.imports)
         
-        # CRITICAL NEW: Process body-based class/function definitions
-        self._process_body_definitions(ast_obj, structure)
-        
-        # NOTE: _map_bodies_to_structures disabled - replaced by _process_body_definitions
-        # self._map_bodies_to_structures(ast_obj, structure)
+        # Final structure summary
+        self.logger.info("📊 FINAL STRUCTURE SUMMARY:")
+        self.logger.info(f"   🏗️  Classes: {list(structure.classes.keys())}")
+        for class_name, class_info in structure.classes.items():
+            self.logger.info(f"      └── {class_name}: methods = {list(class_info['methods'].keys())}")
+        self.logger.info(f"   🔧 Functions: {list(structure.functions.keys())}")
+        self.logger.info(f"   📦 Imports: {structure.imports}")
         
         return structure
-    
+
     def _process_definition(self, def_content: str, ast_obj, structure: StructureInfo):
         """Process a D: section definition."""
         # Enum definition pattern: p29(p5):p30=1;p31=2;p32=3
@@ -522,3 +611,16 @@ class CAI3StructureAnalyzer:
                 parameters.append(param_name)
         
         return parameters
+    
+    def _infer_method_args(self, method_name: str, body_content: str) -> List[str]:
+        """Infer method arguments from name and content."""
+        if method_name == '__init__':
+            # Look for self.x = patterns to infer parameters
+            args = ['self']
+            param_pattern = r'self\.(\w+)\s*=\s*p(\d+)'
+            matches = re.findall(param_pattern, body_content)
+            for attr, pool_num in matches:
+                args.append(f'p{pool_num}')  # Will be resolved later
+            return args
+        else:
+            return ['self']

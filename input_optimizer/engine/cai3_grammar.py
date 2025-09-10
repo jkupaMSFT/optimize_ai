@@ -145,8 +145,16 @@ class CAI3LiteParser:
             t_match = re.search(r'^T:\s*(.+?)(?=^[A-Z]:|^B\d+:|^B#|^---|$)', content, re.MULTILINE | re.DOTALL)
             if t_match:
                 table_content = t_match.group(1).strip()
+                self.logger.info(f"🔧 PARSING TABLE: Raw table content: '{table_content}'")
+                self.logger.info(f"🔧 PARSING TABLE: Table content length: {len(table_content)}")
                 if table_content:
-                    ast.table.extend([item.strip() for item in table_content.split(',') if item.strip()])
+                    split_items = [item.strip() for item in table_content.split(',') if item.strip()]
+                    self.logger.info(f"🔧 PARSING TABLE: Split into {len(split_items)} items: {split_items}")
+                    ast.table.extend(split_items)
+                else:
+                    self.logger.warning("🔧 PARSING TABLE: Table content is empty!")
+            else:
+                self.logger.warning("🔧 PARSING TABLE: No T: section found!")
             
             # Parse B# and B0-B9 sections (bodies) - CRITICAL FIX
             # This pattern now correctly handles multi-line body content including I: conditions

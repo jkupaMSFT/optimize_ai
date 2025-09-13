@@ -306,6 +306,18 @@ CONSTRAINTS (VIOLATION = FAILURE):
 9. ONLY VALID SECTIONS: #C3L, I:, D:, X:, P:, T:, B# - NO R: or other sections
 10. NO raw data, base64, or R: sections allowed
 
+🔧 MANDATORY SYNTAX VALIDATION:
+Before submitting your response, VERIFY:
+✓ Every opening bracket [ has a closing bracket ]
+✓ Every opening brace {{ has a closing brace }}
+✓ Every opening parenthesis ( has a closing parenthesis )
+✓ Every opening quote " has a closing quote "
+✓ Every opening single quote ' has a closing single quote '
+✓ All CAI3-LITE syntax is properly formed
+✓ No unmatched delimiters anywhere in the output
+
+🚨 SELF-CHECK REQUIRED: After generating code, check all opening brackets/braces/parentheses have matching closing brackets/braces/parentheses. All quotes are properly paired. Validate that the output is proper CAI3-LITE syntax.
+
 TASK: {task}
 
 EXISTING CAI3-LITE:
@@ -791,18 +803,18 @@ B#a1:# Optimized validation logic here
         return True
     
     def _validate_syntax_structure(self, cai3_output: str) -> List[ConstraintViolation]:
-        """Validate CAI3 syntax structure for common errors."""
+        """Validate CAI3 syntax structure for common errors with comprehensive delimiter checking."""
         violations = []
         
-        # Check bracket balance
+        # Check curly braces balance
         open_braces = cai3_output.count('{')
         close_braces = cai3_output.count('}')
         if open_braces != close_braces:
             violations.append(ConstraintViolation(
                 violation_type="unbalanced_braces",
-                description=f"Unbalanced braces: {open_braces} open, {close_braces} close",
+                description=f"Unbalanced curly braces: {open_braces} open, {close_braces} close",
                 location="Global structure",
-                suggested_fix="Ensure every { has a matching }",
+                suggested_fix="Ensure every {{ has a matching }}",
                 severity="critical"
             ))
         
@@ -818,6 +830,44 @@ B#a1:# Optimized validation logic here
                 severity="critical"
             ))
         
+        # Check square brackets balance
+        open_brackets = cai3_output.count('[')
+        close_brackets = cai3_output.count(']')
+        if open_brackets != close_brackets:
+            violations.append(ConstraintViolation(
+                violation_type="unbalanced_brackets",
+                description=f"Unbalanced square brackets: {open_brackets} open, {close_brackets} close",
+                location="Global structure",
+                suggested_fix="Ensure every [ has a matching ]",
+                severity="critical"
+            ))
+        
+        # Check double quotes balance
+        double_quote_count = cai3_output.count('"')
+        if double_quote_count % 2 != 0:
+            violations.append(ConstraintViolation(
+                violation_type="unbalanced_double_quotes",
+                description=f"Unbalanced double quotes: {double_quote_count} total (must be even)",
+                location="Global structure",
+                suggested_fix='Ensure every opening " has a matching closing "',
+                severity="critical"
+            ))
+        
+        # Check single quotes balance
+        single_quote_count = cai3_output.count("'")
+        if single_quote_count % 2 != 0:
+            violations.append(ConstraintViolation(
+                violation_type="unbalanced_single_quotes",
+                description=f"Unbalanced single quotes: {single_quote_count} total (must be even)",
+                location="Global structure",
+                suggested_fix="Ensure every opening ' has a matching closing '",
+                severity="critical"
+            ))
+        
+        # Advanced bracket matching validation using stack
+        bracket_violations = self._validate_nested_delimiters(cai3_output)
+        violations.extend(bracket_violations)
+        
         # Check for incomplete try-except structures
         try_blocks = re.findall(r'T\{[^}]*\}', cai3_output)
         for try_block in try_blocks:
@@ -826,7 +876,71 @@ B#a1:# Optimized validation logic here
                     violation_type="incomplete_try_structure",
                     description=f"Try block without exception handler: {try_block[:30]}...",
                     location=f"Try block: {try_block[:30]}",
-                    suggested_fix="Add X{exception_handler} after the try block",
+                    suggested_fix="Add X{{exception_handler}} after the try block",
+                    severity="critical"
+                ))
+        
+        return violations
+    
+    def _validate_nested_delimiters(self, cai3_output: str) -> List[ConstraintViolation]:
+        """
+        Validate proper nesting and matching of delimiters using stack-based approach.
+        This catches cases where counts match but nesting is incorrect.
+        """
+        violations = []
+        stack = []
+        opening = {'(': ')', '[': ']', '{': '}'}
+        closing = {')', ']', '}'}
+        quotes = {'"', "'"}
+        
+        in_string = False
+        string_char = None
+        
+        for i, char in enumerate(cai3_output):
+            # Handle string contexts - ignore delimiters inside strings
+            if char in quotes and not in_string:
+                in_string = True
+                string_char = char
+            elif char == string_char and in_string:
+                # Check if it's an escaped quote
+                if i > 0 and cai3_output[i-1] != '\\':
+                    in_string = False
+                    string_char = None
+            elif in_string:
+                continue  # Skip all characters inside strings
+            
+            # Handle delimiters outside of strings
+            if char in opening:
+                stack.append((char, i))
+            elif char in closing:
+                if not stack:
+                    violations.append(ConstraintViolation(
+                        violation_type="unexpected_closing_delimiter",
+                        description=f"Unexpected closing delimiter '{char}' at position {i}",
+                        location=f"Character {i}: ...{cai3_output[max(0,i-10):i+10]}...",
+                        suggested_fix=f"Remove unexpected '{char}' or add matching opening delimiter",
+                        severity="critical"
+                    ))
+                else:
+                    last_opening, last_pos = stack.pop()
+                    expected_closing = opening[last_opening]
+                    if char != expected_closing:
+                        violations.append(ConstraintViolation(
+                            violation_type="mismatched_delimiters",
+                            description=f"Mismatched delimiters: '{last_opening}' at pos {last_pos} closed by '{char}' at pos {i}",
+                            location=f"From pos {last_pos} to {i}: ...{cai3_output[max(0,last_pos-5):i+5]}...",
+                            suggested_fix=f"Change '{char}' to '{expected_closing}' or fix the opening delimiter",
+                            severity="critical"
+                        ))
+        
+        # Check for unclosed delimiters
+        if stack:
+            for opening_char, pos in stack:
+                violations.append(ConstraintViolation(
+                    violation_type="unclosed_delimiter",
+                    description=f"Unclosed delimiter '{opening_char}' at position {pos}",
+                    location=f"Position {pos}: ...{cai3_output[max(0,pos-10):pos+20]}...",
+                    suggested_fix=f"Add closing delimiter '{opening[opening_char]}'",
                     severity="critical"
                 ))
         
@@ -902,7 +1016,7 @@ B#a1:# Optimized validation logic here
         return violations
     
     def _attempt_basic_repairs(self, cai3_output: str, violations: List[ConstraintViolation]) -> str:
-        """Attempt basic repairs for common violations."""
+        """Attempt basic repairs for common violations including delimiter balancing."""
         repaired = cai3_output
         
         for violation in violations:
@@ -944,8 +1058,59 @@ B#a1:# Optimized validation logic here
                 # Add missing header
                 if not repaired.strip().startswith('#C3L'):
                     repaired = '#C3L v2\n' + repaired
+                    
+            elif violation.violation_type in ["unbalanced_braces", "unbalanced_parentheses", 
+                                            "unbalanced_brackets", "unbalanced_double_quotes", 
+                                            "unbalanced_single_quotes"]:
+                # Attempt to balance delimiters by adding missing closing delimiters
+                repaired = self._attempt_delimiter_balancing(repaired, violation.violation_type)
+                
+            elif violation.violation_type == "unclosed_delimiter":
+                # Extract the delimiter type from the violation and add closing delimiter
+                if "'{'" in violation.description:
+                    repaired += '}'
+                elif "'('" in violation.description:
+                    repaired += ')'
+                elif "'['" in violation.description:
+                    repaired += ']'
+                elif 'double quote' in violation.description:
+                    repaired += '"'
+                elif 'single quote' in violation.description:
+                    repaired += "'"
         
         return repaired
+    
+    def _attempt_delimiter_balancing(self, content: str, violation_type: str) -> str:
+        """Attempt to balance delimiters by adding missing closing delimiters."""
+        if violation_type == "unbalanced_braces":
+            open_count = content.count('{')
+            close_count = content.count('}')
+            if open_count > close_count:
+                content += '}' * (open_count - close_count)
+        
+        elif violation_type == "unbalanced_parentheses":
+            open_count = content.count('(')
+            close_count = content.count(')')
+            if open_count > close_count:
+                content += ')' * (open_count - close_count)
+        
+        elif violation_type == "unbalanced_brackets":
+            open_count = content.count('[')
+            close_count = content.count(']')
+            if open_count > close_count:
+                content += ']' * (open_count - close_count)
+        
+        elif violation_type == "unbalanced_double_quotes":
+            quote_count = content.count('"')
+            if quote_count % 2 != 0:
+                content += '"'
+        
+        elif violation_type == "unbalanced_single_quotes":
+            quote_count = content.count("'")
+            if quote_count % 2 != 0:
+                content += "'"
+        
+        return content
     
     def _create_fix_prompt(self, violations: List[ConstraintViolation], 
                           cai3_output: str, original_task: str) -> str:
@@ -970,10 +1135,28 @@ B#a1:# Optimized validation logic here
         
         violations_text = '\n'.join(violation_details)
         
+        # Check if any violations are syntax-related
+        has_syntax_violations = any(v.violation_type.startswith(('unbalanced_', 'unclosed_', 'mismatched_', 'unexpected_')) 
+                                  for v in critical_violations + warning_violations)
+        
+        syntax_emphasis = ""
+        if has_syntax_violations:
+            syntax_emphasis = """
+🔧 SYNTAX VALIDATION FAILURE DETECTED:
+Your code has unbalanced brackets, braces, parentheses, or quotes.
+You MUST verify that every opening delimiter has a matching closing delimiter:
+- Every { has a matching }
+- Every ( has a matching )
+- Every [ has a matching ]
+- Every " has a matching "
+- Every ' has a matching '
+
+"""
+        
         fix_prompt = f"""🚨 FORMAT VIOLATION - IMMEDIATE CORRECTION REQUIRED 🚨
 
 Your previous response was REJECTED because it did not follow the format.
-
+{syntax_emphasis}
 🔴 WHAT YOU DID WRONG:
 {violations_text}
 
@@ -987,6 +1170,14 @@ You must start your response with exactly these lines:
 [your CAI3 code here]
 
 ❌ NO other text allowed before, between, or after these sections.
+
+🔧 MANDATORY PRE-SUBMISSION VALIDATION:
+Before responding, check your CAI3-LITE code for:
+✓ Balanced brackets: [ ]
+✓ Balanced braces: {{ }}
+✓ Balanced parentheses: ( )
+✓ Balanced quotes: " " and ' '
+✓ Proper CAI3-LITE syntax
 
 TASK: {original_task}
 

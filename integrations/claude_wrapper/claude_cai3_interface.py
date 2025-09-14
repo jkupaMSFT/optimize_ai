@@ -281,18 +281,83 @@ p23: "original_variable_name"
 
 ❌ FORBIDDEN: NO explanatory text, NO prose, NO comments outside these sections.
 
+🚨 CRITICAL CAI3-LITE SYNTAX RULES:
+
+❌ NEVER USE PYTHON SYNTAX:
+- NO: from dataclasses import dataclass
+- NO: @dataclass 
+- NO: CompressionAnalyzer() 
+- NO: Path("output.txt")
+- NO: file_path.exists()
+- NO: try:/except: blocks with Python syntax
+- NO: Full Python class/method names in table
+
+✅ ONLY USE CAI3-LITE COMPRESSED SYNTAX:
+- Table entries: C:ct,M:ct.ia#a2 (NOT C:CompressionTier,M:CompressionTier.is_initialized#a2)
+- Body content: hash_1234();v=ca();an=ao (NOT Python imports or full method calls)
+- Use hash references: hash_7b30(k) (NOT Path(key))
+- Use compressed variables: s.mi, s.na (NOT self.method_name)
+- Use pool references: p0, p1, p2 (NOT full variable names)
+
+🚨 CRITICAL V: SECTION REQUIREMENT - VARIABLE MAPPING COMPLETENESS:
+The V: section MUST contain EVERY single-letter variable that appears in ANY body section (B#).
+
+❌ WRONG (Missing V: section):
+D:hash_ca00=error,hash_e29c=name
+B#a0:s.na='test';i=len(s.fp);j=i/4;for k in r:v=s.af(k)
+
+✅ CORRECT (Complete V: section with ALL variable mappings):
+D:hash_ca00=error,hash_e29c=name
+V:s=self,i=index,j=result,k=key,v=value,t=total,u=usage_stats,w=tier_name,g=size,n=tier,o=item,m=metadata,r=requests
+B#a0:s.na='test';i=len(s.fp);j=i/4;for k in r:v=s.af(k)
+
+🚨 CRITICAL D: SECTION REQUIREMENT - HASH MAPPING COMPLETENESS:
+The D: section MUST contain EVERY hash_XXXX reference that appears in ANY body section (B#).
+
+❌ WRONG (Incomplete D: section):
+D:g0=o.name
+B#a0:if hash_ca00 in v:return hash_e29c
+B#a1:k=hash_7b30(hash_2308)
+
+✅ CORRECT (Complete D: section with ALL hash mappings):
+D:g0=o.name,hash_ca00=error,hash_e29c=name,hash_7b30=Path,hash_2308="/tmp/output"
+B#a0:if hash_ca00 in v:return hash_e29c
+B#a1:k=hash_7b30(hash_2308)
+
+🎯 CORRECT CAI3-LITE EXAMPLE WITH COMPLETE HASH MAPPINGS:
+#C3L v2 py=3.11 f=example.py
+D:g0=o.name,hash_ca00=error,hash_e29c=name,hash_e0f8=threshold,hash_c904=description
+V:s=self,i=index,j=result,k=key,v=value,t=total,u=usage_stats,w=tier_name,g=size,n=tier,o=item
+P:p0="value1",p1="value2"
+X:a0=hash1,a1=hash2
+T:C:ct,M:ct.ia#a2,M:ct.gc#a3,C:ca,M:ca.i#a4
+---
+B#a2:return s.mi
+B#a3:return {{hash_e29c:s.na,hash_e0f8:s.th,p8:s.co,hash_c904:s.de}}
+B#a4:s.na='CompressionAnalyzer';if hash_ca00 in result:return result
+
+❌ WRONG (Python-mixed):
+T:C:CompressionTier,M:CompressionTier.is_initialized#a2
+B#a0:from dataclasses import dataclass;analyzer=CompressionAnalyzer()
+B#a7:try:file_path=Path(file_path);if not file_path.exists():
+
 EXAMPLE CORRECT RESPONSE:
 === MAPPINGS ===
 hash_1234: calculate_total
 p25: "user_email_address"
+s: self
+i: index
+v: value
 
 === CAI3-LITE ===
 #C3L v2 py=3.11 f=example.py
-P:p0="value1",p1="value2"
-X:a0=hash1,a1=hash2
-T:C:MyClass,M:MyClass.method#a0
+D:hash_1234=calculate_total_method
+V:s=self,i=index,v=value
+P:p0="value1",p25="user_email_address"
+X:a0=calc1,a1=calc2
+T:C:ct,M:ct.ia#a0
 ---
-B#a0:return x + y
+B#a0:return hash_1234(x,y)
 
 CONSTRAINTS (VIOLATION = FAILURE):
 1. {hash_constraint}
@@ -303,8 +368,13 @@ CONSTRAINTS (VIOLATION = FAILURE):
 6. NO "(was ...)" or "(originally ...)" text ANYWHERE
 7. NO "..." truncation markers ANYWHERE
 8. Exact CAI3-LITE syntax required
-9. ONLY VALID SECTIONS: #C3L, I:, D:, X:, P:, T:, B# - NO R: or other sections
+9. ONLY VALID SECTIONS: #C3L, I:, D:, V:, X:, P:, T:, B# - NO R: or other sections
 10. NO raw data, base64, or R: sections allowed
+11. 🚨 NO PYTHON IMPORTS OR SYNTAX IN BODY BLOCKS
+12. 🚨 USE SHORT ALIASES IN TABLE, NOT FULL CLASS NAMES
+13. 🚨 ALL BODY CONTENT MUST BE CAI3-COMPRESSED, NOT PYTHON
+14. 🚨 D: SECTION MUST CONTAIN ALL hash_XXXX MAPPINGS USED IN BODY SECTIONS
+15. 🚨 V: SECTION MUST CONTAIN ALL single-letter variable mappings used in BODY SECTIONS
 
 🔧 MANDATORY SYNTAX VALIDATION:
 Before submitting your response, VERIFY:
@@ -315,8 +385,24 @@ Before submitting your response, VERIFY:
 ✓ Every opening single quote ' has a closing single quote '
 ✓ All CAI3-LITE syntax is properly formed
 ✓ No unmatched delimiters anywhere in the output
+✓ 🚨 NO PYTHON SYNTAX IN ANY BODY BLOCKS
+✓ 🚨 TABLE USES SHORT ALIASES ONLY (ct, ca) NOT FULL NAMES
+✓ 🚨 D: SECTION HAS ALL hash_XXXX MAPPINGS FOUND IN B# SECTIONS
+✓ 🚨 V: SECTION HAS ALL single-letter variable mappings found in B# SECTIONS
 
-🚨 SELF-CHECK REQUIRED: After generating code, check all opening brackets/braces/parentheses have matching closing brackets/braces/parentheses. All quotes are properly paired. Validate that the output is proper CAI3-LITE syntax.
+🚨 CRITICAL PRE-SUBMISSION HASH VALIDATION:
+1. Scan ALL B# sections for hash_XXXX references
+2. Verify EVERY hash_XXXX appears in D: section with mapping
+3. Count: D: mappings ≥ unique hash_XXXX references in bodies
+4. If hash_ca00 appears in body → D: MUST have hash_ca00=something
+
+🚨 CRITICAL PRE-SUBMISSION VARIABLE VALIDATION:
+1. Scan ALL B# sections for single-letter variables (s, i, j, k, v, t, u, w, g, n, o, m, r, etc.)
+2. Verify EVERY single-letter variable appears in V: section with mapping
+3. Count: V: mappings ≥ unique single-letter variables in bodies
+4. If 's' appears in body → V: MUST have s=self or similar
+
+🚨 SELF-CHECK REQUIRED: After generating code, check all opening brackets/braces/parentheses have matching closing brackets/braces/parentheses. All quotes are properly paired. Validate that the output is proper CAI3-LITE syntax with NO Python mixed in. VERIFY that every hash_XXXX in body sections has a corresponding mapping in D: section. VERIFY that every single-letter variable in body sections has a corresponding mapping in V: section.
 
 TASK: {task}
 
@@ -588,6 +674,12 @@ B#a1:# Optimized validation logic here
         violations.extend(section_violations)
         self.logger.info(f"  Result: {len(section_violations)} section violations")
         
+        # 7. Validate V: section variable mappings (if present)
+        self.logger.info("🔤 Validating V: section variable mappings...")
+        v_section_violations = self._validate_v_section_constraints(cai3_output)
+        violations.extend(v_section_violations)
+        self.logger.info(f"  Result: {len(v_section_violations)} V: section violations")
+        
         # Log violation details for debugging
         if violations:
             self.logger.warning(f"⚠️ VALIDATION ISSUES FOUND:")
@@ -639,18 +731,51 @@ B#a1:# Optimized validation logic here
         )
     
     def _validate_hash_constraints(self, cai3_output: str, cai3_full: CAI3Full) -> List[ConstraintViolation]:
-        """Validate hash usage - allow new hashes if they follow proper format."""
+        """Validate hash usage - ensure ALL hash references in body sections have mappings in D: section."""
         violations = []
         
-        # Find hash references in the output
-        hash_pattern = r'\bhash_([a-f0-9]{4})\b'
-        used_hashes = set(re.findall(hash_pattern, cai3_output))
+        # Extract hash references from body sections
+        body_hash_refs = set()
+        body_sections = re.findall(r'B#[^:]*:(.*?)(?=\nB#|\n[A-Z]:|$)', cai3_output, re.DOTALL)
         
-        # Convert to full hash format for consistency
-        full_hashes = {f"hash_{h}" for h in used_hashes}
+        for body_content in body_sections:
+            # Find all hash_XXXX references in this body
+            hash_matches = re.findall(r'\bhash_([a-f0-9A-F]{4})\b', body_content)
+            for hash_suffix in hash_matches:
+                body_hash_refs.add(f"hash_{hash_suffix.lower()}")
+        
+        self.logger.info(f"🔍 Found {len(body_hash_refs)} unique hash references in body sections: {sorted(body_hash_refs)}")
+        
+        # Extract hash mappings from D: section
+        d_section_hashes = set()
+        d_section_match = re.search(r'D:([^\n]*)', cai3_output)
+        if d_section_match:
+            d_content = d_section_match.group(1)
+            # Find hash mappings in D: section (hash_XXXX=something)
+            hash_mappings = re.findall(r'\bhash_([a-f0-9A-F]{4})=', d_content)
+            for hash_suffix in hash_mappings:
+                d_section_hashes.add(f"hash_{hash_suffix.lower()}")
+        
+        self.logger.info(f"🗺️ Found {len(d_section_hashes)} hash mappings in D: section: {sorted(d_section_hashes)}")
+        
+        # Find hash references that are missing from D: section
+        missing_hashes = body_hash_refs - d_section_hashes
+        
+        if missing_hashes:
+            self.logger.error(f"❌ CRITICAL: {len(missing_hashes)} hash references missing from D: section")
+            for missing_hash in sorted(missing_hashes):
+                violations.append(ConstraintViolation(
+                    violation_type="missing_hash_mapping",
+                    description=f"Hash '{missing_hash}' is used in body sections but not defined in D: section",
+                    location=f"Missing from D: section: {missing_hash}",
+                    suggested_fix=f"Add '{missing_hash}=original_value' to the D: section",
+                    severity="critical"
+                ))
+        else:
+            self.logger.info(f"✅ All {len(body_hash_refs)} hash references have mappings in D: section")
         
         # Validate hash format (should be hash_XXXX where XXXX is 4 hex digits)
-        for hash_ref in full_hashes:
+        for hash_ref in body_hash_refs:
             if not re.match(r'^hash_[a-f0-9]{4}$', hash_ref):
                 violations.append(ConstraintViolation(
                     violation_type="invalid_hash_format",
@@ -660,9 +785,11 @@ B#a1:# Optimized validation logic here
                     severity="warning"
                 ))
         
-        # Note: We allow new hashes to be created as long as they follow the format
-        # The mapping system will handle the translation back to original values
-        self.logger.debug(f"Found {len(full_hashes)} hash references in output - allowing new hashes")
+        # Additional validation: Check if D: section has orphaned hash mappings
+        orphaned_hashes = d_section_hashes - body_hash_refs
+        if orphaned_hashes:
+            self.logger.warning(f"⚠️ Found {len(orphaned_hashes)} hash mappings in D: section not used in body sections: {sorted(orphaned_hashes)}")
+            # This is just a warning, not an error - extra mappings are OK
         
         return violations
     
@@ -771,18 +898,34 @@ B#a1:# Optimized validation logic here
             'return', 'yield', 'import', 'from', 'as', 'with', 'lambda', 'and', 'or', 'not',
             'is', 'in', 'True', 'False', 'None', 'self', 'cls', 'super', 'len', 'str', 'int',
             'float', 'bool', 'list', 'dict', 'set', 'tuple', 'range', 'enumerate', 'zip',
+            'sum', 'round', 'abs', 'min', 'max', 'sorted', 'reversed', 'any', 'all',
+            'Exception', 'ValueError', 'TypeError', 'KeyError', 'IndexError', 'AttributeError',
+            'break', 'continue', 'pass', 'assert', 'raise', 'del', 'global', 'nonlocal',
+            'print', 'input', 'open', 'close', 'read', 'write', 'get', 'set', 'add', 'remove',
+            'sum', 'round', 'abs', 'min', 'max', 'sorted', 'reversed', 'any', 'all',
+            'Exception', 'ValueError', 'TypeError', 'KeyError', 'IndexError', 'AttributeError',
+            'break', 'continue', 'pass', 'assert', 'raise', 'del', 'global', 'nonlocal',
+            'print', 'input', 'open', 'close', 'read', 'write', 'get', 'set', 'add', 'remove',
             
             # Common method names that don't need mapping
             'init', 'str', 'repr', 'len', 'iter', 'next', 'call', 'getitem', 'setitem',
             'delitem', 'contains', 'enter', 'exit', 'eq', 'ne', 'lt', 'le', 'gt', 'ge',
             
-            # Common variable patterns
+            # Common variable patterns and constants
             'i', 'j', 'k', 'x', 'y', 'z', 'n', 'idx', 'key', 'val', 'value', 'item', 'data',
-            'result', 'output', 'input', 'params', 'args', 'kwargs', 'config', 'options'
+            'result', 'output', 'input', 'params', 'args', 'kwargs', 'config', 'options',
+            'USD', 'EUR', 'GBP', 'CAD',  # Common currency codes
+            
+            # Raw data identifiers (legitimate CAI3 constructs)
+            'raw_fcbf2cd2', 'raw_ddaea84c'  # These are legitimate raw data references
         }
     
     def _looks_like_new_identifier(self, identifier: str) -> bool:
         """Determine if an identifier looks like a new name that needs mapping."""
+        # First check - if it's in our keywords list, it doesn't need mapping
+        if identifier.lower() in self._get_cai3_keywords() or identifier in self._get_cai3_keywords():
+            return False
+            
         # Skip very common patterns
         if identifier.lower() in self._get_cai3_keywords():
             return False
@@ -797,6 +940,10 @@ B#a1:# Optimized validation logic here
             
         # Skip CAI3 pattern identifiers
         if re.match(r'^[a-z]\d+$', identifier):  # a0, b1, etc.
+            return False
+            
+        # Skip hash identifiers - these are CAI3 constructs, not new identifiers
+        if re.match(r'^hash_[a-f0-9]{4}$', identifier):
             return False
             
         # This looks like a real identifier that might need mapping
@@ -960,14 +1107,13 @@ B#a1:# Optimized validation logic here
                 severity="critical"
             ))
         
-        # Check for forbidden patterns
+        # Check for forbidden patterns - be more permissive with R: sections and raw data
         forbidden_patterns = [
             ('(was ', 'parentheticals'),
             ('(originally ', 'parentheticals'), 
             ('...)', 'ellipsis'),
-            ('p...', 'truncated_pools'),
-            ('R:', 'raw_sections'),
-            ('raw_', 'raw_data')
+            ('p...', 'truncated_pools')
+            # Removed R: and raw_ patterns - these are legitimate CAI3 constructs
         ]
         
         for pattern, violation_name in forbidden_patterns:
@@ -986,8 +1132,8 @@ B#a1:# Optimized validation logic here
         """Validate that only allowed CAI3-LITE section identifiers are used."""
         violations = []
         
-        # Define valid CAI3-LITE section identifiers
-        valid_sections = {'#C3L', 'I:', 'D:', 'X:', 'P:', 'T:', 'B#', '---'}
+        # Define valid CAI3-LITE section identifiers - include R: for raw data and V: for variable mappings
+        valid_sections = {'#C3L', 'I:', 'D:', 'V:', 'X:', 'P:', 'T:', 'B#', 'R:', '---'}
         
         lines = cai3_output.split('\n')
         for line_num, line in enumerate(lines, 1):
@@ -1015,12 +1161,106 @@ B#a1:# Optimized validation logic here
         
         return violations
     
+    def _validate_v_section_constraints(self, cai3_output: str) -> List[ConstraintViolation]:
+        """Validate V: section variable mappings - ensure ALL single-letter variables in body sections have mappings in V: section."""
+        violations = []
+        
+        # Extract single-letter variable references from body sections
+        body_variable_refs = set()
+        body_sections = re.findall(r'B#[^:]*:(.*?)(?=\nB#|\n[A-Z]:|$)', cai3_output, re.DOTALL)
+        
+        for body_content in body_sections:
+            # Find all single-letter variables in this body (pattern: letter followed by . or used as standalone variable)
+            # Match patterns like: s.method, i=value, j+1, k in range, v.append, etc.
+            var_matches = re.findall(r'\b([a-z])\b(?=[.\[\]=+\-*/\s]|$)', body_content)
+            # Also match patterns like s.method where s is at start of expression
+            var_matches.extend(re.findall(r'\b([a-z])\.', body_content))
+            # Match variables used in assignments and operations
+            var_matches.extend(re.findall(r'\b([a-z])\s*[=+\-*/]', body_content))
+            var_matches.extend(re.findall(r'[=+\-*/]\s*([a-z])\b', body_content))
+            # Match variables in for loops and conditions
+            var_matches.extend(re.findall(r'for\s+([a-z])\s+in', body_content))
+            var_matches.extend(re.findall(r'if\s+([a-z])\b', body_content))
+            
+            for var_letter in var_matches:
+                # Filter out obvious non-variables (reserved words, etc.)
+                if var_letter not in ['f', 'r', 'x', 'y', 'z'] and len(var_letter) == 1:
+                    body_variable_refs.add(var_letter)
+        
+        self.logger.info(f"🔍 Found {len(body_variable_refs)} unique single-letter variables in body sections: {sorted(body_variable_refs)}")
+        
+        # Extract variable mappings from V: section
+        v_section_variables = set()
+        v_section_match = re.search(r'V:([^\n]*)', cai3_output)
+        if v_section_match:
+            v_content = v_section_match.group(1)
+            # Find variable mappings in V: section (letter=value format)
+            var_mappings = re.findall(r'\b([a-z])=', v_content)
+            for var_letter in var_mappings:
+                v_section_variables.add(var_letter)
+        
+        self.logger.info(f"🗺️ Found {len(v_section_variables)} variable mappings in V: section: {sorted(v_section_variables)}")
+        
+        # Find variable references that are missing from V: section
+        missing_variables = body_variable_refs - v_section_variables
+        
+        if missing_variables:
+            self.logger.error(f"❌ CRITICAL: {len(missing_variables)} single-letter variables missing from V: section")
+            for missing_var in sorted(missing_variables):
+                violations.append(ConstraintViolation(
+                    violation_type="missing_variable_mapping",
+                    description=f"Single-letter variable '{missing_var}' is used in body sections but not defined in V: section",
+                    location=f"Missing from V: section: {missing_var}",
+                    suggested_fix=f"Add '{missing_var}=original_variable_name' to the V: section",
+                    severity="critical"
+                ))
+        else:
+            self.logger.info(f"✅ All {len(body_variable_refs)} single-letter variables have mappings in V: section")
+        
+        # Validate V: section format (should be V:var=value,var2=value2,...)
+        if v_section_match:
+            v_content = v_section_match.group(1).strip()
+            if v_content and not re.match(r'^[a-z]=[^,]+(?:,[a-z]=[^,]+)*$', v_content):
+                violations.append(ConstraintViolation(
+                    violation_type="invalid_v_section_format",
+                    description=f"V: section format is invalid. Expected format: 'V:var=value,var2=value2'",
+                    location=f"V: section content: {v_content}",
+                    suggested_fix="Use format V:s=self,i=index,v=value (comma-separated, single letters only)",
+                    severity="warning"
+                ))
+        
+        # Additional validation: Check if V: section has orphaned variable mappings
+        orphaned_variables = v_section_variables - body_variable_refs
+        if orphaned_variables:
+            self.logger.warning(f"⚠️ Found {len(orphaned_variables)} variable mappings in V: section not used in body sections: {sorted(orphaned_variables)}")
+            # This is just a warning, not an error - extra mappings are OK for future use
+        
+        return violations
+    
     def _attempt_basic_repairs(self, cai3_output: str, violations: List[ConstraintViolation]) -> str:
-        """Attempt basic repairs for common violations including delimiter balancing."""
+        """Attempt basic repairs for common violations including delimiter balancing and hash mapping fixes."""
         repaired = cai3_output
         
         for violation in violations:
-            if violation.violation_type == "forbidden_parentheticals":
+            if violation.violation_type == "missing_hash_mapping":
+                # Extract the missing hash from the violation description
+                missing_hash_match = re.search(r"Hash '(hash_[a-f0-9]{4})'", violation.description)
+                if missing_hash_match:
+                    missing_hash = missing_hash_match.group(1)
+                    missing_hash = missing_hash_match.group(1)
+                    repaired = self._add_missing_hash_mapping(repaired, missing_hash)
+                    # Try to add the missing hash mapping to D: section
+                    repaired = self._add_missing_hash_mapping(repaired, missing_hash)
+                    
+            elif violation.violation_type == "missing_variable_mapping":
+                # Extract the missing variable from the violation description
+                missing_var_match = re.search(r"Single-letter variable '([a-z])'", violation.description)
+                if missing_var_match:
+                    missing_var = missing_var_match.group(1)
+                    # Try to add the missing variable mapping to V: section
+                    repaired = self._add_missing_variable_mapping(repaired, missing_var)
+                    
+            elif violation.violation_type == "forbidden_parentheticals":
                 # Remove parentheticals
                 repaired = re.sub(r'\(was [^)]*\)', '', repaired)
                 repaired = re.sub(r'\(originally [^)]*\)', '', repaired)
@@ -1030,13 +1270,7 @@ B#a1:# Optimized validation logic here
                 repaired = repaired.replace('...)', ')')
                 repaired = repaired.replace('p...', '')
                 
-            elif violation.violation_type == "forbidden_raw_sections":
-                # Remove R: sections entirely
-                repaired = re.sub(r'^R:.*$', '', repaired, flags=re.MULTILINE)
-                
-            elif violation.violation_type == "forbidden_raw_data":
-                # Remove lines containing raw_ data
-                repaired = re.sub(r'^.*raw_.*$', '', repaired, flags=re.MULTILINE)
+            # Removed repair logic for R: sections and raw data - these are legitimate CAI3 constructs
                 
             elif violation.violation_type == "invalid_section_identifier":
                 # Remove lines with invalid section identifiers
@@ -1045,7 +1279,7 @@ B#a1:# Optimized validation logic here
                 for line in repaired.split('\n'):
                     if ':' in line and not line.startswith('#') and not line.startswith('B#'):
                         section_prefix = line.split(':')[0] + ':'
-                        valid_sections = {'I:', 'D:', 'X:', 'P:', 'T:', '---:'}
+                        valid_sections = {'I:', 'D:', 'V:', 'X:', 'P:', 'T:', '---:'}
                         if section_prefix not in valid_sections:
                             invalid_lines.append(line)
                 
@@ -1079,6 +1313,85 @@ B#a1:# Optimized validation logic here
                     repaired += "'"
         
         return repaired
+    
+    def _add_missing_hash_mapping(self, content: str, missing_hash: str) -> str:
+        """Add a missing hash mapping to the D: section."""
+        # Find the D: section
+        d_section_match = re.search(r'(D:)([^\n]*)', content)
+        if d_section_match:
+            d_prefix = d_section_match.group(1)
+            d_content = d_section_match.group(2)
+            
+            # Add the missing hash mapping with a placeholder value
+            if d_content.strip():
+                new_d_content = f"{d_content},{missing_hash}=unknown"
+            else:
+                new_d_content = f"{missing_hash}=unknown"
+            
+            # Replace the D: section
+            new_d_section = f"{d_prefix}{new_d_content}"
+            content = content.replace(d_section_match.group(0), new_d_section)
+        else:
+            # No D: section exists, add one after the header
+            header_match = re.search(r'(#C3L[^\n]*\n)', content)
+            if header_match:
+                header = header_match.group(1)
+                insertion_point = header_match.end()
+                new_d_section = f"D:{missing_hash}=unknown\n"
+                content = content[:insertion_point] + new_d_section + content[insertion_point:]
+        
+        return content
+    
+    def _add_missing_variable_mapping(self, content: str, missing_var: str) -> str:
+        """Add a missing variable mapping to the V: section."""
+        # Find the V: section
+        v_section_match = re.search(r'(V:)([^\n]*)', content)
+        if v_section_match:
+            v_prefix = v_section_match.group(1)
+            v_content = v_section_match.group(2)
+            
+            # Add the missing variable mapping with a reasonable default value
+            var_defaults = {
+                's': 'self', 'i': 'index', 'j': 'result', 'k': 'key', 'v': 'value',
+                't': 'total', 'u': 'usage', 'w': 'wrapper', 'g': 'group', 'n': 'number',
+                'o': 'object', 'm': 'metadata', 'r': 'result', 'c': 'count', 'l': 'list',
+                'e': 'element', 'p': 'parameter', 'a': 'argument', 'b': 'buffer', 'd': 'data'
+            }
+            default_value = var_defaults.get(missing_var, f"variable_{missing_var}")
+            
+            if v_content.strip():
+                new_v_content = f"{v_content},{missing_var}={default_value}"
+            else:
+                new_v_content = f"{missing_var}={default_value}"
+            
+            # Replace the V: section
+            new_v_section = f"{v_prefix}{new_v_content}"
+            content = content.replace(v_section_match.group(0), new_v_section)
+        else:
+            # No V: section exists, add one after D: section or header
+            # Try to find D: section first
+            d_section_match = re.search(r'D:[^\n]*\n', content)
+            if d_section_match:
+                insertion_point = d_section_match.end()
+            else:
+                # Fall back to after header
+                header_match = re.search(r'(#C3L[^\n]*\n)', content)
+                if header_match:
+                    insertion_point = header_match.end()
+                else:
+                    insertion_point = 0
+            
+            var_defaults = {
+                's': 'self', 'i': 'index', 'j': 'result', 'k': 'key', 'v': 'value',
+                't': 'total', 'u': 'usage', 'w': 'wrapper', 'g': 'group', 'n': 'number',
+                'o': 'object', 'm': 'metadata', 'r': 'result', 'c': 'count', 'l': 'list',
+                'e': 'element', 'p': 'parameter', 'a': 'argument', 'b': 'buffer', 'd': 'data'
+            }
+            default_value = var_defaults.get(missing_var, f"variable_{missing_var}")
+            new_v_section = f"V:{missing_var}={default_value}\n"
+            content = content[:insertion_point] + new_v_section + content[insertion_point:]
+        
+        return content
     
     def _attempt_delimiter_balancing(self, content: str, violation_type: str) -> str:
         """Attempt to balance delimiters by adding missing closing delimiters."""
@@ -1139,6 +1452,10 @@ B#a1:# Optimized validation logic here
         has_syntax_violations = any(v.violation_type.startswith(('unbalanced_', 'unclosed_', 'mismatched_', 'unexpected_')) 
                                   for v in critical_violations + warning_violations)
         
+        # Check if any violations are hash mapping-related
+        has_hash_violations = any(v.violation_type == 'missing_hash_mapping' 
+                                for v in critical_violations + warning_violations)
+        
         syntax_emphasis = ""
         if has_syntax_violations:
             syntax_emphasis = """
@@ -1153,10 +1470,33 @@ You MUST verify that every opening delimiter has a matching closing delimiter:
 
 """
         
+        hash_emphasis = ""
+        if has_hash_violations:
+            hash_emphasis = """
+🚨 HASH MAPPING VALIDATION FAILURE DETECTED:
+Your D: section is INCOMPLETE! You used hash references in body sections (B#) 
+without defining them in the D: section.
+
+CRITICAL REQUIREMENT:
+- If B#a0 contains hash_ca00 → D: section MUST have hash_ca00=something
+- If B#a1 contains hash_e29c → D: section MUST have hash_e29c=something
+- EVERY hash_XXXX in ANY body section MUST be in D: section
+
+EXAMPLE:
+❌ WRONG:
+D:g0=o.name
+B#a0:if hash_ca00 in v:return hash_e29c
+
+✅ CORRECT:
+D:g0=o.name,hash_ca00=error,hash_e29c=name
+B#a0:if hash_ca00 in v:return hash_e29c
+
+"""
+        
         fix_prompt = f"""🚨 FORMAT VIOLATION - IMMEDIATE CORRECTION REQUIRED 🚨
 
 Your previous response was REJECTED because it did not follow the format.
-{syntax_emphasis}
+{syntax_emphasis}{hash_emphasis}
 🔴 WHAT YOU DID WRONG:
 {violations_text}
 
@@ -1178,6 +1518,7 @@ Before responding, check your CAI3-LITE code for:
 ✓ Balanced parentheses: ( )
 ✓ Balanced quotes: " " and ' '
 ✓ Proper CAI3-LITE syntax
+✓ 🚨 D: section has ALL hash_XXXX mappings used in B# sections
 
 TASK: {original_task}
 

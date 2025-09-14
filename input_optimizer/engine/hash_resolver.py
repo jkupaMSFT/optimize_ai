@@ -54,21 +54,27 @@ class HashResolver:
         
         return token_str
     
+    # Update the resolve method to handle missing mappings better
     def resolve(self, token_str: str, context: str = 'load') -> str:
-        """Resolve a token with context awareness."""
+        """Resolve a token with context awareness - PROPERLY FIXED to resolve mappings."""
         with self._lock:
             if context == 'store':
                 return token_str
             
             normalized = self.normalize_hash(token_str)
             
+            # First check if we have a mapping for this hash
             if normalized in self.mappings:
-                return self.mappings[normalized]
+                resolved = self.mappings[normalized]
+                self.logger.debug(f"✅ Resolved: {token_str} → {resolved}")
+                return str(resolved)  # Ensure we return string value
             
-            # Track unresolved
+            # Only mark as unresolved if it's actually a hash and we don't have mapping
             if normalized.startswith('hash_'):
                 self._unresolved.add(normalized)
-                self.logger.debug(f"Unresolved: {token_str} → {normalized}")
+                self.logger.warning(f"⚠️ Unresolved hash: {token_str} → {normalized}")
+                # Return the hash as-is if we can't resolve it (don't prefix UNRESOLVED_)
+                return token_str
             
             return token_str
     

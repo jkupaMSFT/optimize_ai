@@ -2309,55 +2309,262 @@ class CAI3Translator:
         self.strict_mode = strict_mode
         self.logger = logging.getLogger(__name__)
     
-    # STEP 1: Add early resolution method to CAI3Translator class
+    # Replace the existing translate_cai3_lite_to_python method (around line 1600)
 
     def translate_cai3_lite_to_python(self, cai3_lite_content: str, 
                                     source_path: Path,
                                     claude_mappings: Dict[str, Any] = None) -> str:
         """
-        Main entry point with FIXED resolution order.
+        Main entry point for CAI3-LITE to Python translation with proper mapping extraction.
         """
         try:
-            self.logger.info("🔧 Starting CAI3-LITE translation with early resolution")
+            self.logger.info("🔧 Starting CAI3-LITE to Python translation with mapping extraction fix")
             
-            # CRITICAL FIX: Parse FIRST to extract pools and mappings
+            # Step 1: Extract mappings from Claude response if available
+            extracted_mappings = {
+                'hash_mappings': {},
+                'pools': {},
+                'variables': {},
+                'methods': {}
+            }
+            
+            if claude_mappings:
+                # Claude mappings might be the full response or already extracted
+                if isinstance(claude_mappings, str):
+                    # It's the full Claude response
+                    extracted_mappings = self._extract_mappings_from_claude_response(claude_mappings)
+                elif isinstance(claude_mappings, dict):
+                    # Already extracted, merge them
+                    extracted_mappings.update(claude_mappings)
+            
+            # Step 2: Extract pools from CAI3 content itself
+            cai3_pools = self._extract_pools_from_cai3_content(cai3_lite_content)
+            extracted_mappings['pools'].update(cai3_pools)
+            
+            self.logger.info(f"📊 Total mappings: {len(extracted_mappings['hash_mappings'])} hashes, {len(extracted_mappings['pools'])} pools")
+            
+            # Step 3: Apply format fixes with mappings
+            from .cai3_format_fixer import apply_cai3_format_fixes
+            fixed_content = apply_cai3_format_fixes(cai3_lite_content, extracted_mappings)
+            self.logger.info("✅ Applied format fixes")
+            
+            # Step 4: Parse CAI3-LITE
             from .cai3_grammar import CAI3LiteParser
             parser = CAI3LiteParser()
-            ast_obj = parser.parse(cai3_lite_content)
+            ast_obj = parser.parse(fixed_content)
             
             if not ast_obj:
                 self.logger.error("Failed to parse CAI3-LITE content")
                 return self._create_fallback_code(source_path, "Parse failed")
             
-            # Build comprehensive mappings from AST
-            mappings = self._build_comprehensive_mappings(ast_obj, source_path)
+            # Step 5: Create resolution pipeline with extracted mappings
+            from .cai3_resolution_pipeline import CAI3ResolutionPipeline
+            pipeline = CAI3ResolutionPipeline(
+                hash_mappings=extracted_mappings['hash_mappings'],
+                pools=extracted_mappings['pools'],
+                variables=extracted_mappings['variables']
+            )
             
-            # Merge with Claude's mappings
-            if claude_mappings:
-                mappings['pools'].update(claude_mappings.get('pools', {}))
-                mappings['hash_mappings'].update(claude_mappings.get('hash_mappings', {}))
+            self.logger.info(f"✅ Created resolution pipeline with mappings")
             
-            # CRITICAL FIX: Apply early resolution to CAI3 content
-            resolved_content = self._apply_early_resolution(cai3_lite_content, mappings)
-            self.logger.info("✅ Applied early resolution")
+            # Step 6: Resolve all bodies before reconstruction
+            if hasattr(ast_obj, 'bodies'):
+                for body_id, body_content in ast_obj.bodies.items():
+                    resolved_content = pipeline.resolve_content(body_content)
+                    ast_obj.bodies[body_id] = resolved_content
+                    self.logger.info(f"✅ Resolved body {body_id}")
             
-            # Re-parse the resolved content
-            ast_obj_resolved = parser.parse(resolved_content)
-            if not ast_obj_resolved:
-                # Fallback to original AST but with resolved mappings
-                ast_obj_resolved = ast_obj
-                ast_obj_resolved.pools.update(mappings['pools'])
+            # Step 7: Create resolver for AST-level resolution
+            from .hash_resolver import HashResolver
+            resolver = HashResolver(extracted_mappings['hash_mappings'])
             
-            # Continue with normal processing
-            return self._process_resolved_ast(ast_obj_resolved, source_path, mappings)
+            # Step 8: Load or create cache
+            cai3_full, cai3_map = self._load_or_create_cache_with_resolver(
+                source_path, ast_obj, resolver
+            )
+            
+            # Step 9: Reconstruct Python code
+            from .cai3_python_reconstructor import CAI3PythonReconstructor
+            from .cai3_structure_analyzer import CAI3StructureAnalyzer, StructureInfo
+            
+            analyzer = CAI3StructureAnalyzer(cai3_map, cai3_full)
+            structure_dict = analyzer.analyze(ast_obj)
+            
+            # Convert dict to StructureInfo object
+            # The structure_dict['classes'] is a list, but StructureInfo expects classes as a dict
+            classes_dict = {}
+            classes_list = structure_dict.get('classes', [])
+            for cls in classes_list:
+                cls_name = cls.get('name', 'UnknownClass')
+                classes_dict[cls_name] = cls
+            
+            # Ensure functions is a dict, not a list
+            functions = structure_dict.get('functions', [])
+            if isinstance(functions, list):
+                functions_dict = {}
+                for func in functions:
+                    if isinstance(func, dict) and 'name' in func:
+                        functions_dict[func['name']] = func
+                functions = functions_dict
+            
+            structure = StructureInfo(
+                classes=classes_dict,
+                functions=functions,
+                dataclasses=structure_dict.get('dataclasses', {}),
+                enums=structure_dict.get('enums', {}),
+                main_block=structure_dict.get('main_block'),
+                imports=structure_dict.get('imports', [])
+            )
+            
+            reconstructor = CAI3PythonReconstructor(self)
+            python_code = reconstructor.reconstruct(ast_obj, structure, cai3_full, cai3_map)
+            
+            # Step 10: Final validation and formatting
+            validated_code = self._validate_python_ast(python_code)
+            final_code = self._apply_black_formatting(validated_code)
+            
+            self.logger.info(f"✅ Translation successful: {len(final_code)} chars")
+            return final_code
             
         except Exception as e:
             self.logger.error(f"Translation failed: {e}")
             import traceback
             self.logger.error(traceback.format_exc())
-            return self._fallback_cai3_reconstruction(cai3_lite_content, claude_mappings)
+            return self._fallback_cai3_reconstruction(cai3_lite_content, extracted_mappings)
+
+    def _extract_hash_mappings_from_response(self, claude_mappings: Dict[str, Any]) -> Dict[str, str]:
+        """Extract hash mappings from Claude's MAPPINGS section."""
+        hash_mappings = {}
         
-    # Add these methods to complete the integration
+        # Look for patterns like "hash_3f37: print"
+        if isinstance(claude_mappings, dict):
+            for key, value in claude_mappings.items():
+                if key.startswith('hash_'):
+                    hash_mappings[key] = value
+        
+        return hash_mappings
+    
+    # Add these methods to CAI3Translator class after line 1500 (after __init__)
+
+    def _extract_mappings_from_claude_response(self, claude_response: str) -> Dict[str, Any]:
+        """Extract all mappings from Claude's MAPPINGS section."""
+        mappings = {
+            'hash_mappings': {},
+            'pools': {},
+            'variables': {},
+            'methods': {},
+            'classes': {}
+        }
+        
+        # Find MAPPINGS section
+        if "=== MAPPINGS ===" not in claude_response:
+            self.logger.warning("No MAPPINGS section found in Claude response")
+            return mappings
+        
+        try:
+            # Extract content between MAPPINGS and CAI3-LITE sections
+            mappings_start = claude_response.find("=== MAPPINGS ===")
+            cai3_start = claude_response.find("=== CAI3-LITE ===")
+            
+            if mappings_start == -1:
+                return mappings
+                
+            if cai3_start == -1:
+                mappings_content = claude_response[mappings_start + len("=== MAPPINGS ==="):]
+            else:
+                mappings_content = claude_response[mappings_start + len("=== MAPPINGS ==="):cai3_start]
+            
+            # Parse each line in the mappings section
+            for line in mappings_content.strip().split('\n'):
+                if not line.strip() or not ':' in line:
+                    continue
+                    
+                key, value = line.split(':', 1)
+                key = key.strip()
+                value = value.strip().strip('"')
+                
+                # Categorize the mapping
+                if key.startswith('hash_'):
+                    mappings['hash_mappings'][key] = value
+                elif key.startswith('p') and key[1:].isdigit():
+                    mappings['pools'][key] = value
+                else:
+                    # Could be a method, class, or variable
+                    mappings['variables'][key] = value
+            
+            self.logger.info(f"✅ Extracted mappings: {len(mappings['hash_mappings'])} hashes, {len(mappings['pools'])} pools")
+            
+        except Exception as e:
+            self.logger.error(f"Failed to extract mappings: {e}")
+        
+        return mappings
+
+    def _extract_pools_from_cai3_content(self, cai3_content: str) -> Dict[str, str]:
+        """Extract pool definitions from CAI3 P: section."""
+        pools = {}
+        
+        # Find P: section
+        p_match = re.search(r'^P:(.+?)(?=^[A-Z]:|^B#|^---|$)', cai3_content, re.MULTILINE | re.DOTALL)
+        if not p_match:
+            self.logger.warning("No P: section found in CAI3 content")
+            return pools
+        
+        pool_content = p_match.group(1).strip()
+        
+        # Parse pool definitions: p0="value",p1="value"
+        for pool_def in pool_content.split(','):
+            pool_def = pool_def.strip()
+            if '=' in pool_def:
+                key, value = pool_def.split('=', 1)
+                key = key.strip()
+                value = value.strip()
+                
+                # Remove quotes if present
+                if value.startswith('"') and value.endswith('"'):
+                    value = value[1:-1]
+                elif value.startswith("'") and value.endswith("'"):
+                    value = value[1:-1]
+                    
+                pools[key] = value
+        
+        self.logger.info(f"✅ Extracted {len(pools)} pools from P: section")
+        return pools
+
+    def _extract_all_mappings_from_claude(self, claude_mappings: Dict[str, Any]) -> Dict[str, Any]:
+        """Extract all mappings from Claude response including hash, pool, and variable mappings."""
+        if not claude_mappings:
+            return {'hash_mappings': {}, 'pools': {}, 'variables': {}}
+        
+        # Extract hash mappings, pools, and variables
+        hash_mappings = {}
+        pools = {}
+        variables = {}
+        
+        # Check for direct hash_mappings, pools, and variables keys
+        if isinstance(claude_mappings, dict):
+            if 'hash_mappings' in claude_mappings:
+                hash_mappings.update(claude_mappings['hash_mappings'])
+            
+            if 'pools' in claude_mappings:
+                pools.update(claude_mappings['pools'])
+            
+            if 'variables' in claude_mappings:
+                variables.update(claude_mappings['variables'])
+            
+            # Also check for hash_ prefixed keys at the top level
+            for key, value in claude_mappings.items():
+                if key.startswith('hash_'):
+                    hash_mappings[key] = value
+                elif key.startswith('p') and key[1:].isdigit():
+                    pools[key] = value
+        
+        self.logger.info(f"✅ Extracted {len(hash_mappings)} hash mappings, {len(pools)} pool mappings, and {len(variables)} variable mappings")
+        
+        return {
+            'hash_mappings': hash_mappings,
+            'pools': pools,
+            'variables': variables
+        }
 
     def _process_resolved_ast(self, ast_obj, source_path: Path, mappings: Dict[str, Any]) -> str:
         """Process the resolved AST with proper structure building."""
@@ -2607,8 +2814,18 @@ class CAI3Translator:
         
         from .cai3_structure_analyzer import CAI3StructureAnalyzer
         
-        # Analyze structure
-        analyzer = CAI3StructureAnalyzer()
+        # Add debugging for mapping data
+        self.logger.info("🔍 DEBUGGING ANALYZER CREATION:")
+        self.logger.info(f"   📊 cai3_map type: {type(cai3_map)}")
+        self.logger.info(f"   📊 cai3_full type: {type(cai3_full)}")
+        if hasattr(cai3_map, '__dict__'):
+            self.logger.info(f"   📋 cai3_map attributes: {list(vars(cai3_map).keys())}")
+        if isinstance(cai3_map, dict):
+            self.logger.info(f"   📋 cai3_map keys: {list(cai3_map.keys())}")
+        
+        # Analyze structure WITH mapping data
+        analyzer = CAI3StructureAnalyzer(cai3_map=cai3_map, cai3_full=cai3_full)
+        self.logger.info("✅ Created CAI3StructureAnalyzer with mapping data")
         structure = analyzer.analyze(ast_obj)
         
         # Create hierarchical code builder
@@ -3315,7 +3532,7 @@ if __name__ == "__main__":
             
             # Parse the CAI3-LITE content
             from .cai3_grammar import CAI3LiteParser
-            from .cai3_structure_analyzer import CAI3StructureAnalyzer
+            from .cai3_structure_analyzer import CAI3StructureAnalyzer, StructureInfo
             from .cai3_python_reconstructor import CAI3PythonReconstructor
             
             parser = CAI3LiteParser()
@@ -3325,13 +3542,39 @@ if __name__ == "__main__":
                 self.logger.error("Fallback parser failed to parse CAI3-LITE")
                 return self._create_minimal_fallback(cai3_lite_content)
             
-            # Analyze structure
-            analyzer = CAI3StructureAnalyzer()
-            structure = analyzer.analyze(ast_obj)
+            # Analyze structure - minimal CAI3 map
+            minimal_cai3_map = self._create_minimal_cai3_map(ast_obj)
+            analyzer = CAI3StructureAnalyzer(minimal_cai3_map, {})
+            structure_dict = analyzer.analyze(ast_obj)
+            
+            # Convert dict to StructureInfo object for fallback
+            classes_dict = {}
+            classes_list = structure_dict.get('classes', [])
+            for cls in classes_list:
+                cls_name = cls.get('name', 'UnknownClass')
+                classes_dict[cls_name] = cls
+            
+            # Ensure functions is a dict, not a list
+            functions = structure_dict.get('functions', [])
+            if isinstance(functions, list):
+                functions_dict = {}
+                for func in functions:
+                    if isinstance(func, dict) and 'name' in func:
+                        functions_dict[func['name']] = func
+                functions = functions_dict
+            
+            structure = StructureInfo(
+                classes=classes_dict,
+                functions=functions,
+                dataclasses=structure_dict.get('dataclasses', {}),
+                enums=structure_dict.get('enums', {}),
+                main_block=structure_dict.get('main_block'),
+                imports=structure_dict.get('imports', [])
+            )
             
             # Reconstruct Python code
-            reconstructor = CAI3PythonReconstructor()
-            python_code = reconstructor.reconstruct(ast_obj, structure)
+            reconstructor = CAI3PythonReconstructor(self)
+            python_code = reconstructor.reconstruct(ast_obj, structure, {}, minimal_cai3_map)
             
             self.logger.info("Fallback reconstruction completed successfully")
             return python_code

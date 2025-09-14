@@ -83,16 +83,26 @@ class CAI3CodeValidator:
     
     def _resolve_remaining_references(self, code: str) -> str:
         """Find and fix any remaining unresolved references."""
-        # Pattern for unresolved hash references
-        hash_pattern = r'\b([0-9a-f]{4})\b(?!\w)'
+        # Pattern for unresolved hash references - FIXED to avoid converting legitimate numbers
+        # Only match patterns that look like unresolved hash tokens, not legitimate numbers
+        hash_pattern = r'\b([0-9a-f]{4,})\b(?=\s*[:;,)\]}]|$)'
         
         def check_hash(match):
             token = match.group(1)
+            # CRITICAL FIX: Don't convert common legitimate numbers to hashes
+            # Skip decimal numbers that might just happen to use hex digits
+            if token in ['1024', '2048', '4096', '8192']:  # Common legitimate numbers
+                return token
+            
             # Check if it's a valid hex number that might be a hash
             try:
                 int(token, 16)
-                self.warnings.append(f"Possible unresolved hash: {token}")
-                return f'hash_{token}'  # Add hash_ prefix
+                # Only treat as hash if it looks like a hash pattern (longer than 4 chars or unusual context)
+                if len(token) > 4 or not token.isdigit():
+                    self.warnings.append(f"Possible unresolved hash: {token}")
+                    return f'hash_{token}'  # Add hash_ prefix
+                else:
+                    return token  # Keep legitimate numbers as-is
             except ValueError:
                 return token
         

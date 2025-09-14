@@ -58,40 +58,41 @@ class CAI3PythonReconstructor:
         """Reconstruct Python file with PROPER hierarchy."""
         self.logger.info("🏗️  Starting Python code reconstruction...")
         
-        from .cai3_ast_translator import HierarchicalCodeBuilder
+        from .cai3_ast_translator import SimpleCodeBuilder
         
-        # Use hierarchical builder
-        builder = HierarchicalCodeBuilder()
-        self.logger.info("✅ Created HierarchicalCodeBuilder")
+        # Use simple builder
+        builder = SimpleCodeBuilder()
+        self.logger.info("✅ Created SimpleCodeBuilder")
         
         # Add imports
+        self.logger.info(f"📦 Adding {len(structure.imports)} imports")
         for imp in structure.imports:
+            self.logger.info(f"   ➕ import {imp}")
             builder.add_import(f"import {imp}")
         
-        # Add enums first (they're often used by other classes)
-        for enum_name, enum_def in structure.enums.items():
-            enum_code = self._build_enum(enum_name, enum_def)
-            builder.add_class(enum_code)
-        
-        # Add dataclasses
-        for class_name, dc_def in structure.dataclasses.items():
-            dc_code = self._build_dataclass(class_name, dc_def)
-            builder.add_class(dc_code)
-        
         # Add regular classes with methods FIRST
+        self.logger.info(f"🏗️  Adding {len(structure.classes)} classes")
         for class_name, class_def in structure.classes.items():
             if class_def.get('is_enum'):
+                self.logger.info(f"   ⏭️  Skipping enum class {class_name}")
                 continue  # Already handled
                 
-            class_builder = builder.add_class(class_name, class_def.get('parent'))
+            self.logger.info(f"   🏗️  Building class {class_name} with {len(class_def['methods'])} methods")
             
-            # Add methods
+            # Build all methods for this class
+            method_codes = []
             for method_name, method_info in class_def['methods'].items():
+                self.logger.info(f"      ⚙️  Building method {method_name}")
                 method_code = self._build_method_content(
                     method_name, method_info, ast_obj, cai3_full, cai3_map
                 )
-                # Don't add extra indentation - ClassBuilder handles it
-                class_builder.add_method(method_code)
+                self.logger.info(f"      ✅ Method {method_name} code: {method_code[:100]}...")
+                method_codes.append(method_code)
+            
+            # Add the class with all its methods
+            parent = class_def.get('parent')
+            self.logger.info(f"   🎯 Adding class {class_name} to builder (parent: {parent})")
+            builder.add_class(class_name, method_codes, parent)
         
         # Add functions (at module level) AFTER classes
         self.logger.info(f"🔧 Adding {len(structure.functions)} functions")

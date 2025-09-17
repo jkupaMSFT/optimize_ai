@@ -18,6 +18,7 @@ I:import1|import2|module:class,func
 D:g0=ClassName|g1=function_name
 X:a0=hash1,a1=hash2,a2=hash3
 P:p0=pool_value1,p1=pool_value2
+V:s=self,na=name,th=threshold,co=features,cp=compression_ratio,de=description
 T:C:g0,M:g0.method#a0,M:g0.method2#a1,F:g1#a2
 ---
 B#a0:method_body_content_here
@@ -31,6 +32,7 @@ VALID SECTION IDENTIFIERS ONLY:
 - D: (chain aliases)
 - X: (CID aliases)
 - P: (pools)
+- V: (variable/attribute mappings) - REQUIRED
 - T: (table)
 - B# (bodies)
 - --- (separator)
@@ -301,14 +303,15 @@ p23: "original_variable_name"
 
 🚨 CRITICAL V: SECTION REQUIREMENT - VARIABLE MAPPING COMPLETENESS:
 The V: section MUST contain EVERY single-letter variable that appears in ANY body section (B#).
+This includes ALL self-attribute patterns like s.na, s.th, s.co, etc.
 
 ❌ WRONG (Missing V: section):
 D:hash_ca00=error,hash_e29c=name
 B#a0:s.na='test';i=len(s.fp);j=i/4;for k in r:v=s.af(k)
 
-✅ CORRECT (Complete V: section with ALL variable mappings):
+✅ CORRECT (Complete V: section with ALL variable mappings including self-attributes):
 D:hash_ca00=error,hash_e29c=name
-V:s=self,i=index,j=result,k=key,v=value,t=total,u=usage_stats,w=tier_name,g=size,n=tier,o=item,m=metadata,r=requests
+V:s=self,na=name,fp=file_path,af=analyze_file,i=index,j=result,k=key,v=value,t=total,u=usage_stats,w=tier_name,g=size,n=tier,o=item,m=metadata,r=requests
 B#a0:s.na='test';i=len(s.fp);j=i/4;for k in r:v=s.af(k)
 
 🚨 CRITICAL D: SECTION REQUIREMENT - HASH MAPPING COMPLETENESS:
@@ -1185,7 +1188,10 @@ B#a1:# Optimized validation logic here
             for var_letter in var_matches:
                 # Filter out obvious non-variables (reserved words, etc.)
                 if var_letter not in ['f', 'r', 'x', 'y', 'z'] and len(var_letter) == 1:
-                    body_variable_refs.add(var_letter)
+                    # CRITICAL FIX: Filter out compressed self.attribute patterns and method calls
+                    # These are not standalone variables but compressed attribute access patterns
+                    if not self._is_compressed_attribute_reference(var_letter, body_content):
+                        body_variable_refs.add(var_letter)
         
         self.logger.info(f"🔍 Found {len(body_variable_refs)} unique single-letter variables in body sections: {sorted(body_variable_refs)}")
         
@@ -1235,7 +1241,112 @@ B#a1:# Optimized validation logic here
             self.logger.warning(f"⚠️ Found {len(orphaned_variables)} variable mappings in V: section not used in body sections: {sorted(orphaned_variables)}")
             # This is just a warning, not an error - extra mappings are OK for future use
         
+        # NEW: Validate self-attribute patterns specifically
+        self_attribute_violations = self._validate_self_attribute_completeness(cai3_output)
+        violations.extend(self_attribute_violations)
+        
         return violations
+    
+    def _validate_self_attribute_completeness(self, cai3_output: str) -> List[ConstraintViolation]:
+        """
+        Validate that self-attribute patterns (s.na, s.th, etc.) have complete mappings in V: section.
+        
+        This ensures that patterns like s.na, s.th, s.co are properly mapped to self.name, self.threshold, self.features, etc.
+        """
+        violations = []
+        
+        # Extract self-attribute patterns from body sections
+        self_attribute_patterns = set()
+        body_sections = re.findall(r'B#[^:]*:(.*?)(?=\nB#|\n[A-Z]:|$)', cai3_output, re.DOTALL)
+        
+        for body_content in body_sections:
+            # Find s.attribute patterns but EXCLUDE method calls (s.method())
+            # Use negative lookahead to exclude patterns followed by opening parenthesis
+            attr_matches = re.findall(r'\bs\.([a-z]{2,})(?!\s*\()', body_content)
+            for attr_name in attr_matches:
+                self_attribute_patterns.add(attr_name)
+        
+        self.logger.info(f"🔍 Found {len(self_attribute_patterns)} self-attribute patterns: {sorted(self_attribute_patterns)}")
+        
+        if not self_attribute_patterns:
+            return violations  # No self-attributes used, no validation needed
+        
+        # Extract V: section mappings
+        v_section_attrs = set()
+        v_section_match = re.search(r'V:([^\n]*)', cai3_output)
+        if v_section_match:
+            v_content = v_section_match.group(1)
+            # Check for s=self mapping
+            has_self_mapping = re.search(r'\bs=self\b', v_content)
+            if not has_self_mapping:
+                violations.append(ConstraintViolation(
+                    violation_type="missing_self_mapping",
+                    description="V: section missing s=self mapping but s.attribute patterns are used",
+                    location="V: section",
+                    suggested_fix="Add 's=self' to V: section",
+                    severity="critical"
+                ))
+            
+            # Find attribute mappings (na=name, th=threshold, etc.)
+            attr_mappings = re.findall(r'\b([a-z][a-z0-9_]*)=([^,\s]+)', v_content)
+            for attr_name, _ in attr_mappings:
+                v_section_attrs.add(attr_name)
+        
+        # Find missing attribute mappings
+        missing_attrs = self_attribute_patterns - v_section_attrs
+        
+        if missing_attrs:
+            self.logger.error(f"❌ CRITICAL: {len(missing_attrs)} self-attribute patterns missing from V: section")
+            for missing_attr in sorted(missing_attrs):
+                violations.append(ConstraintViolation(
+                    violation_type="missing_self_attribute_mapping",
+                    description=f"Self-attribute 's.{missing_attr}' is used but '{missing_attr}' not defined in V: section",
+                    location=f"Missing from V: section: {missing_attr}",
+                    suggested_fix=f"Add '{missing_attr}=original_attribute_name' to V: section",
+                    severity="critical"
+                ))
+        else:
+            self.logger.info(f"✅ All {len(self_attribute_patterns)} self-attribute patterns have mappings in V: section")
+        
+        return violations
+    
+    def _is_compressed_attribute_reference(self, var_letter: str, body_content: str) -> bool:
+        """
+        Check if a single letter is part of a compressed self.attribute pattern rather than a standalone variable.
+        
+        Examples of compressed attribute patterns to exclude from V: section validation:
+        - s.a=aa (s.attribute assignment, 'a' is compressed attribute name)
+        - p.no().is() (method call chain, 'p' is compressed object reference)
+        - hash_2bb9:p.no().is() (dictionary value with method call)
+        
+        Args:
+            var_letter: The single letter to check
+            body_content: The body content containing the letter
+            
+        Returns:
+            True if this letter is part of a compressed attribute/method pattern that should not require V: mapping
+        """
+        # Pattern 1: s.letter=value (self.attribute assignment)
+        # Example: s.a=aa -> represents self.attribute = argument
+        if re.search(rf'\bs\.{var_letter}=', body_content):
+            return True
+            
+        # Pattern 2: object.method().method() chains where first letter is standalone object reference
+        # Example: p.no().is() -> represents pathlib object method chain
+        if re.search(rf'\b{var_letter}\.[\w]+\(\)\.[\w]+\(\)', body_content):
+            return True
+            
+        # Pattern 3: hash_xxx:letter.method() (dictionary value method calls)
+        # Example: hash_2bb9:p.no().is() -> dictionary value with method call
+        if re.search(rf'hash_[a-f0-9]+:{var_letter}\.[\w]+\(\)', body_content):
+            return True
+            
+        # Pattern 4: Compressed attribute access in return statements or dictionary values
+        # Example: p0:n.ge() -> pool reference to method call
+        if re.search(rf'p\d+:{var_letter}\.[\w]+\(\)', body_content):
+            return True
+            
+        return False
     
     def _attempt_basic_repairs(self, cai3_output: str, violations: List[ConstraintViolation]) -> str:
         """Attempt basic repairs for common violations including delimiter balancing and hash mapping fixes."""

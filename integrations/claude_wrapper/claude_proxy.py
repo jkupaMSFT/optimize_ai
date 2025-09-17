@@ -371,6 +371,8 @@ IMPORTANT: Before outputting, mentally verify:
         cost_per_1k = 0.01
         return (tokens_saved / 1000) * cost_per_1k
     
+    # Update the process_output method to use the new parsing
+
     def process_output(self, claude_output: str, metadata: Dict[str, Any]) -> str:
         """
         Enhanced output processing with robust error recovery and retry logic.
@@ -526,6 +528,162 @@ IMPORTANT: Before outputting, mentally verify:
         
         # Should never reach here, but safety fallback
         return self._extract_python_code_directly(claude_output, metadata)
+    
+    # def process_output(self, claude_output: str, metadata: Dict[str, Any]) -> str:
+    #     """
+    #     Enhanced output processing with robust error recovery and retry logic.
+    #     """
+    #     # CRITICAL: Skip humanization to prevent CAI3lite corruption
+    #     # claude_output = self._strip_humanization_annotations(claude_output)
+        
+    #     # LOG RAW CLAUDE OUTPUT FIRST
+    #     self.logger.info("=" * 80)
+    #     self.logger.info("🔍 RAW CLAUDE OUTPUT ANALYSIS")
+    #     self.logger.info("=" * 80)
+    #     self.logger.info(f"📊 Claude Output ({len(claude_output)} chars):")
+    #     self.logger.info(f"Full Claude response:\n{claude_output}")
+    #     self.logger.info("-" * 40)
+        
+    #     # Analyze CAI3 structure in raw output
+    #     code_blocks = re.findall(r'```(\w+)?\n(.*?)\n```', claude_output, re.DOTALL)
+    #     self.logger.info(f"🔍 Code blocks found: {len(code_blocks)}")
+    #     for i, (lang, content) in enumerate(code_blocks):
+    #         self.logger.info(f"Block {i+1}: Language='{lang}', Content length={len(content)}")
+    #         if len(content) < 1000:
+    #             self.logger.info(f"Block {i+1} content:\n{content}")
+    #         else:
+    #             self.logger.info(f"Block {i+1} content (first 500 chars):\n{content[:500]}...")
+        
+    #     # Check for CAI3 patterns
+    #     cai3_patterns = ['#C3L', 'X:', 'D:', 'T:', 'B#', 'P:']
+    #     found_patterns = [pattern for pattern in cai3_patterns if pattern in claude_output]
+    #     self.logger.info(f"🔍 CAI3 patterns found: {found_patterns}")
+        
+    #     # Check bracket balance in raw output
+    #     if found_patterns:
+    #         open_braces = claude_output.count('{')
+    #         close_braces = claude_output.count('}')
+    #         open_parens = claude_output.count('(')
+    #         close_parens = claude_output.count(')')
+    #         open_brackets = claude_output.count('[')
+    #         close_brackets = claude_output.count(']')
+            
+    #         self.logger.info(f"🔍 Bracket analysis in raw output:")
+    #         self.logger.info(f"  Braces: {open_braces} open, {close_braces} close (balanced: {open_braces == close_braces})")
+    #         self.logger.info(f"  Parentheses: {open_parens} open, {close_parens} close (balanced: {open_parens == close_parens})")
+    #         self.logger.info(f"  Brackets: {open_brackets} open, {close_brackets} close (balanced: {open_brackets == close_brackets})")
+        
+    #     self.logger.info("=" * 80)
+        
+    #     if not metadata.get("compressed", False):
+    #         return claude_output
+        
+    #     max_translation_retries = 3
+        
+    #     for attempt in range(max_translation_retries):
+    #         try:
+    #             # Skip humanization - user only needs final Python output
+    #             # Humanization adds forbidden parentheticals that break CAI3 compliance
+    #             raw_output = claude_output
+                
+    #             # Log what we're processing
+    #             self.logger.debug(f"Processing output ({len(claude_output)} chars). Contains CAI3 patterns: {self._contains_full_cai3(raw_output)}")
+                
+    #             # Check what type of CAI3 output we have
+    #             if "#C3-PATCH" in raw_output:
+    #                 # Handle patch format
+    #                 self.logger.info("Detected CAI3 patch format")
+    #                 return self._process_patch_output_with_retry(raw_output, metadata, attempt)
+    #             elif "#C3L" in raw_output or self._contains_full_cai3(raw_output):
+    #                 # Handle full CAI3-LITE output
+    #                 self.logger.info(f"Detected full CAI3-LITE format (attempt {attempt + 1}/{max_translation_retries})")
+                    
+    #                 # Skip legacy validation if constraint system is enabled
+    #                 if self.enable_constraint_system and self.cai3_interface:
+    #                     self.logger.info("🔧 Using constraint-based validation - skipping legacy CAI3 compliance checks")
+    #                     # Constraint system has already validated the output, proceed directly to processing
+    #                     return self._process_full_cai3_output_with_retry(raw_output, metadata, attempt)
+                    
+    #                 # Legacy validation for when constraint system is disabled
+    #                 # Validate CAI3 compliance before translation
+    #                 is_compliant, compliance_result = self._validate_cai3_compliance(raw_output)
+                    
+    #                 # LOG COMPLIANCE VALIDATION RESULTS
+    #                 self.logger.info("-" * 40)
+    #                 self.logger.info("🔍 CAI3 COMPLIANCE VALIDATION")
+    #                 self.logger.info("-" * 40)
+    #                 self.logger.info(f"✅ Compliant: {is_compliant}")
+    #                 if not is_compliant:
+    #                     self.logger.info(f"❌ Issues found: {compliance_result.get('issues', [])}")
+    #                     self.logger.info(f"🔍 Missing pools: {compliance_result.get('missing_pools', [])}")
+    #                 self.logger.info("-" * 40)
+                    
+    #                 if not is_compliant:
+    #                     self.logger.warning(f"CAI3-LITE compliance failed: {compliance_result['issues']}")
+                        
+    #                     # Enhanced repair with bracket validation
+    #                     self.logger.info("🔧 STARTING CAI3 REPAIR PROCESS")
+    #                     self.logger.info(f"Pre-repair content:\n{raw_output}")
+                        
+    #                     repaired_output = self._comprehensive_cai3_repair(raw_output, metadata)
+                        
+    #                     self.logger.info("🔧 REPAIR COMPLETED")
+    #                     self.logger.info(f"Post-repair content:\n{repaired_output}")
+    #                     self.logger.info(f"Changes made: {len(repaired_output) - len(raw_output)} characters")
+                        
+    #                     # Re-validate after repair
+    #                     is_compliant, validation_result = self._validate_cai3_compliance(repaired_output)
+    #                     self.logger.info(f"🔍 Post-repair compliance: {is_compliant}")
+    #                     if not is_compliant:
+    #                         self.logger.warning(f"❌ Still has issues: {validation_result.get('issues', [])}")
+                        
+    #                     if is_compliant:
+    #                         self.logger.info("CAI3-LITE format successfully repaired")
+    #                         raw_output = repaired_output
+    #                     else:
+    #                         self.logger.warning("CAI3-LITE repair failed, attempting fallback")
+    #                         return self._extract_python_code_directly(raw_output, metadata)
+    #                 else:
+    #                     # Even if compliant, run bracket validation as extra safety
+    #                     validated_output = self._validate_bracket_balance(raw_output)
+    #                     if validated_output != raw_output:
+    #                         self.logger.info("Applied bracket balance corrections")
+    #                         raw_output = validated_output
+                    
+    #                 return self._process_full_cai3_output_with_retry(raw_output, metadata, attempt)
+    #             else:
+    #                 # No CAI3 content, but compression was used - this might be direct Python
+    #                 self.logger.info("No CAI3 format detected but compression was used, checking for direct Python")
+    #                 python_extracted = self._extract_python_code_directly(raw_output, metadata)
+    #                 if "Python Code Extracted" in python_extracted:
+    #                     return python_extracted
+    #                 else:
+    #                     # Return raw version
+    #                     return raw_output
+                        
+    #         except ValueError as e:
+    #             if "No CAI3 cache found" in str(e) and attempt < max_translation_retries - 1:
+    #                 self.logger.warning(f"CAI3 cache miss on attempt {attempt + 1}, trying cache recovery...")
+    #                 # Try to recover cache using alternative path strategies
+    #                 if self._attempt_cache_recovery(metadata):
+    #                     continue  # Retry with recovered cache
+    #                 else:
+    #                     # Try alternative translation strategies
+    #                     self.logger.info(f"Cache recovery failed, attempting direct code extraction...")
+    #                     return self._extract_python_code_directly(claude_output, metadata)
+    #             else:
+    #                 # Final attempt or non-cache error
+    #                 self.logger.error(f"Translation attempt {attempt + 1} failed: {e}")
+    #                 if attempt == max_translation_retries - 1:
+    #                     return self._extract_python_code_directly(claude_output, metadata)
+                    
+    #         except Exception as e:
+    #             self.logger.error(f"Output processing failed on attempt {attempt + 1}: {e}")
+    #             if attempt == max_translation_retries - 1:
+    #                 return self._format_error_output(claude_output, e, metadata)
+        
+    #     # Should never reach here, but safety fallback
+    #     return self._extract_python_code_directly(claude_output, metadata)
 
     def _attempt_cache_recovery(self, metadata: Dict[str, Any]) -> bool:
         """
@@ -1265,6 +1423,9 @@ Please manually review and correct the code."""
             # Extract mappings from Claude's response if present
             claude_mappings = self._extract_claude_mappings(claude_output)
             
+            # CRITICAL: Pass the full Claude response for comprehensive mapping extraction
+            claude_mappings['raw_response'] = claude_output
+            
             # Translate CAI3-LITE to Python using the proper pipeline
             python_code = self._translate_cai3_to_python(
                 cai3_lite_content=cai3_content,
@@ -1644,14 +1805,21 @@ Please manually review and correct the code."""
         if "(was " in claude_output:
             humanization_note = "\n💡 CAI3 references have been humanized for clarity above.\n"
         
+        # Get token counts with fallbacks for test scenarios
+        original_tokens = metadata.get('original_tokens', 0)
+        compressed_tokens = metadata.get('compressed_tokens', 0)
+        tokens_saved = metadata.get('tokens_saved', 0)
+        compression_ratio = metadata.get('compression_ratio', 0.0)
+        potential_cost_savings = metadata.get('potential_cost_savings', 0.0)
+        
         return f"""✅ CAI3 Translation Complete
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 📊 Compression Analytics:
-• Original: {metadata['original_tokens']:,} tokens
-• Compressed: {metadata['compressed_tokens']:,} tokens
+• Original: {original_tokens:,} tokens
+• Compressed: {compressed_tokens:,} tokens
 • Translated: {patched_tokens:,} tokens
-• Net Savings: {metadata['tokens_saved']:,} tokens ({metadata['compression_ratio']:.1f}%)
-• Est. Cost Saved: ${metadata['potential_cost_savings']:.3f}
+• Net Savings: {tokens_saved:,} tokens ({compression_ratio:.1f}%)
+• Est. Cost Saved: ${potential_cost_savings:.3f}
 {humanization_note}
 📝 Claude's Analysis:
 {explanation}
@@ -2005,42 +2173,77 @@ Please manually review and correct the code."""
         
         return cai3_output, mappings
     
-    def _parse_claude_response(self, response: str) -> Tuple[str, Dict[str, str]]:
-        """
-        Parse Claude response to extract CAI3 content and mappings.
-        
-        This method looks for structured MAPPINGS and CAI3-LITE sections first,
-        then falls back to code block extraction.
-        """
-        mappings = {}
+    # Add after _translate_cai3_to_python method
+
+    def _parse_claude_response(self, response: str) -> Tuple[str, Dict[str, Any]]:
+        """Parse Claude's response to extract CAI3 content and mappings."""
         cai3_content = ""
+        mappings = {
+            'hash_mappings': {},
+            'pools': {},
+            'variables': {},
+            'methods': {},
+            'raw_response': response  # Keep full response for fallback
+        }
         
-        # Try to parse structured response first
-        if '=== MAPPINGS ===' in response and '=== CAI3-LITE ===' in response:
-            sections = response.split('=== ')
-            
-            for section in sections:
-                if section.startswith('MAPPINGS ==='):
-                    mappings_text = section.replace('MAPPINGS ===', '').split('=== CAI3-LITE ===')[0].strip()
-                    mappings = self._parse_mappings_from_text(mappings_text)
-                    
-                elif section.startswith('CAI3-LITE ==='):
-                    cai3_content = section.replace('CAI3-LITE ===', '').strip()
+        # Handle both raw Claude response format and markdown-formatted responses
+        working_response = response
         
-        # Fallback to code block extraction
-        if not cai3_content:
-            # Try different regex patterns to capture CAI3 code blocks
-            cai3_patterns = [
-                r'```cai3lite\n(.*?)\n```',  # Specifically for cai3lite
-                r'```(?:C3L|cai3|CAI3)\n(.*?)\n```',  # Other CAI3 formats
-                r'```\n(#C3L.*?)\n```'  # Any code block starting with #C3L
-            ]
-            
-            for pattern in cai3_patterns:
-                code_blocks = re.findall(pattern, response, re.DOTALL)
-                if code_blocks:
-                    cai3_content = code_blocks[0]
-                    break
+        # If the response is markdown-formatted (from claude_code CLI), extract the raw content
+        # Check for proper markdown code blocks with opening and closing markers
+        markdown_pattern = r'```[cC]3[lL]\s*\n(.*?)\n```'
+        if re.search(markdown_pattern, response, re.DOTALL):
+            self.logger.info("🔍 Detected markdown-formatted response, extracting raw content")
+            # Extract content from code blocks
+            code_block_match = re.search(markdown_pattern, response, re.DOTALL)
+            if code_block_match:
+                cai3_content = code_block_match.group(1).strip()
+                self.logger.info(f"✅ Extracted CAI3 content from markdown: {len(cai3_content)} chars")
+                return cai3_content, mappings
+            else:
+                self.logger.warning("Found C3L code block marker but failed to extract content")
+                
+        # Check if this is actually a raw response that just starts with ```C3L
+        elif response.strip().startswith('```C3L') and '=== MAPPINGS ===' in response:
+            self.logger.info("🔍 Detected raw response starting with ```C3L, treating as raw format")
+            # This is a raw response, not markdown - continue with raw parsing
+        
+        # Original parsing for raw Claude response format
+        # Extract MAPPINGS section
+        if "=== MAPPINGS ===" in working_response:
+            mappings_match = re.search(
+                r'=== MAPPINGS ===\s*\n(.*?)\n=== CAI3-LITE ===',
+                working_response, re.DOTALL
+            )
+            if mappings_match:
+                mappings_text = mappings_match.group(1)
+                
+                for line in mappings_text.strip().split('\n'):
+                    if ':' in line:
+                        key, value = line.split(':', 1)
+                        key = key.strip()
+                        value = value.strip().strip('"')
+                        
+                        if key.startswith('hash_'):
+                            mappings['hash_mappings'][key] = value
+                        elif key.startswith('p') and key[1:].isdigit():
+                            mappings['pools'][key] = value
+                        else:
+                            mappings['variables'][key] = value
+                
+                self.logger.info(f"✅ Parsed {len(mappings['hash_mappings'])} hash mappings, {len(mappings['pools'])} pool mappings")
+        
+        # Extract CAI3-LITE content
+        if "=== CAI3-LITE ===" in working_response:
+            cai3_match = re.search(
+                r'=== CAI3-LITE ===\s*\n(.*?)(?:\n=+\s*\n|$)',
+                working_response, re.DOTALL
+            )
+            if cai3_match:
+                cai3_content = cai3_match.group(1).strip()
+                self.logger.info(f"✅ Extracted CAI3-LITE content: {len(cai3_content)} chars")
+            else:
+                self.logger.warning("Found CAI3-LITE header but failed to extract content")
         
         return cai3_content, mappings
     
@@ -2099,6 +2302,17 @@ B#a1:# Enhanced validation with optimized logic here
             'hash_mappings': {}
         }
         
+        # LOG COMPREHENSIVE MAPPING EXTRACTION
+        self.logger.info("=" * 80)
+        self.logger.info("🔍 COMPREHENSIVE MAPPING EXTRACTION")
+        self.logger.info("=" * 80)
+        
+        # CRITICAL: Extract D: section hash mappings from CAI3-LITE content
+        self._extract_d_section_mappings(claude_output, mappings)
+        
+        # CRITICAL: Extract V: section variable mappings from CAI3-LITE content
+        self._extract_v_section_mappings(claude_output, mappings)
+        
         try:
             import yaml
             
@@ -2137,7 +2351,7 @@ B#a1:# Enhanced validation with optimized logic here
                                     else:
                                         mappings['variables'][category] = items
                         
-                        self.logger.info(f"✅ Extracted mappings: {len(mappings['pools'])} pools, "
+                        self.logger.info(f"✅ Extracted YAML mappings: {len(mappings['pools'])} pools, "
                                        f"{len(mappings['variables'])} variables, {len(mappings['methods'])} methods, "
                                        f"{len(mappings['classes'])} classes, {len(mappings['hash_mappings'])} hashes")
                         
@@ -2151,7 +2365,132 @@ B#a1:# Enhanced validation with optimized logic here
             self.logger.warning("PyYAML not available, using fallback mapping extraction")
             self._extract_inline_mappings(claude_output, mappings)
         
+        # LOG FINAL MAPPING EXTRACTION RESULTS
+        self.logger.info("=" * 40)
+        self.logger.info("📊 FINAL MAPPING EXTRACTION SUMMARY")
+        self.logger.info("=" * 40)
+        self.logger.info(f"✅ Total extracted mappings:")
+        self.logger.info(f"   Hash mappings: {len(mappings['hash_mappings'])}")
+        self.logger.info(f"   Pool mappings: {len(mappings['pools'])}")
+        self.logger.info(f"   Variable mappings: {len(mappings['variables'])}")
+        self.logger.info(f"   Method mappings: {len(mappings['methods'])}")
+        self.logger.info(f"   Class mappings: {len(mappings['classes'])}")
+        
+        if mappings['hash_mappings']:
+            self.logger.info(f"🔍 Hash mappings details:")
+            for hash_key, hash_value in mappings['hash_mappings'].items():
+                self.logger.info(f"   {hash_key} -> {hash_value}")
+        
+        self.logger.info("=" * 80)
+        
         return mappings
+    
+    def _extract_d_section_mappings(self, claude_output: str, mappings: Dict[str, Any]):
+        """
+        CRITICAL: Extract hash mappings from CAI3-LITE D: section.
+        This is where Claude puts the hash->identifier mappings that are failing to resolve.
+        """
+        self.logger.info("🔍 EXTRACTING D: SECTION HASH MAPPINGS")
+        self.logger.info("-" * 40)
+        
+        # Extract CAI3-LITE content first
+        cai3_content = self._extract_cai3_content(claude_output)
+        if not cai3_content:
+            self.logger.warning("❌ No CAI3 content found, cannot extract D: section mappings")
+            return
+        
+        # Find D: section using regex
+        d_section_pattern = r'^D:(.+?)(?=^[A-Z]:|^B#|^---|$)'
+        d_match = re.search(d_section_pattern, cai3_content, re.MULTILINE | re.DOTALL)
+        
+        if not d_match:
+            self.logger.warning("❌ No D: section found in CAI3 content")
+            return
+        
+        d_section_content = d_match.group(1).strip()
+        self.logger.info(f"✅ Found D: section ({len(d_section_content)} chars):")
+        self.logger.info(f"D: section content:\n{d_section_content}")
+        
+        # Parse D: section mappings
+        # Format: hash_e29c=name,hash_ca00=error,hash_a123=config
+        hash_count = 0
+        
+        for mapping_entry in d_section_content.split(','):
+            mapping_entry = mapping_entry.strip()
+            if '=' in mapping_entry:
+                hash_key, identifier = mapping_entry.split('=', 1)
+                hash_key = hash_key.strip()
+                identifier = identifier.strip()
+                
+                # Remove quotes if present
+                if identifier.startswith('"') and identifier.endswith('"'):
+                    identifier = identifier[1:-1]
+                elif identifier.startswith("'") and identifier.endswith("'"):
+                    identifier = identifier[1:-1]
+                
+                # Store the mapping
+                mappings['hash_mappings'][hash_key] = identifier
+                hash_count += 1
+                
+                self.logger.info(f"   {hash_key} -> {identifier}")
+        
+        self.logger.info(f"✅ Extracted {hash_count} hash mappings from D: section")
+        self.logger.info("-" * 40)
+    
+    def _extract_v_section_mappings(self, claude_output: str, mappings: Dict[str, Any]):
+        """
+        CRITICAL: Extract variable mappings from CAI3-LITE V: section.
+        This extracts single-letter variable mappings like s=self, i=index, v=value, etc.
+        """
+        self.logger.info("🔍 EXTRACTING V: SECTION VARIABLE MAPPINGS")
+        self.logger.info("-" * 40)
+        
+        # Extract CAI3-LITE content first
+        cai3_content = self._extract_cai3_content(claude_output)
+        if not cai3_content:
+            self.logger.warning("❌ No CAI3 content found, cannot extract V: section mappings")
+            return
+        
+        # Find V: section using regex
+        v_section_pattern = r'^V:(.+?)(?=^[A-Z]:|^B#|^---|$)'
+        v_match = re.search(v_section_pattern, cai3_content, re.MULTILINE | re.DOTALL)
+        
+        if not v_match:
+            self.logger.warning("❌ No V: section found in CAI3 content")
+            return
+        
+        v_section_content = v_match.group(1).strip()
+        self.logger.info(f"✅ Found V: section ({len(v_section_content)} chars):")
+        self.logger.info(f"V: section content:\n{v_section_content}")
+        
+        # Parse V: section mappings
+        # Format: s=self,i=index,j=result,k=key,v=value,t=total
+        variable_count = 0
+        
+        for mapping_entry in v_section_content.split(','):
+            mapping_entry = mapping_entry.strip()
+            if '=' in mapping_entry:
+                var_key, original_name = mapping_entry.split('=', 1)
+                var_key = var_key.strip()
+                original_name = original_name.strip()
+                
+                # Remove quotes if present
+                if original_name.startswith('"') and original_name.endswith('"'):
+                    original_name = original_name[1:-1]
+                elif original_name.startswith("'") and original_name.endswith("'"):
+                    original_name = original_name[1:-1]
+                
+                # Store in both variables mapping and as regular mappings
+                if 'variables' not in mappings:
+                    mappings['variables'] = {}
+                mappings['variables'][var_key] = original_name
+                mappings[var_key] = original_name  # Also store directly for backward compatibility
+                variable_count += 1
+                
+                self.logger.info(f"   {var_key} -> {original_name}")
+        
+        self.logger.info(f"✅ Extracted {variable_count} variable mappings from V: section")
+        self.logger.info("-" * 40)
     
     def _extract_inline_mappings(self, text: str, mappings: Dict[str, Any]):
         """Extract mappings from inline comments and patterns in the text."""
@@ -2185,33 +2524,97 @@ B#a1:# Enhanced validation with optimized logic here
                         
     # Update the _translate_cai3_to_python method
 
+    # Replace the _translate_cai3_to_python method (around line 2500)
+
     def _translate_cai3_to_python(self, cai3_lite_content: str, source_path: Path, 
-                                 claude_mappings: Dict[str, Any]) -> str:
-        """
-        Translate CAI3-LITE to Python using the improved pipeline.
-        """
+                                claude_mappings: Dict[str, Any]) -> str:
+        """Translate CAI3-LITE to Python with proper mapping extraction."""
         try:
-            self.logger.info("🔄 Starting CAI3-LITE to Python translation")
+            self.logger.info("🔄 Starting CAI3 to Python translation with comprehensive mapping debugging")
             
-            # Extract mappings from Claude response
-            if not claude_mappings:
-                claude_mappings = self._extract_claude_mappings(cai3_lite_content)
+            # LOG COMPREHENSIVE MAPPING ANALYSIS
+            self.logger.info("=" * 80)
+            self.logger.info("🔍 MAPPING FLOW DEBUGGING")
+            self.logger.info("=" * 80)
             
-            # Use the improved translator
-            translator = self.cai3_translator
-            python_code = translator.translate_cai3_lite_to_python(
-                cai3_lite_content,
-                source_path,
-                claude_mappings
+            # Extract mappings from Claude's response if they're embedded
+            if 'raw_response' in claude_mappings:
+                # Full Claude response passed
+                self.logger.info("✅ Full Claude response available for mapping extraction")
+                extracted = self._extract_claude_mappings(claude_mappings['raw_response'])
+                
+                # Log what was extracted
+                self.logger.info(f"📊 Extracted from Claude response:")
+                self.logger.info(f"   Hash mappings: {len(extracted.get('hash_mappings', {}))}")
+                self.logger.info(f"   Pool mappings: {len(extracted.get('pools', {}))}")
+                self.logger.info(f"   Variable mappings: {len(extracted.get('variables', {}))}")
+                
+                # Update claude_mappings with extracted data
+                for category in ['hash_mappings', 'pools', 'variables', 'methods', 'classes']:
+                    if category in extracted and extracted[category]:
+                        claude_mappings.setdefault(category, {}).update(extracted[category])
+                        self.logger.info(f"   Updated {category}: {len(claude_mappings[category])} total")
+            
+            # Log what we're passing to the translator
+            self.logger.info(f"📊 Final mappings being passed to translator:")
+            self.logger.info(f"   Hash mappings: {len(claude_mappings.get('hash_mappings', {}))}")
+            self.logger.info(f"   Pool mappings: {len(claude_mappings.get('pools', {}))}")
+            self.logger.info(f"   Variable mappings: {len(claude_mappings.get('variables', {}))}")
+            
+            # Log specific hash mappings being passed
+            if claude_mappings.get('hash_mappings'):
+                self.logger.info(f"🔍 Hash mappings details being passed:")
+                for hash_key, hash_value in claude_mappings['hash_mappings'].items():
+                    self.logger.info(f"   {hash_key} -> {hash_value}")
+            else:
+                self.logger.warning("⚠️ NO HASH MAPPINGS being passed to translator!")
+            
+            self.logger.info("=" * 80)
+            
+            # Enhanced debugging before translation
+            self.logger.debug(f"🔧 CAI3Translator instance: {self.cai3_translator}")
+            self.logger.debug(f"🔧 CAI3Translator type: {type(self.cai3_translator)}")
+            self.logger.debug(f"🔧 Has translate method: {hasattr(self.cai3_translator, 'translate_cai3_lite_to_python')}")
+            self.logger.debug(f"🔧 Source path: {source_path}")
+            self.logger.debug(f"🔧 CAI3 content length: {len(cai3_lite_content)}")
+            self.logger.debug(f"🔧 Claude mappings keys: {list(claude_mappings.keys())}")
+            
+            # Call the translator with properly structured mappings
+            result = self.cai3_translator.translate_cai3_lite_to_python(
+                cai3_lite_content=cai3_lite_content,
+                source_path=source_path,
+                claude_mappings=claude_mappings
             )
             
-            self.logger.info(f"✅ Translation completed: {len(python_code)} chars")
-            return python_code
+            # LOG TRANSLATION RESULT ANALYSIS
+            self.logger.info("=" * 80)
+            self.logger.info("📝 TRANSLATION RESULT HASH ANALYSIS")
+            self.logger.info("=" * 80)
+            
+            if result:
+                # Check for unresolved hashes in the result
+                unresolved_hashes = re.findall(r'hash_[a-f0-9]{4}', result)
+                if unresolved_hashes:
+                    self.logger.warning(f"⚠️ UNRESOLVED HASHES FOUND IN RESULT: {len(set(unresolved_hashes))} unique")
+                    for hash_ref in set(unresolved_hashes):
+                        if hash_ref in claude_mappings.get('hash_mappings', {}):
+                            expected_value = claude_mappings['hash_mappings'][hash_ref]
+                            self.logger.warning(f"   {hash_ref} should be '{expected_value}' but appears unresolved")
+                        else:
+                            self.logger.warning(f"   {hash_ref} has no mapping available")
+                else:
+                    self.logger.info("✅ No unresolved hashes found in translation result")
+            
+            self.logger.debug(f"🔧 Translation result type: {type(result)}")
+            self.logger.debug(f"🔧 Translation result length: {len(result) if isinstance(result, str) else 'N/A'}")
+            self.logger.debug(f"🔧 Translation successful: {result is not None}")
+            
+            self.logger.info("=" * 80)
+            
+            return result
             
         except Exception as e:
-            self.logger.error(f"Translation failed: {e}")
-            import traceback
-            self.logger.error(traceback.format_exc())
+            self.logger.error(f"CAI3 translation failed: {e}")
             return self._fallback_cai3_reconstruction(cai3_lite_content, claude_mappings)
 
     

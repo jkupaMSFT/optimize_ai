@@ -2447,7 +2447,7 @@ class CAI3Translator:
     # Add these methods to CAI3Translator class after line 1500 (after __init__)
 
     def _extract_mappings_from_claude_response(self, claude_response: str) -> Dict[str, Any]:
-        """Extract all mappings from Claude's MAPPINGS section."""
+        """Extract all mappings from Claude's MAPPINGS section and V: section."""
         mappings = {
             'hash_mappings': {},
             'pools': {},
@@ -2456,48 +2456,193 @@ class CAI3Translator:
             'classes': {}
         }
         
-        # Find MAPPINGS section
-        if "=== MAPPINGS ===" not in claude_response:
-            self.logger.warning("No MAPPINGS section found in Claude response")
-            return mappings
+        # Extract MAPPINGS section (existing logic)
+        if "=== MAPPINGS ===" in claude_response:
+            try:
+                # Extract content between MAPPINGS and CAI3-LITE sections
+                mappings_start = claude_response.find("=== MAPPINGS ===")
+                cai3_start = claude_response.find("=== CAI3-LITE ===")
+                
+                if mappings_start != -1:
+                    if cai3_start == -1:
+                        mappings_content = claude_response[mappings_start + len("=== MAPPINGS ==="):]
+                    else:
+                        mappings_content = claude_response[mappings_start + len("=== MAPPINGS ==="):cai3_start]
+                    
+                    # Parse each line in the mappings section
+                    for line in mappings_content.strip().split('\n'):
+                        if not line.strip() or not ':' in line:
+                            continue
+                            
+                        key, value = line.split(':', 1)
+                        key = key.strip()
+                        value = value.strip().strip('"')
+                        
+                        # Categorize the mapping
+                        if key.startswith('hash_'):
+                            mappings['hash_mappings'][key] = value
+                        elif key.startswith('p') and key[1:].isdigit():
+                            mappings['pools'][key] = value
+                        else:
+                            # Could be a method, class, or variable
+                            mappings['variables'][key] = value
+                
+            except Exception as e:
+                self.logger.error(f"Failed to extract MAPPINGS section: {e}")
         
-        try:
-            # Extract content between MAPPINGS and CAI3-LITE sections
+        # NEW: Extract V: section variable mappings (critical for self.attribute resolution)
+        v_section_mappings = self._extract_v_section_mappings(claude_response)
+        if v_section_mappings:
+            # Add V: section mappings to variables
+            mappings['variables'].update(v_section_mappings)
+            self.logger.info(f"✅ Extracted {len(v_section_mappings)} variable mappings from V: section")
+        
+        # Extract pools from CAI3 P: section if available
+        if "=== CAI3-LITE ===" in claude_response:
+            cai3_content_start = claude_response.find("=== CAI3-LITE ===")
+            cai3_content = claude_response[cai3_content_start:]
+            pools_from_p_section = self._extract_pools_from_cai3_content(cai3_content)
+            mappings['pools'].update(pools_from_p_section)
+        
+        self.logger.info(f"✅ Extracted mappings: {len(mappings['hash_mappings'])} hashes, {len(mappings['pools'])} pools, {len(mappings['variables'])} variables")
+        
+        return mappings
+    
+    def _extract_v_section_mappings(self, claude_response: str) -> Dict[str, str]:
+        """Extract variable mappings from V: section in CAI3 output and infer missing self-attribute mappings."""
+        import re
+        
+        variable_mappings = {}
+        
+        # Find V: section in the CAI3-LITE content
+        v_section_match = re.search(r'V:([^\n]*)', claude_response)
+        if not v_section_match:
+            self.logger.debug("No V: section found in Claude response")
+            return variable_mappings
+        
+        v_content = v_section_match.group(1).strip()
+        self.logger.debug(f"Found V: section content: {v_content}")
+        
+        # Parse V: section format: s=self,na=name,th=threshold,etc.
+        self_compressed = None
+        for mapping in v_content.split(','):
+            mapping = mapping.strip()
+            if '=' in mapping:
+                compressed, original = mapping.split('=', 1)
+                compressed = compressed.strip()
+                original = original.strip()
+                
+                # Store the base mapping
+                variable_mappings[compressed] = original
+                
+                # Track self mapping
+                if original == 'self':
+                    self_compressed = compressed
+        
+        # Find all self-attribute patterns used in body sections
+        if self_compressed:
+            self_attr_patterns = self._find_self_attribute_patterns(claude_response, self_compressed)
+            
+            # For missing attribute mappings, try to infer from hash mappings
+            hash_mappings = self._extract_hash_mappings_from_response_text(claude_response)
+            
+            for attr_pattern in self_attr_patterns:
+                if attr_pattern not in variable_mappings:
+                    # Try to infer from hash mappings or use a sensible default
+                    inferred_name = self._infer_attribute_name(attr_pattern, hash_mappings)
+                    variable_mappings[attr_pattern] = inferred_name
+                    self.logger.info(f"Inferred missing attribute mapping: {attr_pattern} -> {inferred_name}")
+                
+                # Create the full self.attribute pattern
+                full_pattern = f"{self_compressed}.{attr_pattern}"
+                full_expansion = f"self.{variable_mappings[attr_pattern]}"
+                variable_mappings[full_pattern] = full_expansion
+                self.logger.debug(f"Created self-attribute mapping: {full_pattern} -> {full_expansion}")
+        
+        self.logger.info(f"✅ Extracted {len(variable_mappings)} variable mappings from V: section")
+        return variable_mappings
+    
+    def _find_self_attribute_patterns(self, claude_response: str, self_var: str) -> set:
+        """Find all s.attribute patterns used in body sections."""
+        patterns = set()
+        
+        # Find body sections
+        body_sections = re.findall(r'B#[^:]*:(.*?)(?=\nB#|\n[A-Z]:|$)', claude_response, re.DOTALL)
+        
+        for body_content in body_sections:
+            # Find patterns like s.na, s.th, s.co, etc.
+            attr_matches = re.findall(rf'\b{self_var}\.([a-z]{{2,}})\b', body_content)
+            patterns.update(attr_matches)
+        
+        return patterns
+    
+    def _extract_hash_mappings_from_response_text(self, claude_response: str) -> Dict[str, str]:
+        """Extract hash mappings from D: section and MAPPINGS section."""
+        hash_mappings = {}
+        
+        # Extract from D: section
+        d_section_match = re.search(r'D:([^\n]*)', claude_response)
+        if d_section_match:
+            d_content = d_section_match.group(1)
+            # Parse hash_XXXX=value mappings
+            for mapping in d_content.split(','):
+                mapping = mapping.strip()
+                if '=' in mapping and mapping.startswith('hash_'):
+                    hash_ref, value = mapping.split('=', 1)
+                    hash_mappings[hash_ref.strip()] = value.strip()
+        
+        # Extract from MAPPINGS section
+        if "=== MAPPINGS ===" in claude_response:
             mappings_start = claude_response.find("=== MAPPINGS ===")
             cai3_start = claude_response.find("=== CAI3-LITE ===")
             
-            if mappings_start == -1:
-                return mappings
-                
-            if cai3_start == -1:
-                mappings_content = claude_response[mappings_start + len("=== MAPPINGS ==="):]
-            else:
-                mappings_content = claude_response[mappings_start + len("=== MAPPINGS ==="):cai3_start]
-            
-            # Parse each line in the mappings section
-            for line in mappings_content.strip().split('\n'):
-                if not line.strip() or not ':' in line:
-                    continue
-                    
-                key, value = line.split(':', 1)
-                key = key.strip()
-                value = value.strip().strip('"')
-                
-                # Categorize the mapping
-                if key.startswith('hash_'):
-                    mappings['hash_mappings'][key] = value
-                elif key.startswith('p') and key[1:].isdigit():
-                    mappings['pools'][key] = value
+            if mappings_start != -1:
+                if cai3_start == -1:
+                    mappings_content = claude_response[mappings_start + len("=== MAPPINGS ==="):]
                 else:
-                    # Could be a method, class, or variable
-                    mappings['variables'][key] = value
-            
-            self.logger.info(f"✅ Extracted mappings: {len(mappings['hash_mappings'])} hashes, {len(mappings['pools'])} pools")
-            
-        except Exception as e:
-            self.logger.error(f"Failed to extract mappings: {e}")
+                    mappings_content = claude_response[mappings_start + len("=== MAPPINGS ==="):cai3_start]
+                
+                for line in mappings_content.strip().split('\n'):
+                    if ':' in line and line.strip().startswith('hash_'):
+                        key, value = line.split(':', 1)
+                        hash_mappings[key.strip()] = value.strip()
         
-        return mappings
+        return hash_mappings
+    
+    def _infer_attribute_name(self, attr_pattern: str, hash_mappings: Dict[str, str]) -> str:
+        """Infer the full attribute name from compressed pattern and available hash mappings."""
+        # Common attribute name mappings
+        common_mappings = {
+            'na': 'name',
+            'th': 'threshold', 
+            'co': 'features',
+            'cp': 'compression_ratio',
+            'cr': 'compression_ratio',
+            'de': 'description',
+            'mi': 'method_info',
+            'ic': 'init_compression',
+            'ti': 'tier_info',
+            'es': 'estimate_size',
+            'af': 'analyze_file',
+            'fp': 'file_path',
+            'ex': 'exists',
+            're': 'resolve'
+        }
+        
+        # First try common mappings
+        if attr_pattern in common_mappings:
+            return common_mappings[attr_pattern]
+        
+        # Try to find a hash mapping that matches
+        for hash_ref, value in hash_mappings.items():
+            if attr_pattern in value.lower() or value.lower().startswith(attr_pattern):
+                return value
+        
+        # Fallback: expand the pattern sensibly
+        if len(attr_pattern) == 2:
+            return f"attribute_{attr_pattern}"
+        else:
+            return attr_pattern  # Use as-is if longer
 
     def _extract_pools_from_cai3_content(self, cai3_content: str) -> Dict[str, str]:
         """Extract pool definitions from CAI3 P: section."""
@@ -2583,7 +2728,7 @@ class CAI3Translator:
         
         # Reconstruct with proper hierarchy
         python_code = self._reconstruct_with_resolver(
-            ast_obj, cai3_full, cai3_map, resolver
+            ast_obj, cai3_full, cai3_map, resolver, mappings
         )
         
         # Validate and fix any remaining issues
@@ -2598,7 +2743,7 @@ class CAI3Translator:
         return self._apply_black_formatting(fixed_code)
 
     def _build_function_with_hierarchy(self, func_name: str, func_info: Dict, 
-                                    ast_obj, resolver) -> str:
+                                    ast_obj, resolver, mappings=None) -> str:
         """Build function code with proper structure."""
         self.logger.info(f"🔧 _build_function_with_hierarchy: Building {func_name}")
         self.logger.info(f"🔧 Function info: {func_info}")
@@ -2633,7 +2778,11 @@ class CAI3Translator:
             # Convert CAI3 syntax to Python
             self.logger.info("🔧 Converting CAI3 syntax...")
             from .cai3_resolution_pipeline import CAI3ResolutionPipeline
-            pipeline = CAI3ResolutionPipeline(resolver.mappings, ast_obj.pools)
+            pipeline = CAI3ResolutionPipeline(
+                resolver.mappings, 
+                ast_obj.pools, 
+                mappings.get('variables', {}) if mappings else {}
+            )
             python_body = pipeline._fix_cai3_syntax(resolved_body)
             self.logger.info(f"🔧 Python body after syntax fixes: {repr(python_body[:200])}...")
             
@@ -2658,7 +2807,7 @@ class CAI3Translator:
         return fallback_code
 
     def _build_method_for_class(self, method_name: str, method_info: Dict,
-                            ast_obj, resolver) -> str:
+                            ast_obj, resolver, mappings=None) -> str:
         """Build method code for a class."""
         # Similar to function but always includes 'self' parameter
         args = method_info.get('args', ['self'])
@@ -2669,7 +2818,7 @@ class CAI3Translator:
         func_info = method_info.copy()
         func_info['args'] = args
         
-        return self._build_function_with_hierarchy(method_name, func_info, ast_obj, resolver)
+        return self._build_function_with_hierarchy(method_name, func_info, ast_obj, resolver, mappings)
 
     def _validate_and_format(self, code: str) -> str:
         """Validate and format the final code."""
@@ -2692,7 +2841,8 @@ class CAI3Translator:
         # Create resolution pipeline
         pipeline = CAI3ResolutionPipeline(
             hash_mappings=mappings.get('hash_mappings', {}),
-            pools=mappings.get('pools', {})
+            pools=mappings.get('pools', {}),
+            variables=mappings.get('variables', {})
         )
         
         # Apply resolution in correct order
@@ -2808,7 +2958,7 @@ class CAI3Translator:
     
     # Replace the problematic _reconstruct_with_resolver method
 
-    def _reconstruct_with_resolver(self, ast_obj, cai3_full, cai3_map, resolver):
+    def _reconstruct_with_resolver(self, ast_obj, cai3_full, cai3_map, resolver, mappings=None):
         """Reconstruct Python code with PROPER hierarchy using HierarchicalCodeBuilder."""
         self.logger.info("🎯 Using SimpleCodeBuilder with Black formatting for proper hierarchy")
         
@@ -2848,7 +2998,7 @@ class CAI3Translator:
             for method_name, method_info in class_info['methods'].items():
                 self.logger.info(f"      ⚙️ Building method {method_name}")
                 method_code = self._build_method_for_class(
-                    method_name, method_info, ast_obj, resolver
+                    method_name, method_info, ast_obj, resolver, mappings
                 )
                 self.logger.info(f"      ✅ Method code: {method_code[:100]}...")
                 methods.append(method_code)
@@ -2861,7 +3011,7 @@ class CAI3Translator:
         for func_name, func_info in structure.functions.items():
             self.logger.info(f"   🔧 Building function {func_name}")
             func_code = self._build_function_with_hierarchy(
-                func_name, func_info, ast_obj, resolver
+                func_name, func_info, ast_obj, resolver, mappings
             )
             self.logger.info(f"   ✅ Function code: {func_code[:100]}...")
             code_builder.add_function(func_code)

@@ -316,17 +316,38 @@ class CAI3ResolutionPipeline:
         sorted_variables = sorted(self.variables.items(), key=lambda x: len(x[0]), reverse=True)
         
         for var_id, value in sorted_variables:
-            # Use word boundary pattern to avoid partial matches
-            pattern = rf'\b{re.escape(var_id)}\b'
+            # Use multiple patterns to catch variables in different contexts
+            patterns = [
+                rf'\b{re.escape(var_id)}\b',  # Standard word boundary
+                rf'(?<![a-zA-Z_]){re.escape(var_id)}(?![a-zA-Z0-9_])',  # More strict boundaries
+                rf'(?<=\.){re.escape(var_id)}\b',  # After dot (like self.x)
+                rf'(?<=\s){re.escape(var_id)}\b',  # After whitespace
+                rf'^{re.escape(var_id)}\b',  # At start of line
+                rf'(?<=[^a-zA-Z0-9_]){re.escape(var_id)}(?=[^a-zA-Z0-9_])'  # Non-identifier characters around
+            ]
             
-            # Find all matches with context
-            matches = list(re.finditer(pattern, content))
+            all_matches = []
+            for pattern in patterns:
+                matches = list(re.finditer(pattern, content, re.MULTILINE))
+                all_matches.extend(matches)
             
-            if matches:
-                self.logger.info(f"   📋 Found {len(matches)} occurrences of {var_id}")
+            # Remove duplicates (same position)
+            unique_matches = []
+            seen_positions = set()
+            for match in all_matches:
+                pos = (match.start(), match.end())
+                if pos not in seen_positions:
+                    unique_matches.append(match)
+                    seen_positions.add(pos)
+            
+            # Sort by position for consistent replacement
+            unique_matches.sort(key=lambda m: m.start())
+            
+            if unique_matches:
+                self.logger.info(f"   📋 Found {len(unique_matches)} occurrences of {var_id}")
                 
             # Replace each match - only quote if clearly a string literal
-            for match in reversed(matches):  # Reverse to maintain positions
+            for match in reversed(unique_matches):  # Reverse to maintain positions
                 # Only quote file paths or strings with special characters
                 if ('/' in value or '\\' in value or ' ' in value or '-' in value):
                     quoted_value = f'"{value}"'

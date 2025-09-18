@@ -71,12 +71,14 @@ class CAI3ResolutionPipeline:
         
         # Define special number patterns
         number_patterns = [
-            # num_1024 -> 1024
-            (r'num_(\d+)', r'\1'),
-            # num_0_1 -> 0.1  
+            # Handle decimal patterns with underscore: num_3_14 -> 3.14, num_0_1 -> 0.1
             (r'num_(\d+)_(\d+)', r'\1.\2'),
-            # num_0_01 -> 0.01
+            
+            # Handle special leading zero decimals: num_0_01 -> 0.01, num_0_001 -> 0.001
             (r'num_0_0(\d+)', r'0.0\1'),
+            
+            # Handle simple integer patterns: num_1024 -> 1024
+            (r'num_(\d+)', r'\1'),
         ]
         
         numbers_resolved = 0
@@ -89,7 +91,20 @@ class CAI3ResolutionPipeline:
                 if old_content != content:
                     numbers_resolved += len(matches)
                     self.logger.info(f"   📊 Resolved {len(matches)} instances of pattern: {pattern}")
-                    self.logger.info(f"      ✅ Example: {matches[0]} -> {re.sub(pattern, replacement, f'num_{matches[0]}' if pattern.count('_') == 1 else f'num_{matches[0][0]}_{matches[0][1]}')}")
+                    
+                    # Generate example safely based on pattern type
+                    try:
+                        if '_(\d+)_(\d+)' in pattern:  # Decimal pattern like num_3_14 -> 3.14
+                            if isinstance(matches[0], tuple) and len(matches[0]) >= 2:
+                                self.logger.info(f"      ✅ Example: {matches[0]} -> {matches[0][0]}.{matches[0][1]}")
+                            else:
+                                self.logger.info(f"      ✅ Example: {matches[0]} -> (decimal)")
+                        elif 'num_0_0' in pattern:  # Special case for num_0_01
+                            self.logger.info(f"      ✅ Example: num_0_0{matches[0]} -> 0.0{matches[0]}")
+                        else:  # Simple pattern like num_1024 -> 1024
+                            self.logger.info(f"      ✅ Example: {matches[0]} -> {matches[0]}")
+                    except (IndexError, TypeError):
+                        self.logger.info(f"      ✅ Resolved {len(matches)} number patterns")
         
         # CRITICAL DEBUG: Check patterns after resolution
         final_num_patterns = re.findall(r'num_\w+', content)
@@ -214,12 +229,13 @@ class CAI3ResolutionPipeline:
     
     def _resolve_pool_value_with_context(self, pool_id: str, value: str, context: str, match) -> str:
         """Resolve pool value with context-aware quoting for dictionary keys and string literals."""
-        # Get surrounding context
-        start = max(0, match.start() - 30)
-        end = min(len(context), match.end() + 30)
+        # Get surrounding context - increased window for better detection
+        start = max(0, match.start() - 50)
+        end = min(len(context), match.end() + 50)
         surrounding = context[start:end]
         
         self.logger.debug(f"Context for {pool_id}: ...{surrounding}...")
+        self.logger.debug(f"   Full context length: {len(context)}, surrounding: '{surrounding}'")
         
         # If the value is already quoted, preserve it as-is
         if ((value.startswith('"') and value.endswith('"')) or
@@ -227,42 +243,49 @@ class CAI3ResolutionPipeline:
             self.logger.debug(f"   ✅ Already quoted string literal, preserving: {value}")
             return value
         
-        # Check if it's a Python built-in/keyword that should NEVER be quoted
-        python_builtins = {
-            'dataclass', 'frozen', 'Path', 'datetime', 'time', 'json', 
-            'pandas', 'numpy', 'os', 'sys', 'pathlib', 'logging',
-            'True', 'False', 'None', 'int', 'str', 'dict', 'list',
-            'tuple', 'set', 'float', 'bool', 'len', 'range', 'sum',
-            'max', 'min', 'abs', 'round', 'print', 'type', 'isinstance',
-            'error', 'data'  # Common variable names that shouldn't be quoted
-        }
-        
+        # Strip quotes for analysis (but we'll add them back if needed)
         clean_value = str(value).strip('\'"')
         
-        if clean_value in python_builtins:
-            self.logger.debug(f"   ✅ Python built-in/keyword, never quote: {clean_value}")
-            return clean_value
+        # CONTEXT-BASED QUOTING LOGIC - CHECK FIRST before builtin check:
+        
+        # Check if used as dictionary key: {key: or [key]
+        # CRITICAL: Fixed pattern to properly detect dictionary keys
+        dict_key_patterns = [
+            rf'\{{\s*{re.escape(pool_id)}\s*:',                           # {pool_id:
+            rf'\{{\s*[^,}}]*,\s*{re.escape(pool_id)}\s*:',               # {something,pool_id:
+            rf',\s*{re.escape(pool_id)}\s*:',                            # ,pool_id: (anywhere in dict)
+            rf'\[\s*{re.escape(pool_id)}\s*\]',                          # [pool_id]
+        ]
+        
+        for i, pattern in enumerate(dict_key_patterns):
+            self.logger.debug(f"   Testing pattern {i}: {pattern}")
+            if re.search(pattern, surrounding):
+                self.logger.debug(f"   ✅ MATCHED pattern {i}! Used as dictionary key, quoting: \"{clean_value}\"")
+                return f'"{clean_value}"'
+            else:
+                self.logger.debug(f"   ❌ Pattern {i} did not match")
+        
+        self.logger.debug(f"   No dictionary key patterns matched for {pool_id} in context")
+        
         
         # Numbers should never be quoted
         if re.match(r'^[\d\.\-\+e]+$', clean_value):
             self.logger.debug(f"   ✅ Numeric value, never quote: {clean_value}")
             return clean_value
         
-        # CONTEXT-BASED QUOTING LOGIC:
+        # Check if it's a Python built-in/keyword that should NEVER be quoted
+        python_builtins = {
+            'dataclass', 'frozen', 'Path', 'datetime', 'time', 'json', 
+            'pandas', 'numpy', 'os', 'sys', 'pathlib', 'logging',
+            'True', 'False', 'None', 'int', 'str', 'dict', 'list',
+            'tuple', 'set', 'float', 'bool', 'len', 'range', 'sum',
+            'max', 'min', 'abs', 'round', 'print', 'type', 'isinstance'
+            # NOTE: Removed 'error', 'data' - these should be context-dependent
+        }
         
-        # Check if used as dictionary key: {key: or [key]
-        # FIXED: Handle cases where there are already quoted keys in the dictionary
-        dict_key_patterns = [
-            rf'\{{\s*{re.escape(pool_id)}\s*:',           # {pool_id:
-            rf'\{{\s*"[^"]*"\s*:\s*[^,}}]*,\s*{re.escape(pool_id)}\s*:',  # {"key":val,pool_id:
-            rf',\s*{re.escape(pool_id)}\s*:',             # ,pool_id: (anywhere in dict)
-            rf'\[\s*{re.escape(pool_id)}\s*\]',           # [pool_id]
-        ]
-        
-        for pattern in dict_key_patterns:
-            if re.search(pattern, surrounding):
-                self.logger.debug(f"   ✅ Used as dictionary key, quoting: \"{clean_value}\"")
-                return f'"{clean_value}"'
+        if clean_value in python_builtins:
+            self.logger.debug(f"   ✅ Python built-in/keyword, never quote: {clean_value}")
+            return clean_value
         
         # Check if used in string comparison context: in, ==, !=
         string_comparison_patterns = [
@@ -311,11 +334,15 @@ class CAI3ResolutionPipeline:
             return content
         
         self.logger.info(f"🔄 Resolving {len(self.variables)} variable references...")
+        self.logger.info(f"🔍 DEBUG: Variable mappings: {self.variables}")
+        self.logger.info(f"🔍 DEBUG: Input content for variable resolution:\n{content}")
         
         # Sort by key length (longest first) to avoid partial replacements
         sorted_variables = sorted(self.variables.items(), key=lambda x: len(x[0]), reverse=True)
         
         for var_id, value in sorted_variables:
+            self.logger.info(f"🔍 DEBUG: Looking for variable '{var_id}' -> '{value}'")
+            
             # Use multiple patterns to catch variables in different contexts
             patterns = [
                 rf'\b{re.escape(var_id)}\b',  # Standard word boundary
@@ -327,8 +354,16 @@ class CAI3ResolutionPipeline:
             ]
             
             all_matches = []
-            for pattern in patterns:
+            for i, pattern in enumerate(patterns):
                 matches = list(re.finditer(pattern, content, re.MULTILINE))
+                if matches:
+                    self.logger.info(f"🔍 DEBUG: Pattern {i} ({pattern}) found {len(matches)} matches for '{var_id}'")
+                    for match in matches:
+                        start, end = match.span()
+                        context_start = max(0, start - 20)
+                        context_end = min(len(content), end + 20)
+                        context = content[context_start:context_end]
+                        self.logger.info(f"   Match at pos {start}-{end}: ...{context}...")
                 all_matches.extend(matches)
             
             # Remove duplicates (same position)
@@ -344,22 +379,29 @@ class CAI3ResolutionPipeline:
             unique_matches.sort(key=lambda m: m.start())
             
             if unique_matches:
-                self.logger.info(f"   📋 Found {len(unique_matches)} occurrences of {var_id}")
+                self.logger.info(f"   📋 Found {len(unique_matches)} unique occurrences of {var_id}")
                 
             # Replace each match - only quote if clearly a string literal
             for match in reversed(unique_matches):  # Reverse to maintain positions
-                # Only quote file paths or strings with special characters
-                if ('/' in value or '\\' in value or ' ' in value or '-' in value):
+                # ALWAYS quote file paths, paths with slashes, special characters, or file extensions
+                if ('/' in value or '\\' in value or ' ' in value or '-' in value or 
+                    '.' in value and value.endswith(('.py', '.txt', '.json', '.md', '.yml', '.yaml', '.xml'))):
                     quoted_value = f'"{value}"'
+                    self.logger.info(f"🔧 DEBUG: Quoting variable value: '{value}' -> '{quoted_value}'")
                 else:
                     quoted_value = value
-                content = content[:match.start()] + quoted_value + content[match.end():]
+                    self.logger.info(f"🔧 DEBUG: Not quoting variable value: '{value}'")
                 
+                old_content = content
+                content = content[:match.start()] + quoted_value + content[match.end():]
+                self.logger.info(f"🔧 DEBUG: Replaced '{var_id}' at position {match.start()}-{match.end()}")
+                
+        self.logger.info(f"🔍 DEBUG: Final content after variable resolution:\n{content}")
         return content
     
     def _fix_cai3_syntax(self, content: str) -> str:
-        """Fix CAI3 syntax issues - FIXED to prevent over-aggressive changes."""
-        self.logger.info(f"🔧 Starting CAI3 syntax fixing...")
+        """Enhanced CAI3 syntax fixing using AST-based approach with Black formatting."""
+        self.logger.info("🔧 Starting CAI3 syntax fixing...")
         
         # CRITICAL: Check if content is still in CAI3 format
         cai3_markers = ['#C3L', 'CAI3:', 'P:', 'T:', 'B#', 'I:', 'D:', 'X:']
@@ -369,279 +411,405 @@ class CAI3ResolutionPipeline:
         
         original_content = content
         
-        # Remove the problematic "fix_missing_for_keyword" pattern entirely
-        # This was causing "for for k in r:" issues
+        # Step 1: Pre-process to fix CAI3-specific issues
+        content = self._preprocess_cai3_content(content)
         
-        # Only apply safe, necessary fixes:
+        # Step 2: Parse into logical blocks using AST-aware approach
+        blocks = self._parse_into_logical_blocks(content)
         
-        # 1. Fix semicolon-separated statements
-        def fix_semicolon_statements(content):
-            """Convert semicolon-separated statements to proper Python lines."""
-            lines = []
-            for line in content.split('\n'):
-                if ';' in line and not line.strip().startswith('#'):
-                    # Split on semicolons and clean up
-                    statements = [stmt.strip() for stmt in line.split(';') if stmt.strip()]
-                    
-                    # Handle special case where for loop is followed by assignment
-                    processed_statements = []
-                    for stmt in statements:
-                        # If this statement starts with 'for' and contains an assignment
-                        if stmt.startswith('for ') and '=' in stmt and ':' in stmt:
-                            # Split the for loop from the assignment
-                            colon_pos = stmt.find(':')
-                            for_part = stmt[:colon_pos + 1]
-                            rest = stmt[colon_pos + 1:].strip()
-                            
-                            processed_statements.append(for_part)
-                            if rest:  # Add the rest as a separate statement
-                                processed_statements.append(rest)
-                        # Handle if statements that get concatenated with assignments
-                        elif stmt.startswith('if ') and ':' in stmt:
-                            # Split if statement from any following statements
-                            colon_pos = stmt.find(':')
-                            # Check if there's content after the colon (not just a condition)
-                            after_colon = stmt[colon_pos + 1:].strip()
-                            if after_colon and not after_colon.startswith('\n'):
-                                # This has a statement after the colon, split it
-                                if_part = stmt[:colon_pos + 1]
-                                processed_statements.append(if_part)
-                                # Process the part after colon as indented content
-                                processed_statements.append(f"    {after_colon}")
-                            else:
-                                processed_statements.append(stmt)
-                        else:
-                            processed_statements.append(stmt)
-                    
-                    lines.extend(processed_statements)
-                else:
-                    lines.append(line)
-            return '\n'.join(lines)
+        # Step 3: Fix each block individually
+        fixed_blocks = []
+        for block in blocks:
+            fixed_block = self._fix_block_syntax(block)
+            fixed_blocks.append(fixed_block)
         
-        content = fix_semicolon_statements(content)
+        # Step 4: Reassemble with proper structure
+        content = self._reassemble_blocks(fixed_blocks)
         
-        # 2. Fix missing colons on control structures and clean up assignments
-        def fix_missing_colons_and_assignments(content):
-            """Add missing colons to if, for, while, etc. and fix assignments."""
-            lines = []
-            for line in content.split('\n'):
-                stripped = line.strip()
-                
-                # Check if it's a control structure missing a colon
-                if any(stripped.startswith(kw) for kw in ['if ', 'elif ', 'for ', 'while ', 'try', 'except', 'finally', 'with ']):
-                    if not stripped.endswith(':') and ' in ' in stripped:
-                        # Add colon
-                        line = line.rstrip() + ':'
-                
-                # Fix assignment statements (add spaces around =)
-                if '=' in stripped and not any(op in stripped for op in ['==', '!=', '<=', '>=']):
-                    # Simple assignment - add spaces
-                    line = re.sub(r'([a-zA-Z_]\w*)\s*=\s*([^=])', r'\1 = \2', line)
-                
-                lines.append(line)
-            return '\n'.join(lines)
+        # Step 5: Apply Black formatting with fallback
+        formatted_content = self._apply_black_with_fallback(content)
         
-        content = fix_missing_colons_and_assignments(content)
-        
-        # 3. Fix malformed dictionary returns and add quotes to dictionary keys
-        def fix_return_dict(match):
-            return_content = match.group(1).strip()
-            if '"' in return_content and ':' in return_content:
-                return f'return {{{return_content}}}'
-            elif ':' in return_content and '{' in return_content:
-                # This is a dictionary without proper quotes
-                # Add quotes around unquoted keys
-                return f'return {{{return_content}}}'
-            else:
-                return f'return {return_content}'
-        
-        content = re.sub(r'return\s+([^{\n][^}\n]+)$', fix_return_dict, content, flags=re.MULTILINE)
-        
-        # 3b. Fix dictionary keys that need quotes
-        def fix_dict_keys(content):
-            """Add quotes around dictionary keys that need them."""
-            # Pattern: {key:value,key2:value2} where keys are unquoted identifiers
-            def quote_dict_keys(match):
-                dict_content = match.group(1)
-                # Split by commas but respect nesting
-                items = []
-                current_item = ""
-                depth = 0
-                
-                for char in dict_content:
-                    if char in '({[':
-                        depth += 1
-                    elif char in ')}]':
-                        depth -= 1
-                    elif char == ',' and depth == 0:
-                        if current_item.strip():
-                            items.append(current_item.strip())
-                        current_item = ""
-                        continue
-                    current_item += char
-                
-                if current_item.strip():
-                    items.append(current_item.strip())
-                
-                # Process each key:value pair
-                quoted_items = []
-                for item in items:
-                    if ':' in item:
-                        key, value = item.split(':', 1)
-                        key = key.strip()
-                        value = value.strip()
-                        
-                        # Quote the key if it's not already quoted and is an identifier
-                        if not (key.startswith('"') and key.endswith('"')) and not (key.startswith("'") and key.endswith("'")):
-                            if key.replace('_', '').replace('-', '').isalnum():
-                                key = f'"{key}"'
-                        
-                        quoted_items.append(f'{key}: {value}')
-                    else:
-                        quoted_items.append(item)
-                
-                return '{' + ', '.join(quoted_items) + '}'
-            
-            # Apply to dictionary patterns
-            content = re.sub(r'\{([^{}]+)\}', quote_dict_keys, content)
-            return content
-        
-        content = fix_dict_keys(content)
-        
-        # 4. Generate meaningful content for control blocks
-        def fix_empty_blocks(content):
-            """Generate meaningful content for control blocks instead of pass."""
-            lines = content.split('\n')
-            result_lines = []
-            
-            for i, line in enumerate(lines):
-                result_lines.append(line)
-                
-                # If this line is a control structure that ends with ':'
-                stripped = line.strip()
-                if stripped.endswith(':'):
-                    # Check if the next line is another control structure or end of file
-                    next_line = lines[i + 1] if i + 1 < len(lines) else None
-                    expected_indent = len(line) - len(line.lstrip()) + 4
-                    
-                    if not next_line or not next_line.strip() or not next_line.startswith(' ' * expected_indent):
-                        # This block is empty, generate meaningful content
-                        
-                        if stripped.startswith('for '):
-                            # For loops - add a basic operation
-                            if 'in ' in stripped:
-                                var_name = stripped.split()[1]
-                                result_lines.append(' ' * expected_indent + f'print(f"Processing: {{{var_name}}}")')
-                            else:
-                                result_lines.append(' ' * expected_indent + 'continue')
-                        
-                        elif stripped.startswith('if ') or stripped.startswith('elif '):
-                            # If statements - add a basic operation based on condition
-                            if '==' in stripped or '!=' in stripped or '<' in stripped or '>' in stripped:
-                                result_lines.append(' ' * expected_indent + '# Condition met - add specific logic here')
-                                result_lines.append(' ' * expected_indent + 'return True')
-                            else:
-                                result_lines.append(' ' * expected_indent + 'return True')
-                        
-                        elif stripped.startswith('while '):
-                            # While loops - add break to prevent infinite loop
-                            result_lines.append(' ' * expected_indent + '# Add loop logic here')
-                            result_lines.append(' ' * expected_indent + 'break')
-                        
-                        elif stripped.startswith('def '):
-                            # Method definitions - add meaningful return
-                            if '__init__' in stripped:
-                                result_lines.append(' ' * expected_indent + '# Initialize instance variables')
-                                result_lines.append(' ' * expected_indent + 'super().__init__()')
-                            elif 'get_' in stripped.lower():
-                                result_lines.append(' ' * expected_indent + 'return self._value')
-                            elif 'set_' in stripped.lower():
-                                result_lines.append(' ' * expected_indent + 'self._value = value')
-                            else:
-                                result_lines.append(' ' * expected_indent + '# Implement method logic')
-                                result_lines.append(' ' * expected_indent + 'return None')
-                        
-                        elif stripped.startswith('class '):
-                            # Class definitions - should not be empty in normal cases
-                            result_lines.append(' ' * expected_indent + 'pass')
-                        
-                        else:
-                            # Default case - use pass for other structures
-                            result_lines.append(' ' * expected_indent + 'pass')
-            
-            return '\n'.join(result_lines)
-        
-        content = fix_empty_blocks(content)
-        
-        # 5. Fix try-except blocks
-        content = re.sub(r'try:\{([^}]+)\}except\s*\(([^)]+)\):\{([^}]+)\}',
-                         lambda m: f'try:\n    {m.group(1)}\nexcept {m.group(2)}:\n    {m.group(3)}',
-                         content)
+        # Step 6: Final syntax cleanup
+        formatted_content = self._final_syntax_cleanup(formatted_content)
         
         # Log changes made
-        if content != original_content:
-            self.logger.info("✅ Applied syntax fixes")
+        if formatted_content != original_content:
+            self.logger.info("✅ Applied comprehensive syntax fixes")
+            self.logger.debug(f"Fixed content:\n{formatted_content}")
         else:
             self.logger.info("ℹ️ No syntax fixes needed")
         
+        return formatted_content
+
+    def _fix_cai3_concatenations(self, content: str) -> str:
+        """Fix hash-keyword concatenations and other CAI3 artifacts."""
+        concatenation_fixes = [
+            (r'(hash_[a-f0-9]+)(elif)', r'\1 \2'),
+            (r'(hash_[a-f0-9]+)(else)', r'\1 \2'),
+            (r'(\w+)(elif)', r'\1\n\2'),
+            (r'(\w+)(else):', r'\1\nelse:'),
+            (r'(pass)(return)', r'\1\n\2'),
+            (r'(pass)(if)', r'\1\n\2'),
+            (r'(pass)(elif)', r'\1\n\2'),
+            (r'(pass)(else)', r'\1\n\2'),
+            (r'(pass)(for)', r'\1\n\2'),
+            (r'(break)(if)', r'\1\n\2'),
+            (r'(\d)(elif)', r'\1\n\2'),
+            (r'(\d)(else)', r'\1\n\2'),
+        ]
+        
+        for pattern, replacement in concatenation_fixes:
+            content = re.sub(pattern, replacement, content)
+        
         return content
-    
-    def _log_problematic_patterns(self, content: str) -> None:
-        """Log all problematic syntax patterns found in content."""
-        patterns = {
-            'incomplete_dicts': r'\{[^{}]*:[^{}]*(?:\s*$|\s*\n)',
-            'orphaned_closing_braces': r'[^{]*}(?![^{]*{)',
-            'malformed_else': r'else:\{[^}]*\}',
-            'missing_dict_quotes': r'\{[^{}]*:\s*[a-zA-Z_][a-zA-Z0-9_]*[^,}\s]*\}',
-            'incomplete_returns': r'return\s*\{[^}]*(?:\s*$|\s*\n)',
-            'orphaned_else_braces': r'\}else:',
-            'malformed_conditions': r'\([^)]+\):\{[^}]*\}',
-            'incomplete_config_dicts': r'\{[^{}]*"[^{}]*:\s*[^,}]*(?:\s*$|\s*\n)',
-            'missing_closing_braces': r'\{[^{}]*:[^{}]*$',
-            'double_closing_braces': r'}}',
-            'compound_else_statements': r'[^:\s]+else:',
-            'malformed_try_blocks': r'try:\{[^}]*\}',
-            'ternary_operators': r'\([^)]+\)\?[^:]+:[^,\s}]+',
-            'for_loop_braces': r'for [^{]+:\{[^}]+\}',
-            'semicolon_statements': r';(?=\s*[a-zA-Z_])',
-            'string_concat_issues': r'[a-zA-Z_][a-zA-Z0-9_]*\+_[a-zA-Z0-9_]+\.json'
-        }
-        
-        self.logger.info("🔍 COMPREHENSIVE PATTERN ANALYSIS:")
-        for pattern_name, pattern in patterns.items():
-            matches = re.findall(pattern, content, re.MULTILINE)
-            if matches:
-                self.logger.info(f"   ❌ Found {len(matches)} instances of {pattern_name}:")
-                for i, match in enumerate(matches[:3]):  # Show first 3 matches
-                    self.logger.info(f"      {i+1}: '{match[:100]}{'...' if len(match) > 100 else ''}'")
-                if len(matches) > 3:
-                    self.logger.info(f"      ... and {len(matches) - 3} more")
-            else:
-                self.logger.info(f"   ✅ No {pattern_name} found")
-        
-        # Check for specific problematic lines
+
+    def _expand_inline_control_structures(self, content: str) -> str:
+        """Expand inline control structures to multi-line format."""
         lines = content.split('\n')
-        problematic_lines = []
-        for i, line in enumerate(lines, 1):
-            stripped = line.strip()
-            if any([
-                stripped.endswith('else:{') and not stripped.startswith('else:'),
-                stripped.count('{') != stripped.count('}') and ('{' in stripped or '}' in stripped),
-                'return {' in stripped and not stripped.endswith('}'),
-                '}else:' in stripped,
-                stripped.endswith(':') and '{' in stripped and '}' not in stripped
-            ]):
-                problematic_lines.append((i, line))
+        expanded_lines = []
         
-        if problematic_lines:
-            self.logger.info(f"🚨 Found {len(problematic_lines)} problematic lines:")
-            for line_num, line in problematic_lines[:5]:  # Show first 5
-                self.logger.info(f"   Line {line_num}: '{line.strip()}'")
-            if len(problematic_lines) > 5:
-                self.logger.info(f"   ... and {len(problematic_lines) - 5} more problematic lines")
+        for line in lines:
+            # Handle multiple statements on one line
+            if ':' in line and not line.strip().endswith(':'):
+                # This is a control structure with inline body
+                parts = line.split(':', 1)
+                if len(parts) == 2 and any(keyword in parts[0] for keyword in ['if', 'elif', 'else', 'for', 'while', 'try', 'except']):
+                    indent = len(line) - len(line.lstrip())
+                    expanded_lines.append(parts[0] + ':')
+                    # Add the body with proper indentation
+                    body = parts[1].strip()
+                    if body:
+                        expanded_lines.append(' ' * (indent + 4) + body)
+                else:
+                    expanded_lines.append(line)
+            else:
+                expanded_lines.append(line)
+        
+        return '\n'.join(expanded_lines)
+
+    def _parse_into_logical_blocks(self, content: str) -> List[dict]:
+        """Parse content into logical blocks (classes, functions, etc.)."""
+        self.logger.info("📦 Parsing into logical blocks...")
+        
+        blocks = []
+        lines = content.split('\n')
+        current_block = {'type': 'module', 'lines': [], 'indent': 0}
+        
+        i = 0
+        while i < len(lines):
+            line = lines[i]
+            stripped = line.strip()
+            indent = len(line) - len(line.lstrip())
+            
+            # Detect block starts
+            if stripped.startswith('class '):
+                # Save current block
+                if current_block['lines']:
+                    blocks.append(current_block)
+                # Start new class block
+                current_block = {
+                    'type': 'class',
+                    'lines': [line],
+                    'indent': indent,
+                    'name': stripped.split()[1].rstrip(':')
+                }
+            elif stripped.startswith('def '):
+                # Check if we're inside a class
+                if current_block['type'] == 'class':
+                    # Add to class block
+                    current_block['lines'].append(line)
+                else:
+                    # Save current block and start new function
+                    if current_block['lines']:
+                        blocks.append(current_block)
+                    current_block = {
+                        'type': 'function',
+                        'lines': [line],
+                        'indent': indent,
+                        'name': stripped.split('(')[0].split()[1]
+                    }
+            elif stripped and indent <= current_block.get('indent', 0) and current_block['type'] != 'module':
+                # End of current block
+                blocks.append(current_block)
+                current_block = {'type': 'module', 'lines': [line], 'indent': 0}
+            else:
+                # Add to current block
+                current_block['lines'].append(line)
+            
+            i += 1
+        
+        # Don't forget the last block
+        if current_block['lines']:
+            blocks.append(current_block)
+        
+        self.logger.info(f"📦 Found {len(blocks)} logical blocks")
+        return blocks
+
+    def _fix_block_syntax(self, block: dict) -> dict:
+        """Fix syntax issues within a single block."""
+        self.logger.info(f"🔧 Fixing {block['type']} block")
+        
+        lines = block['lines']
+        fixed_lines = []
+        
+        # Process based on block type
+        if block['type'] == 'class':
+            fixed_lines = self._fix_class_block(lines)
+        elif block['type'] == 'function':
+            fixed_lines = self._fix_function_block(lines)
+        else:
+            fixed_lines = self._fix_module_block(lines)
+        
+        block['lines'] = fixed_lines
+        return block
+
+    def _fix_class_block(self, lines: List[str]) -> List[str]:
+        """Fix syntax issues in a class block."""
+        fixed_lines = []
+        class_indent = 0
+        
+        for i, line in enumerate(lines):
+            if i == 0:  # Class definition
+                fixed_lines.append(line)
+                class_indent = len(line) - len(line.lstrip())
+                continue
+            
+            stripped = line.strip()
+            if not stripped:
+                fixed_lines.append('')
+                continue
+            
+            # Fix method definitions
+            if stripped.startswith('def '):
+                fixed_lines.append(' ' * (class_indent + 4) + stripped)
+            else:
+                # Fix method body indentation
+                fixed_line = self._fix_line_indentation(line, class_indent + 4)
+                fixed_lines.append(fixed_line)
+        
+        return fixed_lines
+
+    def _fix_function_block(self, lines: List[str]) -> List[str]:
+        """Fix syntax issues in a function block."""
+        return self._fix_indented_block(lines)
+
+    def _fix_module_block(self, lines: List[str]) -> List[str]:
+        """Fix syntax issues in module-level code."""
+        fixed_lines = []
+        
+        for line in lines:
+            fixed_line = self._fix_line_syntax(line)
+            fixed_lines.append(fixed_line)
     
+        return fixed_lines
+
+    def _fix_indented_block(self, lines: List[str]) -> List[str]:
+        """Fix indentation in a block of code."""
+        if not lines:
+            return lines
+        
+        fixed_lines = []
+        base_indent = len(lines[0]) - len(lines[0].lstrip())
+        current_indent = 0
+        
+        for i, line in enumerate(lines):
+            stripped = line.strip()
+            
+            if not stripped:
+                fixed_lines.append('')
+                continue
+            
+            # Calculate proper indentation
+            if i == 0:  # First line (function/class def)
+                fixed_lines.append(line)
+                current_indent = base_indent + 4
+            elif self._is_dedent_keyword(stripped):
+                current_indent = max(base_indent + 4, current_indent - 4)
+                fixed_lines.append(' ' * current_indent + stripped)
+                if stripped.endswith(':'):
+                    current_indent += 4
+            elif self._is_indent_keyword(stripped):
+                fixed_lines.append(' ' * current_indent + stripped)
+                current_indent += 4
+            else:
+                fixed_lines.append(' ' * current_indent + stripped)
+    
+        return fixed_lines
+
+    def _fix_line_indentation(self, line: str, min_indent: int) -> str:
+        """Fix indentation for a single line."""
+        stripped = line.strip()
+        if not stripped:
+            return ''
+        
+        current_indent = len(line) - len(line.lstrip())
+        
+        # Ensure minimum indentation
+        if current_indent < min_indent:
+            return ' ' * min_indent + stripped
+        
+        return line
+
+    def _fix_line_syntax(self, line: str) -> str:
+        """Fix syntax issues in a single line."""
+        stripped = line.strip()
+        indent = len(line) - len(line.lstrip())
+        
+        # Fix missing colons
+        if re.match(r'^\s*(if|elif|else|for|while|try|except|finally|def|class)\s+[^:]+$', line):
+            if not line.rstrip().endswith(':'):
+                line = line.rstrip() + ':'
+        
+        # Handle bare 'else' case - add pass
+        if stripped == 'else:':
+            return ' ' * indent + 'else:\n' + ' ' * (indent + 4) + 'pass'
+        elif stripped == 'else':
+            return ' ' * indent + 'else:\n' + ' ' * (indent + 4) + 'pass'
+        
+        # Handle other bare control structures that need pass
+        bare_structures = ['try:', 'except:', 'finally:', 'if:', 'elif:']
+        if any(stripped.endswith(struct) for struct in bare_structures) and len(stripped.split()) <= 2:
+            return line + '\n' + ' ' * (indent + 4) + 'pass'
+        
+        return line
+
+    def _is_indent_keyword(self, line: str) -> bool:
+        """Check if line starts a new indented block."""
+        return any(line.startswith(kw) and line.rstrip().endswith(':') 
+                   for kw in ['if', 'elif', 'else', 'for', 'while', 'try', 'except', 'finally', 'def', 'class', 'with'])
+
+    def _is_dedent_keyword(self, line: str) -> bool:
+        """Check if line should dedent."""
+        return line.startswith(('elif', 'else', 'except', 'finally'))
+
+    def _reassemble_blocks(self, blocks: List[dict]) -> str:
+        """Reassemble blocks into complete code."""
+        all_lines = []
+        
+        for i, block in enumerate(blocks):
+            # Add blank line before classes and functions (except first)
+            if i > 0 and block['type'] in ['class', 'function']:
+                all_lines.append('')
+            
+            all_lines.extend(block['lines'])
+        
+        return '\n'.join(all_lines)
+
+    def _apply_black_with_fallback(self, content: str) -> str:
+        """Apply Black formatting with intelligent fallback."""
+        try:
+            import black
+            
+            # Try full formatting first
+            try:
+                mode = black.Mode(
+                    line_length=88,
+                    target_versions={black.TargetVersion.PY38},
+                )
+                return black.format_str(content, mode=mode)
+            except black.InvalidInput:
+                # Try line-by-line formatting
+                self.logger.info("⚠️ Full Black formatting failed, trying line-by-line")
+                return self._black_format_by_lines(content, black, mode)
+                
+        except ImportError:
+            self.logger.warning("⚠️ Black not installed, using AST-based formatting")
+            return self._ast_based_formatting(content)
+
+    def _black_format_by_lines(self, content: str, black, mode) -> str:
+        """Format code line by line when full formatting fails."""
+        lines = content.split('\n')
+        formatted_lines = []
+        current_statement = []
+        
+        for line in lines:
+            current_statement.append(line)
+            
+            # Try to format accumulated lines
+            try:
+                statement = '\n'.join(current_statement)
+                formatted = black.format_str(statement, mode=mode)
+                formatted_lines.extend(formatted.strip().split('\n'))
+                current_statement = []
+            except:
+                # Continue accumulating
+                if len(current_statement) > 10:  # Prevent infinite accumulation
+                    # Just add the lines as-is
+                    formatted_lines.extend(current_statement)
+                    current_statement = []
+        
+        # Add any remaining lines
+        formatted_lines.extend(current_statement)
+        
+        return '\n'.join(formatted_lines)
+
+    def _ast_based_formatting(self, content: str) -> str:
+        """Use AST to format code when Black is not available."""
+        try:
+            # Parse into AST
+            tree = ast.parse(content)
+            
+            # Unparse with proper formatting
+            return ast.unparse(tree)
+        except:
+            # Final fallback: manual formatting
+            return self._manual_format_with_ast_analysis(content)
+
+    def _manual_format_with_ast_analysis(self, content: str) -> str:
+        """Manual formatting with AST-based analysis."""
+        lines = content.split('\n')
+        formatted_lines = []
+        indent_stack = [0]
+        
+        for line in lines:
+            stripped = line.strip()
+            
+            if not stripped:
+                formatted_lines.append('')
+                continue
+            
+            # Determine indentation
+            if self._is_dedent_keyword(stripped):
+                if len(indent_stack) > 1:
+                    indent_stack.pop()
+            
+            current_indent = indent_stack[-1]
+            formatted_lines.append(' ' * current_indent + stripped)
+            
+            # Update indent for next line
+            if stripped.endswith(':') and not stripped.startswith(('elif', 'else')):
+                indent_stack.append(current_indent + 4)
+            elif stripped.startswith(('return', 'break', 'continue', 'raise', 'pass')):
+                # These might end a block
+                if len(indent_stack) > 1 and current_indent > 0:
+                    # Check if next line is at lower indent level
+                    # This is a heuristic - in production, use proper AST analysis
+                    pass
+        
+        return '\n'.join(formatted_lines)
+
+    def _preprocess_cai3_content(self, content: str) -> str:
+        """Pre-process CAI3-specific patterns before parsing."""
+        self.logger.info("🔧 Pre-processing CAI3 content...")
+        
+        # Fix CAI3 concatenation issues
+        content = self._fix_cai3_concatenations(content)
+        
+        # CRITICAL: Fix inline statements separated by semicolons
+        content = self._fix_inline_statements(content)
+        
+        # Fix malformed try-except blocks
+        content = re.sub(
+            r'}except\s+(\w+)\s+',
+            r'}\nexcept \1:\n    ',
+            content
+        )
+        
+        # Fix inline control structures
+        content = self._expand_inline_control_structures(content)
+        
         return content
-    
+
     def _log_problematic_patterns(self, content: str) -> None:
         """Log comprehensive analysis of problematic patterns in the content."""
         self.logger.info("🔍 COMPREHENSIVE PATTERN ANALYSIS:")
@@ -817,10 +985,27 @@ class CAI3ResolutionPipeline:
         
         # CONTEXT-BASED QUOTING LOGIC (same as pool resolution):
         
+        # Check for identifier contexts where we should NEVER quote
+        identifier_patterns = [
+            rf'from\s+{re.escape(original_hash)}\s+import',     # from hash import
+            rf'import\s+{re.escape(original_hash)}',            # import hash
+            rf'{re.escape(original_hash)}\s*\.',                # hash.method()
+            rf'\.\s*{re.escape(original_hash)}\s*\(',           # obj.hash()
+            rf'class\s+{re.escape(original_hash)}',             # class hash:
+            rf'def\s+{re.escape(original_hash)}',               # def hash():
+        ]
+        
+        for pattern in identifier_patterns:
+            if re.search(pattern, context):
+                self.logger.debug(f"   ✅ Used as identifier/import, never quote: {clean_value}")
+                return clean_value
+        
         # Check if used as dictionary key: {key: or [key]
         dict_key_patterns = [
-            rf'\{{\s*{re.escape(original_hash)}\s*:',  # {hash:
-            rf'\[\s*{re.escape(original_hash)}\s*\]',  # [hash]
+            rf'\{{\s*{re.escape(original_hash)}\s*:',                     # {hash:
+            rf'\{{\s*[^,}}]*,\s*{re.escape(original_hash)}\s*:',         # {something,hash:
+            rf',\s*{re.escape(original_hash)}\s*:',                      # ,hash: (anywhere in dict)
+            rf'\[\s*{re.escape(original_hash)}\s*\]',                    # [hash]
         ]
         
         for pattern in dict_key_patterns:
@@ -855,3 +1040,67 @@ class CAI3ResolutionPipeline:
         # don't quote it - it's likely a variable name or attribute
         self.logger.debug(f"   ✅ Used as identifier/variable, not quoting: {clean_value}")
         return clean_value
+
+    def _fix_inline_statements(self, content: str) -> str:
+        """Fix inline statements separated by semicolons."""
+        lines = content.split('\n')
+        fixed_lines = []
+        
+        for line in lines:
+            stripped = line.strip()
+            
+            # Check if line contains semicolon-separated statements
+            if ';' in stripped and not stripped.startswith('#'):
+                # Split on semicolons and create separate lines
+                parts = stripped.split(';')
+                indent = len(line) - len(line.lstrip())
+                
+                for i, part in enumerate(parts):
+                    part = part.strip()
+                    if part:  # Skip empty parts
+                        if i == 0:
+                            # First part keeps original indentation
+                            fixed_lines.append(' ' * indent + part)
+                        else:
+                            # Subsequent parts need proper indentation and formatting
+                            if part.startswith(('if', 'elif', 'else', 'return', 'for', 'while')):
+                                # Control structures or returns get base indentation
+                                fixed_lines.append(' ' * indent + part)
+                            else:
+                                # Regular statements get normal indentation
+                                fixed_lines.append(' ' * indent + part)
+            else:
+                fixed_lines.append(line)
+        
+        return '\n'.join(fixed_lines)
+
+    def _final_syntax_cleanup(self, content: str) -> str:
+        """Final cleanup to ensure valid Python syntax."""
+        lines = content.split('\n')
+        cleaned_lines = []
+        
+        for i, line in enumerate(lines):
+            stripped = line.strip()
+            indent = len(line) - len(line.lstrip())
+            
+            # Check for bare control structures that need pass
+            if (stripped in ['else:', 'try:', 'except:', 'finally:'] or
+                re.match(r'^(if|elif|for|while|with|def|class)\s+[^:]*:$', stripped)):
+                
+                # Check if next line exists and has proper indentation
+                next_line_has_body = False
+                if i + 1 < len(lines):
+                    next_line = lines[i + 1].strip()
+                    next_indent = len(lines[i + 1]) - len(lines[i + 1].lstrip()) if lines[i + 1].strip() else 0
+                    if next_line and next_indent > indent:
+                        next_line_has_body = True
+                
+                cleaned_lines.append(line)
+                
+                # Add pass if no body follows
+                if not next_line_has_body:
+                    cleaned_lines.append(' ' * (indent + 4) + 'pass')
+            else:
+                cleaned_lines.append(line)
+        
+        return '\n'.join(cleaned_lines)

@@ -2422,13 +2422,10 @@ B#a1:# Enhanced validation with optimized logic here
                 hash_key = hash_key.strip()
                 identifier = identifier.strip()
                 
-                # Remove quotes if present
-                if identifier.startswith('"') and identifier.endswith('"'):
-                    identifier = identifier[1:-1]
-                elif identifier.startswith("'") and identifier.endswith("'"):
-                    identifier = identifier[1:-1]
+                # SIMPLIFIED: Keep quotes intact - downstream translation will respect them
+                # No quote stripping - let the resolver handle quoted vs unquoted values properly
                 
-                # Store the mapping
+                # Store the mapping with original quoting preserved
                 mappings['hash_mappings'][hash_key] = identifier
                 hash_count += 1
                 
@@ -2474,11 +2471,8 @@ B#a1:# Enhanced validation with optimized logic here
                 var_key = var_key.strip()
                 original_name = original_name.strip()
                 
-                # Remove quotes if present
-                if original_name.startswith('"') and original_name.endswith('"'):
-                    original_name = original_name[1:-1]
-                elif original_name.startswith("'") and original_name.endswith("'"):
-                    original_name = original_name[1:-1]
+                # SIMPLIFIED: Keep quotes intact - downstream translation will respect them
+                # No quote stripping for variables - let the resolver handle properly
                 
                 # Store in both variables mapping and as regular mappings
                 if 'variables' not in mappings:
@@ -2496,7 +2490,8 @@ B#a1:# Enhanced validation with optimized logic here
         """Extract mappings from inline comments and patterns in the text."""
         
         # Look for pool definitions like "p0: datetime", "p1: 'Tier 1 - Basic'"
-        pool_pattern = r'(p\d+):\s*["\']?([^,\n"\']+)["\']?'
+        # SIMPLIFIED: Keep quotes intact - capture the full value including quotes
+        pool_pattern = r'(p\d+):\s*([^,\n]+)'
         for match in re.finditer(pool_pattern, text):
             pool_id, pool_value = match.groups()
             mappings['pools'][pool_id] = pool_value.strip()

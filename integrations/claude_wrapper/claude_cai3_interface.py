@@ -400,7 +400,7 @@ Before submitting your response, VERIFY:
 4. If hash_ca00 appears in body → D: MUST have hash_ca00=something
 
 🚨 CRITICAL PRE-SUBMISSION VARIABLE VALIDATION:
-1. Scan ALL B# sections for single-letter variables (s, i, j, k, v, t, u, w, g, n, o, m, r, etc.)
+1. Scan ALL B# sections for single-letter variables
 2. Verify EVERY single-letter variable appears in V: section with mapping
 3. Count: V: mappings ≥ unique single-letter variables in bodies
 4. If 's' appears in body → V: MUST have s=self or similar

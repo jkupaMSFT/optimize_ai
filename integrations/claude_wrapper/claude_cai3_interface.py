@@ -378,6 +378,7 @@ CONSTRAINTS (VIOLATION = FAILURE):
 13. 🚨 ALL BODY CONTENT MUST BE CAI3-COMPRESSED, NOT PYTHON
 14. 🚨 D: SECTION MUST CONTAIN ALL hash_XXXX MAPPINGS USED IN BODY SECTIONS
 15. 🚨 V: SECTION MUST CONTAIN ALL single-letter variable mappings used in BODY SECTIONS
+16. 🚨 CRITICAL: USE T{{}}X(ex){{}} STRUCTURE FOR TRY/EXCEPT
 
 🔧 MANDATORY SYNTAX VALIDATION:
 Before submitting your response, VERIFY:
@@ -388,6 +389,7 @@ Before submitting your response, VERIFY:
 ✓ Every opening single quote ' has a closing single quote '
 ✓ All CAI3-LITE syntax is properly formed
 ✓ No unmatched delimiters anywhere in the output
+✓ 🚨 Every T{{}} try block has a corresponding X(){{}} except block
 ✓ 🚨 NO PYTHON SYNTAX IN ANY BODY BLOCKS
 ✓ 🚨 TABLE USES SHORT ALIASES ONLY (ct, ca) NOT FULL NAMES
 ✓ 🚨 D: SECTION HAS ALL hash_XXXX MAPPINGS FOUND IN B# SECTIONS
@@ -1019,19 +1021,93 @@ B#a1:# Optimized validation logic here
         violations.extend(bracket_violations)
         
         # Check for incomplete try-except structures
-        try_blocks = re.findall(r'T\{[^}]*\}', cai3_output)
-        for try_block in try_blocks:
-            if 'X{' not in cai3_output[cai3_output.index(try_block):]:
+        violations.extend(self._validate_try_except_structures(cai3_output))
+        
+        return violations
+    
+    def _validate_try_except_structures(self, cai3_output: str) -> List[ConstraintViolation]:
+        """
+        Validate that all try blocks (T{...}) have corresponding exception handlers (X{...} or X(...){...}).
+        This properly handles nested braces within try blocks.
+        """
+        violations = []
+        
+        # Find all T{ patterns
+        try_positions = []
+        i = 0
+        while i < len(cai3_output) - 1:
+            if cai3_output[i:i+2] == 'T{':
+                try_positions.append(i)
+            i += 1
+        
+        for try_pos in try_positions:
+            # Find the matching closing brace for this try block
+            brace_count = 0
+            start_pos = try_pos + 2  # Start after "T{"
+            try_end_pos = None
+            
+            for j in range(start_pos, len(cai3_output)):
+                if cai3_output[j] == '{':
+                    brace_count += 1
+                elif cai3_output[j] == '}':
+                    if brace_count == 0:
+                        try_end_pos = j
+                        break
+                    brace_count -= 1
+            
+            if try_end_pos is None:
+                # Incomplete try block (missing closing brace)
                 violations.append(ConstraintViolation(
                     violation_type="incomplete_try_structure",
-                    description=f"Try block without exception handler: {try_block[:30]}...",
-                    location=f"Try block: {try_block[:30]}",
+                    description="Try block is missing closing brace",
+                    location=f"Try block at position {try_pos}",
+                    suggested_fix="Add closing '}' for the try block",
+                    severity="critical"
+                ))
+                continue
+            
+            # Look for exception handler immediately after the try block
+            search_start = try_end_pos + 1
+            # Skip whitespace if any
+            while search_start < len(cai3_output) and cai3_output[search_start].isspace():
+                search_start += 1
+            
+            # Check for X{ or X(...){ patterns
+            has_exception_handler = False
+            if search_start < len(cai3_output):
+                if cai3_output[search_start] == 'X':
+                    if search_start + 1 < len(cai3_output):
+                        next_char = cai3_output[search_start + 1]
+                        if next_char == '{':
+                            # Simple X{ pattern
+                            has_exception_handler = True
+                        elif next_char == '(':
+                            # X(...){ pattern - find the matching )
+                            paren_pos = search_start + 2
+                            paren_count = 1
+                            while paren_pos < len(cai3_output) and paren_count > 0:
+                                if cai3_output[paren_pos] == '(':
+                                    paren_count += 1
+                                elif cai3_output[paren_pos] == ')':
+                                    paren_count -= 1
+                                paren_pos += 1
+                            
+                            # Check if there's a { after the closing )
+                            if paren_pos < len(cai3_output) and cai3_output[paren_pos] == '{':
+                                has_exception_handler = True
+            
+            if not has_exception_handler:
+                try_block_content = cai3_output[try_pos:try_end_pos+1]
+                violations.append(ConstraintViolation(
+                    violation_type="incomplete_try_structure",
+                    description=f"Try block without exception handler: {try_block_content[:30]}...",
+                    location=f"Try block: {try_block_content[:30]}",
                     suggested_fix="Add X{{exception_handler}} after the try block",
                     severity="critical"
                 ))
         
         return violations
-    
+
     def _validate_nested_delimiters(self, cai3_output: str) -> List[ConstraintViolation]:
         """
         Validate proper nesting and matching of delimiters using stack-based approach.
@@ -1358,9 +1434,8 @@ B#a1:# Optimized validation logic here
                 missing_hash_match = re.search(r"Hash '(hash_[a-f0-9]{4})'", violation.description)
                 if missing_hash_match:
                     missing_hash = missing_hash_match.group(1)
-                    missing_hash = missing_hash_match.group(1)
-                    repaired = self._add_missing_hash_mapping(repaired, missing_hash)
                     # Try to add the missing hash mapping to D: section
+                    repaired = self._add_missing_hash_mapping(repaired, missing_hash)
                     repaired = self._add_missing_hash_mapping(repaired, missing_hash)
                     
             elif violation.violation_type == "missing_variable_mapping":

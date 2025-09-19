@@ -798,6 +798,9 @@ class CAI3ResolutionPipeline:
         # CRITICAL: Fix inline statements separated by semicolons
         content = self._fix_inline_statements(content)
         
+        # CRITICAL: Translate T{}X{} structures to try/except blocks
+        content = self._translate_try_except_structures(content)
+        
         # Fix malformed try-except blocks
         content = re.sub(
             r'}except\s+(\w+)\s+',
@@ -807,6 +810,68 @@ class CAI3ResolutionPipeline:
         
         # Fix inline control structures
         content = self._expand_inline_control_structures(content)
+        
+        return content
+
+    def _translate_try_except_structures(self, content: str) -> str:
+        """Translate CAI3 T{}X{} structures to Python try/except blocks."""
+        self.logger.info("🔄 Translating T{}X{} structures to try/except blocks...")
+        
+        # Enhanced pattern to handle nested braces properly
+        pattern = r'T\{(.*?)\}X\(([^)]+)\)\{(.*?)\}'
+        
+        def replace_try_except(match):
+            try_body = match.group(1).strip()
+            exception_part = match.group(2).strip()
+            except_body = match.group(3).strip()
+            
+            self.logger.debug(f"🔍 Found T{{}}X{{}} pattern:")
+            self.logger.debug(f"   Try body: {try_body[:100]}...")
+            self.logger.debug(f"   Exception: {exception_part}")
+            self.logger.debug(f"   Except body: {except_body[:100]}...")
+            
+            # Parse exception part: "Exception var_name" or "Exception as var_name" or "Exception type var_name"
+            exception_parts = exception_part.split()
+            if len(exception_parts) >= 2:
+                exception_type = exception_parts[0]
+                # Handle different formats:
+                # "Exception var_name" -> use var_name
+                # "Exception as var_name" -> use var_name  
+                # "Exception type var_name" -> use var_name (last part)
+                if len(exception_parts) >= 3 and exception_parts[1] == 'as':
+                    var_name = exception_parts[2]
+                else:
+                    # Use the last part as the variable name
+                    var_name = exception_parts[-1]
+            else:
+                exception_type = "Exception"
+                var_name = "e"
+            
+            # Clean up semicolon-separated statements in try_body
+            if ';' in try_body:
+                try_statements = [stmt.strip() for stmt in try_body.split(';') if stmt.strip()]
+                try_body = '\n'.join(try_statements)
+            
+            # Clean up semicolon-separated statements in except_body  
+            if ';' in except_body:
+                except_statements = [stmt.strip() for stmt in except_body.split(';') if stmt.strip()]
+                except_body = '\n'.join(except_statements)
+            
+            # Build clean Python try/except - let Black handle the formatting
+            result = f"try:\n{try_body}\nexcept {exception_type} as {var_name}:\n{except_body}"
+            
+            self.logger.info(f"✅ Translated T{{}}X{{}} structure: {exception_type} as {var_name}")
+            return result
+        
+        # Apply the translation with DOTALL flag to handle multiline content
+        original_content = content
+        content = re.sub(pattern, replace_try_except, content, flags=re.DOTALL)
+        
+        if content != original_content:
+            self.logger.info("✅ Successfully translated T{}X{} structures to try/except blocks")
+            self.logger.debug(f"🔍 Result after T{{}}X{{}} translation:\n{content}")
+        else:
+            self.logger.info("ℹ️ No T{}X{} structures found to translate")
         
         return content
 

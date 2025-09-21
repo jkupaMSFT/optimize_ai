@@ -38,14 +38,19 @@ class CAI3ResolutionPipeline:
         content = self._resolve_pools(content)
         self.logger.info(f"✅ After pool resolution: {content[:200]}...")
         
-        # Step 3: Resolve variable references
-        self.logger.info("🔍 Step 3: Resolving variable references...")
+        # CRITICAL FIX: Step 3: Translate T{}X{} structures BEFORE variable resolution
+        self.logger.info("🔍 Step 3: Translating T{}X{} structures (BEFORE variable resolution)...")
+        content = self._translate_try_except_structures(content)
+        self.logger.info(f"✅ After T{{}}X{{}} translation: {content[:200]}...")
+        
+        # Step 4: Resolve variable references (AFTER T{}X{} translation)
+        self.logger.info("🔍 Step 4: Resolving variable references...")
         content = self._resolve_variables(content)
         self.logger.info(f"✅ After variable resolution: {content[:200]}...")
         
-        # Step 4: Fix CAI3 syntax
-        self.logger.info("🔍 Step 4: Fixing CAI3 syntax...")
-        content = self._fix_cai3_syntax(content)
+        # Step 5: Fix remaining CAI3 syntax (excluding T{}X{} translation)
+        self.logger.info("🔍 Step 5: Fixing remaining CAI3 syntax...")
+        content = self._fix_cai3_syntax_without_try_except(content)
         self.logger.info(f"✅ After syntax fixes: {content[:200]}...")
         
         self.logger.info("🎉 Content resolution complete!")
@@ -792,14 +797,15 @@ class CAI3ResolutionPipeline:
         """Pre-process CAI3-specific patterns before parsing."""
         self.logger.info("🔧 Pre-processing CAI3 content...")
         
+        # CRITICAL: Translate T{}X{} structures to try/except blocks FIRST
+        # Do this BEFORE any statement splitting to preserve the structure
+        content = self._translate_try_except_structures(content)
+        
         # Fix CAI3 concatenation issues
         content = self._fix_cai3_concatenations(content)
         
         # CRITICAL: Fix inline statements separated by semicolons
         content = self._fix_inline_statements(content)
-        
-        # CRITICAL: Translate T{}X{} structures to try/except blocks
-        content = self._translate_try_except_structures(content)
         
         # Fix malformed try-except blocks
         content = re.sub(
@@ -817,63 +823,180 @@ class CAI3ResolutionPipeline:
         """Translate CAI3 T{}X{} structures to Python try/except blocks."""
         self.logger.info("🔄 Translating T{}X{} structures to try/except blocks...")
         
-        # Enhanced pattern to handle nested braces properly
-        pattern = r'T\{(.*?)\}X\(([^)]+)\)\{(.*?)\}'
+        # CRITICAL DEBUG: Let's test multiple patterns
+        test_patterns = [
+            r'T\{([^{}]*(?:\{[^{}]*\}[^{}]*)*)\}X\(([^)]+)\)\{([^{}]*(?:\{[^{}]*\}[^{}]*)*)\}',
+            r'T\{(.+?)\}X\(([^)]+)\)\{(.+?)\}',
+            r'T\{(.+)\}X\(([^)]+)\)\{(.+)\}',
+            r'T\{(.+?)\}X\(([^)]+)\)\{(.+)$',
+            r'T\{(.+)\}X\(([^)]+)\)\{(.+)$',
+        ]
+        
+        self.logger.info(f"🔍 Testing T{{}}X{{}} patterns on content: {content[:100]}...")
+        
+        for i, pattern in enumerate(test_patterns):
+            matches = re.findall(pattern, content, re.DOTALL)
+            self.logger.info(f"   Pattern {i}: {pattern}")
+            if matches:
+                self.logger.info(f"   ✅ MATCHED! Found {len(matches)} matches: {matches[0] if matches else 'None'}")
+                break
+            else:
+                self.logger.info(f"   ❌ No match")
+        
+        # Use the working pattern (simplified for the actual structure)
+        # The content appears to be all on one line, so we need a pattern that handles that
+        pattern = r'T\{(.+)\}X\(([^)]+)\)\{(.+)\}'
         
         def replace_try_except(match):
             try_body = match.group(1).strip()
             exception_part = match.group(2).strip()
             except_body = match.group(3).strip()
             
-            self.logger.debug(f"🔍 Found T{{}}X{{}} pattern:")
-            self.logger.debug(f"   Try body: {try_body[:100]}...")
-            self.logger.debug(f"   Exception: {exception_part}")
-            self.logger.debug(f"   Except body: {except_body[:100]}...")
+            self.logger.info(f"🔍 Found T{{}}X{{}} pattern:")
+            self.logger.info(f"   Try body: {try_body[:100]}...")
+            self.logger.info(f"   Exception: {exception_part}")
+            self.logger.info(f"   Except body: {except_body[:100]}...")
             
-            # Parse exception part: "Exception var_name" or "Exception as var_name" or "Exception type var_name"
+            # Parse exception part: "Exception as var_name" format (already correct in CAI3-LITE)
             exception_parts = exception_part.split()
-            if len(exception_parts) >= 2:
+            if len(exception_parts) >= 3 and exception_parts[1] == 'as':
                 exception_type = exception_parts[0]
-                # Handle different formats:
-                # "Exception var_name" -> use var_name
-                # "Exception as var_name" -> use var_name  
-                # "Exception type var_name" -> use var_name (last part)
-                if len(exception_parts) >= 3 and exception_parts[1] == 'as':
-                    var_name = exception_parts[2]
-                else:
-                    # Use the last part as the variable name
-                    var_name = exception_parts[-1]
+                var_name = exception_parts[2]
+            elif len(exception_parts) >= 2:
+                exception_type = exception_parts[0]
+                var_name = exception_parts[1]  # Assume "Exception var" format
             else:
                 exception_type = "Exception"
                 var_name = "e"
             
-            # Clean up semicolon-separated statements in try_body
-            if ';' in try_body:
-                try_statements = [stmt.strip() for stmt in try_body.split(';') if stmt.strip()]
-                try_body = '\n'.join(try_statements)
+            # CRITICAL FIX: Handle semicolon-separated statements properly
+            # Convert semicolon-separated statements to newline-separated with proper indentation
+            try_statements = self._split_statements_with_indentation(try_body)
+            except_statements = self._split_statements_with_indentation(except_body)
             
-            # Clean up semicolon-separated statements in except_body  
-            if ';' in except_body:
-                except_statements = [stmt.strip() for stmt in except_body.split(';') if stmt.strip()]
-                except_body = '\n'.join(except_statements)
+            # Build properly indented Python try/except
+            result_lines = ["try:"]
+            for stmt in try_statements:
+                if stmt.strip():  # Check if statement has content
+                    # CRITICAL FIX: Preserve the indentation from _split_statements_with_indentation
+                    # Don't strip it and re-add base indentation - the splitting logic already handled nesting
+                    result_lines.append(f"    {stmt}")
             
-            # Build clean Python try/except - let Black handle the formatting
-            result = f"try:\n{try_body}\nexcept {exception_type} as {var_name}:\n{except_body}"
+            result_lines.append(f"except {exception_type} as {var_name}:")
+            for stmt in except_statements:
+                if stmt.strip():  # Check if statement has content
+                    # CRITICAL FIX: Preserve the indentation from _split_statements_with_indentation
+                    result_lines.append(f"    {stmt}")
+            
+            result = '\n'.join(result_lines)
             
             self.logger.info(f"✅ Translated T{{}}X{{}} structure: {exception_type} as {var_name}")
+            self.logger.info(f"🔍 Result:\n{result}")
             return result
         
-        # Apply the translation with DOTALL flag to handle multiline content
+        # Apply the translation
         original_content = content
-        content = re.sub(pattern, replace_try_except, content, flags=re.DOTALL)
+        content = re.sub(pattern, replace_try_except, content)
         
         if content != original_content:
             self.logger.info("✅ Successfully translated T{}X{} structures to try/except blocks")
-            self.logger.debug(f"🔍 Result after T{{}}X{{}} translation:\n{content}")
         else:
             self.logger.info("ℹ️ No T{}X{} structures found to translate")
+            self.logger.info(f"🔍 Content to search: {content}")
         
         return content
+    
+    def _split_statements_with_indentation(self, body: str) -> List[str]:
+        """Split semicolon-separated statements while preserving logical structure."""
+        if ';' not in body:
+            return [body]
+        
+        # Simple split on semicolons
+        raw_statements = [stmt.strip() for stmt in body.split(';') if stmt.strip()]
+        
+        # CRITICAL FIX: Only remove unreachable code after UNCONDITIONAL return statements
+        statements = []
+        found_unconditional_return = False
+        
+        for i, stmt in enumerate(raw_statements):
+            if found_unconditional_return:
+                # Skip any statements after an unconditional return (they're unreachable)
+                self.logger.info(f"   ⚠️ Skipping unreachable statement after return: {stmt}")
+                continue
+            
+            # CRITICAL FIX: Handle for loops that have break statements after them
+            stmt_clean = stmt.strip()
+            
+            # Check for for loop patterns with inline content
+            if stmt_clean.startswith('for ') and ':' in stmt_clean:
+                # This is a for loop with content after the colon
+                colon_pos = stmt_clean.find(':')
+                for_part = stmt_clean[:colon_pos + 1]  # "for obj in self.tiers:"
+                remaining_part = stmt_clean[colon_pos + 1:].strip()  # "if obj.name==tn:to=obj"
+                
+                statements.append(for_part)
+                
+                # Handle the content after the for loop colon
+                if remaining_part:
+                    # Check if it contains nested control structures (like if statements)
+                    if 'if ' in remaining_part and ':' in remaining_part:
+                        # This is likely a nested if statement: "if obj.name==tn:to=obj"
+                        if_colon_pos = remaining_part.find(':')
+                        if_part = remaining_part[:if_colon_pos + 1]  # "if obj.name==tn:"
+                        if_body = remaining_part[if_colon_pos + 1:].strip()  # "to=obj"
+                        
+                        statements.append(f"    {if_part}")
+                        if if_body:
+                            statements.append(f"        {if_body}")
+                            
+                        # The break should be at the if level (nested inside the for loop)
+                        if i + 1 < len(raw_statements) and raw_statements[i + 1].strip() in ['break', 'continue']:
+                            statements.append(f"        {raw_statements[i + 1].strip()}")
+                            self.logger.debug(f"   ✅ Moved '{raw_statements[i + 1].strip()}' inside if statement within for loop")
+                            # Mark the break statement as processed
+                            raw_statements[i + 1] = ""
+                    else:
+                        # Simple content after for loop
+                        statements.append(f"    {remaining_part}")
+                        
+                        # Check if next statement is break/continue - move it inside the loop
+                        if i + 1 < len(raw_statements) and raw_statements[i + 1].strip() in ['break', 'continue']:
+                            statements.append(f"    {raw_statements[i + 1].strip()}")
+                            self.logger.debug(f"   ✅ Moved '{raw_statements[i + 1].strip()}' inside for loop")
+                            # Mark the break statement as processed
+                            raw_statements[i + 1] = ""
+                continue
+            
+            # Skip empty statements (already processed break/continue)
+            if not stmt_clean:
+                continue
+                
+            statements.append(stmt)
+            
+            # Check if this statement contains a return
+            if 'return ' in stmt:
+                self.logger.info(f"   🔍 Found return statement: {stmt}")
+                
+                # CRITICAL: Only mark as unreachable if it's truly unconditional
+                stmt_clean = stmt.strip()
+                
+                # Check if the return is conditional
+                is_conditional = (
+                    stmt_clean.startswith('if ') or  # if condition: return
+                    ':return ' in stmt or            # condition: return
+                    ':return{' in stmt or            # condition: return{...}
+                    'else:' in stmt or               # else clause
+                    stmt_clean.startswith('elif ')   # elif condition
+                )
+                
+                if not is_conditional:
+                    # Only non-conditional returns make code unreachable
+                    found_unconditional_return = True
+                    self.logger.info(f"   � Unconditional return found - marking rest as unreachable")
+                else:
+                    self.logger.info(f"   ✅ Conditional return found - code remains reachable")
+        
+        return statements
 
     def _log_problematic_patterns(self, content: str) -> None:
         """Log comprehensive analysis of problematic patterns in the content."""
@@ -1107,37 +1230,129 @@ class CAI3ResolutionPipeline:
         return clean_value
 
     def _fix_inline_statements(self, content: str) -> str:
-        """Fix inline statements separated by semicolons."""
+        """Fix inline statements separated by semicolons with intelligent indentation for break/continue/pass."""
+        self.logger.info("🔧 Fixing inline statements and indentation...")
+        
         lines = content.split('\n')
         fixed_lines = []
         
-        for line in lines:
+        for line_num, line in enumerate(lines):
             stripped = line.strip()
             
-            # Check if line contains semicolon-separated statements
-            if ';' in stripped and not stripped.startswith('#'):
-                # Split on semicolons and create separate lines
-                parts = stripped.split(';')
-                indent = len(line) - len(line.lstrip())
-                
-                for i, part in enumerate(parts):
-                    part = part.strip()
-                    if part:  # Skip empty parts
-                        if i == 0:
-                            # First part keeps original indentation
-                            fixed_lines.append(' ' * indent + part)
-                        else:
-                            # Subsequent parts need proper indentation and formatting
-                            if part.startswith(('if', 'elif', 'else', 'return', 'for', 'while')):
-                                # Control structures or returns get base indentation
-                                fixed_lines.append(' ' * indent + part)
-                            else:
-                                # Regular statements get normal indentation
-                                fixed_lines.append(' ' * indent + part)
-            else:
+            # Skip empty lines and comments
+            if not stripped or stripped.startswith('#'):
                 fixed_lines.append(line)
+                continue
+            
+            # Check if line contains semicolon-separated statements
+            if ';' not in stripped:
+                fixed_lines.append(line)
+                continue
+            
+            self.logger.debug(f"   🔍 Processing line {line_num + 1}: {stripped[:100]}...")
+            
+            # Split on semicolons while respecting nested structures
+            statements = self._split_statements_with_indentation(stripped)
+            
+            if len(statements) <= 1:
+                fixed_lines.append(line)
+                continue
+            
+            base_indent = len(line) - len(line.lstrip())
+            
+            # Process each statement with intelligent indentation
+            for i, stmt in enumerate(statements):
+                stmt = stmt.strip()
+                if not stmt:
+                    continue
+                
+                # CRITICAL FIX: Smart handling of break/continue/pass statements
+                if stmt in ['break', 'continue', 'pass']:
+                    # Check if the previous statement was a colon statement (control structure)
+                    previous_stmt = statements[i-1].strip() if i > 0 else ''
+                    has_preceding_colon = previous_stmt.endswith(':')
+                    
+                    if has_preceding_colon:
+                        # Preceded by control structure - indent normally
+                        indent = self._calculate_statement_indentation(stmt, fixed_lines, base_indent)
+                        fixed_lines.append(' ' * indent + stmt)
+                        self.logger.debug(f"   ✅ {stmt} after colon statement - using calculated indent: {indent}")
+                    else:
+                        # NOT preceded by colon - keep at current indentation level
+                        # This preserves the original scope context
+                        fixed_lines.append(' ' * base_indent + stmt)
+                        self.logger.debug(f"   ✅ {stmt} without preceding colon - keeping base indent: {base_indent}")
+                    
+                    # For break/continue, remaining statements may be unreachable in some contexts
+                    if stmt in ['break', 'continue']:
+                        self.logger.debug(f"   ⚠️ Found {stmt} - continuing with remaining statements")
+                    
+                    continue
+                
+                # Handle other control flow statements
+                if self._is_flow_control_statement(stmt):
+                    # Control flow statements maintain base indentation
+                    fixed_lines.append(' ' * base_indent + stmt)
+                elif stmt.startswith('return'):
+                    # Return statements maintain base indentation and BREAK the flow
+                    fixed_lines.append(' ' * base_indent + stmt)
+                    # CRITICAL: Don't add remaining statements after return - they're unreachable
+                    self.logger.debug(f"   ⚠️ Stopping after return statement: {stmt}")
+                    break
+                elif stmt.startswith('raise'):
+                    # Raise also breaks the flow
+                    fixed_lines.append(' ' * base_indent + stmt)
+                    break
+                else:
+                    # Regular statements get proper indentation
+                    if i == 0:
+                        # First statement keeps original indentation
+                        fixed_lines.append(' ' * base_indent + stmt)
+                    else:
+                        # Subsequent statements need context-aware indentation
+                        indent = self._calculate_statement_indentation(stmt, fixed_lines, base_indent)
+                        fixed_lines.append(' ' * indent + stmt)
         
-        return '\n'.join(fixed_lines)
+        result = '\n'.join(fixed_lines)
+        self.logger.info(f"✅ Fixed inline statements with intelligent break/continue/pass handling")
+        return result
+    
+    def _is_flow_control_statement(self, stmt: str) -> bool:
+        """Check if statement is a flow control statement."""
+        flow_keywords = ['if ', 'elif ', 'else:', 'for ', 'while ', 'try:', 'except ', 'finally:', 'with ']
+        return any(stmt.startswith(keyword) for keyword in flow_keywords)
+    
+    def _calculate_statement_indentation(self, stmt: str, previous_lines: List[str], base_indent: int) -> int:
+        """Calculate proper indentation for a statement based on context."""
+        if not previous_lines:
+            return base_indent
+        
+        # Get the last non-empty line for context
+        last_line = None
+        for line in reversed(previous_lines):
+            if line.strip():
+                last_line = line
+                break
+        
+        if not last_line:
+            return base_indent
+        
+        last_stripped = last_line.strip()
+        last_indent = len(last_line) - len(last_line.lstrip())
+        
+        # If the last line was a control structure that opened a block
+        if (last_stripped.endswith(':') and 
+            any(last_stripped.startswith(kw) for kw in ['if ', 'elif ', 'else:', 'for ', 'while ', 'try:', 'except ', 'with '])):
+            # This statement should be inside the block
+            return last_indent + 4
+        
+        # If this is a dedent keyword
+        if stmt.startswith(('elif ', 'else:', 'except ', 'finally:')):
+            # Align with the original control structure
+            return max(base_indent, last_indent - 4)
+        
+        # Default: same level as the last statement
+        return last_indent
 
     def _final_syntax_cleanup(self, content: str) -> str:
         """Final cleanup to ensure valid Python syntax."""
@@ -1169,3 +1384,160 @@ class CAI3ResolutionPipeline:
                 cleaned_lines.append(line)
         
         return '\n'.join(cleaned_lines)
+    
+    def _fix_cai3_syntax_without_try_except(self, content: str) -> str:
+        """
+        Fix CAI3 syntax issues without handling T{}X{} structures.
+        
+        T{}X{} structures should already be translated by this point.
+        """
+        self.logger.info("🔧 Starting CAI3 syntax fixing (without T{}X{} translation)...")
+        
+        # CRITICAL: Check if content is still in CAI3 format
+        cai3_markers = ['#C3L', 'CAI3:', 'P:', 'T:', 'B#', 'I:', 'D:', 'X:']
+        if any(marker in content for marker in cai3_markers):
+            self.logger.info("🚨 Content appears to be in CAI3 format - SKIPPING syntax fixes")
+            return content
+        
+        original_content = content
+        
+        # Step 1: Pre-process to fix CAI3-specific issues (without T{}X{} translation)
+        content = self._preprocess_cai3_content_without_try_except(content)
+        
+        # Step 2: Parse into logical blocks using AST-aware approach
+        blocks = self._parse_into_logical_blocks(content)
+        
+        # Step 3: Fix each block individually
+        fixed_blocks = []
+        for block in blocks:
+            fixed_block = self._fix_block_syntax(block)
+            fixed_blocks.append(fixed_block)
+        
+        # Step 4: Reassemble with proper structure
+        content = self._reassemble_blocks(fixed_blocks)
+        
+        # Step 5: Apply Black formatting with fallback
+        formatted_content = self._apply_black_with_fallback(content)
+        
+        # Step 6: Final syntax cleanup
+        final_content = self._final_syntax_cleanup(formatted_content)
+        
+        self.logger.info("✅ Applied comprehensive syntax fixes (without T{}X{} translation)")
+        return final_content
+    
+    def _preprocess_cai3_content_without_try_except(self, content: str) -> str:
+        """
+        Preprocess CAI3 content without handling T{}X{} structures.
+        
+        This is a version of _preprocess_cai3_content that skips T{}X{} translation
+        since it should have already been done earlier in the pipeline.
+        """
+        self.logger.info("🔧 Pre-processing CAI3 content (skipping T{}X{} translation)...")
+        
+        # Fix CAI3 concatenation issues
+        content = self._fix_cai3_concatenations(content)
+        
+        # CRITICAL: Fix inline statements separated by semicolons
+        content = self._fix_inline_statements(content)
+        
+        # Fix malformed try-except blocks (but don't translate T{}X{} structures)
+        content = self._fix_malformed_try_except(content)
+        
+        # Fix function/method call patterns
+        content = self._fix_function_call_patterns(content)
+        
+        # Fix incomplete dictionary/list patterns
+        content = self._fix_incomplete_structures(content)
+        
+        # Fix malformed loops and control structures
+        content = self._fix_control_structures(content)
+        
+        return content
+
+    def _fix_malformed_try_except(self, content: str) -> str:
+        """
+        Fix malformed try/except blocks where exception variables are incorrectly mapped.
+        
+        This method specifically handles cases where 'ex' has been mapped to 'exists'
+        in except clauses, creating invalid syntax like 'except Exception as exists:'.
+        Also fixes variable references inside except blocks.
+        """
+        # Pattern to find malformed except clauses
+        # Look for 'except Exception as {word}:' where {word} is not a valid exception variable
+        malformed_pattern = r'except\s+Exception\s+as\s+([a-zA-Z_][a-zA-Z0-9_]*)\s*:'
+        
+        def fix_except_clause(match):
+            exception_var = match.group(1)
+            
+            # Common malformed mappings that should be fixed
+            malformed_mappings = {
+                'exists': 'e',
+                'error': 'e', 
+                'exception': 'e',
+                'ex': 'e'  # In case it wasn't caught earlier
+            }
+            
+            if exception_var in malformed_mappings:
+                correct_var = malformed_mappings[exception_var]
+                return f'except Exception as {correct_var}:'
+            
+            # If it's already a reasonable variable name (single letter or ends with 'e'), keep it
+            if len(exception_var) == 1 or exception_var.endswith('e'):
+                return match.group(0)
+            
+            # Default to 'e' for any other suspicious mappings
+            return 'except Exception as e:'
+        
+        # Apply the fix to except clauses
+        fixed_content = re.sub(malformed_pattern, fix_except_clause, content)
+        
+        # Now fix variable references inside except blocks
+        lines = fixed_content.split('\n')
+        fixed_lines = []
+        in_except_block = False
+        current_except_var = None
+        
+        for line in lines:
+            stripped = line.strip()
+            
+            # Check if we're entering an except block
+            except_match = re.match(r'except\s+Exception\s+as\s+([a-zA-Z_][a-zA-Z0-9_]*)\s*:', stripped)
+            if except_match:
+                in_except_block = True
+                current_except_var = except_match.group(1)
+                fixed_lines.append(line)
+                continue
+            
+            # Check if we're leaving the except block (dedent or new control structure)
+            if in_except_block:
+                if line and not line.startswith('    '):  # Back to base level
+                    in_except_block = False
+                    current_except_var = None
+                elif stripped.startswith(('try:', 'except:', 'finally:', 'else:', 'if ', 'for ', 'while ', 'def ', 'class ')):
+                    in_except_block = False
+                    current_except_var = None
+            
+            # If we're in an except block, fix malformed variable references
+            if in_except_block and current_except_var:
+                # Fix common malformed variables that should reference the exception
+                malformed_vars = ['exists', 'error', 'exception']
+                for malformed_var in malformed_vars:
+                    if malformed_var in line and current_except_var != malformed_var:
+                        # Replace malformed variable with correct exception variable
+                        line = re.sub(r'\b' + re.escape(malformed_var) + r'\b', current_except_var, line)
+            
+            fixed_lines.append(line)
+        
+        return '\n'.join(fixed_lines)
+
+    def _fix_function_call_patterns(self, content: str) -> str:
+        """Fix function call patterns - stub for testing."""
+        return content
+    
+    def _fix_incomplete_structures(self, content: str) -> str:
+        """Fix incomplete structures - stub for testing."""
+        return content
+    
+    def _fix_control_structures(self, content: str) -> str:
+        """Fix control structures - stub for testing."""
+        return content

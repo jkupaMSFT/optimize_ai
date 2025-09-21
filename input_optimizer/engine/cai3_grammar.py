@@ -158,12 +158,17 @@ class CAI3LiteParser:
             
             # Parse B# and B0-B9 sections (bodies) - CRITICAL FIX
             # This pattern now correctly handles multi-line body content including I: conditions
-            body_pattern = r'^(B#[A-Za-z0-9_]+|B\d+):\s*(.+?)(?=^(?:B#[A-Za-z0-9_]+:|B\d+:|D:|X:|F:|P:|I:|T:|---|$))'
+            # FIXED: Allow body to be at end of content without requiring another section
+            body_pattern = r'^(B#[A-Za-z0-9_]+|B\d+):\s*(.+?)(?=^(?:B#[A-Za-z0-9_]+:|B\d+:|D:|X:|F:|P:|I:|T:|---)|$)'
             body_matches = list(re.finditer(body_pattern, content, re.MULTILINE | re.DOTALL))
+            
+            self.logger.info(f"🔍 BODY PARSING: Found {len(body_matches)} body matches")
             
             for body_match in body_matches:
                 body_id = body_match.group(1)
                 body_content = body_match.group(2).strip()
+                
+                self.logger.info(f"🔍 BODY PARSING: Processing {body_id} with content: {body_content[:100]}...")
                 
                 # Clean up body_id - convert B# format to just the ID
                 if body_id.startswith('B#'):
@@ -174,6 +179,9 @@ class CAI3LiteParser:
                 # Body content can contain I: conditions and multi-line statements
                 # No need to validate internal structure here
                 ast.bodies[body_id] = body_content
+                self.logger.info(f"✅ BODY PARSING: Added body {body_id}")
+            
+            self.logger.info(f"🔍 BODY PARSING: Final bodies dict: {list(ast.bodies.keys())}")
             
             # Parse F: section (standalone functions) - CRITICAL FIX
             # Pattern: F:function_name#body_id or F:function_name(args)#body_id

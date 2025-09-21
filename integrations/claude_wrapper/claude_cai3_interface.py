@@ -1042,7 +1042,7 @@ B#a1:# Optimized validation logic here
         
         for try_pos in try_positions:
             # Find the matching closing brace for this try block
-            brace_count = 0
+            brace_count = 1  # Start with 1 to account for the opening brace in "T{"
             start_pos = try_pos + 2  # Start after "T{"
             try_end_pos = None
             
@@ -1050,10 +1050,10 @@ B#a1:# Optimized validation logic here
                 if cai3_output[j] == '{':
                     brace_count += 1
                 elif cai3_output[j] == '}':
+                    brace_count -= 1
                     if brace_count == 0:
                         try_end_pos = j
                         break
-                    brace_count -= 1
             
             if try_end_pos is None:
                 # Incomplete try block (missing closing brace)

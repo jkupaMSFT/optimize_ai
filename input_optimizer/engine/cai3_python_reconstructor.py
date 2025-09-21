@@ -152,9 +152,24 @@ class CAI3PythonReconstructor:
             if resolved_body:
                 self.logger.info(f"   ✅ Resolved body: {resolved_body[:100]}...")
                 lines = [method_def]
-                for stmt in resolved_body.split('\n'):
-                    if stmt.strip():
-                        lines.append(f"    {stmt}")
+                
+                # CRITICAL FIX: Check if resolved_body already contains proper Python structure
+                # If it contains try/except blocks, preserve the existing indentation
+                if 'try:' in resolved_body and 'except ' in resolved_body:
+                    # The resolved body already has proper Python structure with indentation
+                    # Split by lines and preserve existing indentation, just add base method indent
+                    for line in resolved_body.split('\n'):
+                        if line.strip():  # Only process non-empty lines
+                            # Add the base method indentation (4 spaces) to existing indentation
+                            lines.append(f"    {line}")
+                        else:
+                            lines.append(line)  # Preserve empty lines
+                else:
+                    # For simple statements without try/except, add basic indentation
+                    for stmt in resolved_body.split('\n'):
+                        if stmt.strip():
+                            lines.append(f"    {stmt}")
+                
                 result = '\n'.join(lines)
                 self.logger.info(f"   🎯 Final method: {result}")
                 return result
@@ -173,10 +188,30 @@ class CAI3PythonReconstructor:
             for pool_id, value in ast_obj.pools.items():
                 resolved = resolved.replace(pool_id, str(value))
         
-        # Fix CAI3 syntax
-        from .cai3_resolution_pipeline import CAI3ResolutionPipeline
-        pipeline = CAI3ResolutionPipeline({}, ast_obj.pools if hasattr(ast_obj, 'pools') else {})
-        resolved = pipeline._fix_cai3_syntax(resolved)
+        # CRITICAL FIX: Only apply CAI3 syntax fixing if the content appears to need it
+        # If the content already has proper Python syntax (try/except blocks, etc.), don't process it
+        needs_cai3_fixing = False
+        
+        # Check for CAI3-specific markers that indicate content needs processing
+        cai3_markers = ['T{', 'X(', 'I(', 'W(', '@', 'R{', '#C3L', 'CAI3:', 'P:', 'B#']
+        if any(marker in resolved for marker in cai3_markers):
+            needs_cai3_fixing = True
+        
+        # Check if content has malformed syntax that needs fixing
+        try:
+            import ast
+            ast.parse(resolved)
+            # Content is already valid Python - don't process it further
+            self.logger.info("✅ Method body already valid Python - skipping CAI3 syntax fixes")
+        except SyntaxError:
+            # Content has syntax issues - may need CAI3 fixing
+            needs_cai3_fixing = True
+        
+        if needs_cai3_fixing:
+            # Fix CAI3 syntax
+            from .cai3_resolution_pipeline import CAI3ResolutionPipeline
+            pipeline = CAI3ResolutionPipeline({}, ast_obj.pools if hasattr(ast_obj, 'pools') else {})
+            resolved = pipeline._fix_cai3_syntax(resolved)
         
         return resolved
     

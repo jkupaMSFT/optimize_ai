@@ -333,7 +333,7 @@ class CAI3ResolutionPipeline:
         return all(c.isalnum() or c == '_' for c in name[1:])
     
     def _resolve_variables(self, content: str) -> str:
-        """Resolve variable references using the variables mapping."""
+        """Resolve variable references using the variables mapping with Python keyword protection."""
         if not self.variables:
             self.logger.warning("⚠️ No variable mappings available for resolution!")
             return content
@@ -347,6 +347,38 @@ class CAI3ResolutionPipeline:
         
         for var_id, value in sorted_variables:
             self.logger.info(f"🔍 DEBUG: Looking for variable '{var_id}' -> '{value}'")
+            
+            # CRITICAL FIX: Skip Python keywords in specific grammatical contexts
+            if var_id in ['as', 'is', 'in', 'and', 'or', 'not', 'if', 'else', 'elif', 'for', 'while', 'try', 'except', 'finally', 'with', 'import', 'from', 'def', 'class']:
+                # IMPROVED: For mixed contexts, skip global check and rely on per-match filtering
+                has_protected_context = self._is_python_keyword_in_context(var_id, content)
+                if has_protected_context:
+                    # Count occurrences to decide strategy
+                    total_occurrences = len(re.findall(rf'\b{re.escape(var_id)}\b', content))
+                    if var_id == 'as':
+                        # Special handling for 'as' - check if ALL are protected
+                        as_patterns = [
+                            r'except\s+\w+\s+as\s+\w+\s*:',     
+                            r'except\s+\w+\.\w+\s+as\s+\w+\s*:', 
+                            r'import\s+\w+\s+as\s+\w+',         
+                            r'from\s+\w+\s+import\s+\w+\s+as\s+\w+',  
+                            r'with\s+[^:]+\s+as\s+\w+\s*:',     
+                        ]
+                        protected_occurrences = sum(len(re.findall(pattern, content)) for pattern in as_patterns)
+                        
+                        self.logger.info(f"   📊 'as' analysis: {total_occurrences} total, {protected_occurrences} protected")
+                        
+                        # Only skip ALL if ALL occurrences are protected
+                        if protected_occurrences >= total_occurrences:
+                            self.logger.info(f"⚠️ SKIPPING all 'as' - all occurrences protected")
+                            continue
+                        else:
+                            self.logger.info(f"🔀 MIXED CONTEXT for 'as' - using per-match filtering")
+                            # Continue to per-match filtering
+                    else:
+                        # For other keywords, if any are protected, skip all (conservative)
+                        self.logger.info(f"⚠️ SKIPPING Python keyword '{var_id}' - found in grammatical context")
+                        continue
             
             # Use multiple patterns to catch variables in different contexts
             patterns = [
@@ -363,13 +395,25 @@ class CAI3ResolutionPipeline:
                 matches = list(re.finditer(pattern, content, re.MULTILINE))
                 if matches:
                     self.logger.info(f"🔍 DEBUG: Pattern {i} ({pattern}) found {len(matches)} matches for '{var_id}'")
+                    valid_matches = []
                     for match in matches:
+                        # CRITICAL FIX: Context-aware filtering - skip matches in Python keyword contexts
+                        if self._should_skip_match_for_keyword(var_id, match, content):
+                            self.logger.info(f"   ⚠️ Skipping match at pos {match.start()}-{match.end()} - Python keyword context")
+                            continue
+                        
+                        # CRITICAL FIX: Also protect variables that appear in except clauses
+                        if self._should_skip_variable_in_except_context(var_id, match, content):
+                            self.logger.info(f"   ⚠️ Skipping match at pos {match.start()}-{match.end()} - except clause context")
+                            continue
+                            
                         start, end = match.span()
                         context_start = max(0, start - 20)
                         context_end = min(len(content), end + 20)
                         context = content[context_start:context_end]
                         self.logger.info(f"   Match at pos {start}-{end}: ...{context}...")
-                all_matches.extend(matches)
+                        valid_matches.append(match)
+                    all_matches.extend(valid_matches)
             
             # Remove duplicates (same position)
             unique_matches = []
@@ -404,6 +448,200 @@ class CAI3ResolutionPipeline:
         self.logger.info(f"🔍 DEBUG: Final content after variable resolution:\n{content}")
         return content
     
+    def _is_python_keyword_in_context(self, keyword: str, content: str) -> bool:
+        """
+        Check if a Python keyword appears in its proper grammatical context.
+        Returns True if the keyword should NOT be replaced.
+        
+        This method now checks for ANY occurrence in the content, not just global presence.
+        """
+        if keyword == 'as':
+            # Check for 'except Exception as var:', 'import module as alias', 'with context as var:'
+            patterns = [
+                r'except\s+\w+\s+as\s+\w+\s*:',     # except Exception as e:
+                r'except\s+\w+\.\w+\s+as\s+\w+\s*:',  # except module.Exception as e:
+                r'import\s+\w+\s+as\s+\w+',         # import module as alias
+                r'from\s+\w+\s+import\s+\w+\s+as\s+\w+',  # from module import item as alias
+                r'with\s+[^:]+\s+as\s+\w+\s*:',     # with context as var:
+            ]
+            # If ANY occurrence is in a protected context, skip ALL replacements initially
+            # This is a conservative approach to avoid partial replacements
+            has_protected = any(re.search(pattern, content) for pattern in patterns)
+            
+            if has_protected:
+                # Count total 'as' occurrences vs protected occurrences
+                total_as = len(re.findall(r'\bas\b', content))
+                protected_as = sum(len(re.findall(pattern, content)) for pattern in patterns)
+                
+                self.logger.info(f"   📊 Found {total_as} total 'as' occurrences, {protected_as} in protected contexts")
+                
+                # If all 'as' occurrences are protected, skip all replacements
+                if protected_as >= total_as:
+                    return True
+                else:
+                    # Mixed context - use per-match filtering instead of global skip
+                    return False
+            
+            return False
+        
+        elif keyword == 'in':
+            # Check for 'for item in container:', 'if item in container'
+            patterns = [
+                r'for\s+\w+\s+in\s+[^:]+\s*:',      # for item in container:
+                r'if\s+[^:]+\s+in\s+[^:]+\s*:',     # if item in container:
+                r'elif\s+[^:]+\s+in\s+[^:]+\s*:',   # elif item in container:
+                r'\w+\s+not\s+in\s+\w+',            # item not in container
+            ]
+            return any(re.search(pattern, content) for pattern in patterns)
+        
+        elif keyword == 'is':
+            # Check for 'if var is None:', 'var is not None'
+            patterns = [
+                r'if\s+\w+\s+is\s+None\s*:',        # if var is None:
+                r'elif\s+\w+\s+is\s+None\s*:',      # elif var is None:
+                r'\w+\s+is\s+not\s+None',           # var is not None
+                r'\w+\s+is\s+\w+',                  # var is value
+            ]
+            return any(re.search(pattern, content) for pattern in patterns)
+        
+        # Add more keyword checks as needed
+        return False
+    
+    def _should_skip_match_for_keyword(self, keyword: str, match, content: str) -> bool:
+        """
+        Check if a specific match should be skipped because it's a Python keyword in context.
+        Uses syntax-aware statement analysis instead of fixed character windows.
+        """
+        if keyword not in ['as', 'is', 'in', 'and', 'or', 'not', 'if', 'else', 'elif', 'for', 'while', 'try', 'except', 'finally', 'with', 'import', 'from', 'def', 'class']:
+            return False
+        
+        # Get the complete statement containing this match
+        statement = self._extract_statement_containing_match(match, content)
+        self.logger.debug(f"   🔍 Analyzing statement: {repr(statement)}")
+        
+        # Use the complete statement as context for more reliable pattern matching
+        context = statement
+        
+        if keyword == 'as':
+            # CRITICAL: Check for exception handling, import statements, and with statements
+            patterns = [
+                r'except\s+\w+(\.\w+)?\s+as\s+\w+\s*:',    # except Exception as e:
+                r'import\s+\w+(\.\w+)?\s+as\s+\w+',        # import module as alias
+                r'from\s+\w+\s+import\s+\w+\s+as\s+\w+',   # from module import item as alias
+                r'with\s+[^:]+\s+as\s+\w+\s*:',           # with context as var:
+            ]
+            for pattern in patterns:
+                if re.search(pattern, context):
+                    self.logger.info(f"   🛡️ Protected 'as' keyword in context: {pattern}")
+                    return True
+        
+        elif keyword == 'in':
+            patterns = [
+                r'for\s+\w+\s+in\s+[^:]+\s*:',      # for item in container:
+                r'if\s+[^:]+\s+in\s+[^:]+\s*:',     # if item in container:
+                r'elif\s+[^:]+\s+in\s+[^:]+\s*:',   # elif item in container:
+                r'\w+\s+not\s+in\s+\w+',            # item not in container
+            ]
+            for pattern in patterns:
+                if re.search(pattern, context):
+                    self.logger.info(f"   🛡️ Protected 'in' keyword in context: {pattern}")
+                    return True
+        
+        elif keyword == 'is':
+            patterns = [
+                r'if\s+\w+\s+is\s+(None|\w+)\s*:',     # if var is None/value:
+                r'elif\s+\w+\s+is\s+(None|\w+)\s*:',   # elif var is None/value:
+                r'\w+\s+is\s+not\s+(None|\w+)',        # var is not None/value
+                r'\w+\s+is\s+\w+',                     # var is value
+            ]
+            for pattern in patterns:
+                if re.search(pattern, context):
+                    self.logger.info(f"   🛡️ Protected 'is' keyword in context: {pattern}")
+                    return True
+        
+        return False
+    
+    def _extract_statement_containing_match(self, match, content: str) -> str:
+        """
+        Extract the complete Python statement containing the given match.
+        This is more robust than fixed character windows as it respects Python syntax.
+        """
+        lines = content.split('\n')
+        match_pos = match.start()
+        
+        # Find which line contains the match
+        current_pos = 0
+        match_line_idx = 0
+        for i, line in enumerate(lines):
+            if current_pos <= match_pos < current_pos + len(line) + 1:  # +1 for newline
+                match_line_idx = i
+                break
+            current_pos += len(line) + 1  # +1 for newline
+        
+        # Start with the line containing the match
+        statement_lines = [lines[match_line_idx]]
+        
+        # Look backwards for the start of the statement
+        start_idx = match_line_idx
+        while start_idx > 0:
+            prev_line = lines[start_idx - 1].rstrip()
+            current_line = lines[start_idx].strip()
+            
+            # If previous line ends with a continuation character or this line is indented more
+            if (prev_line.endswith(('\\', ',', '(', '[', '{')) or
+                prev_line.endswith(('and', 'or', '+', '-', '*', '/', '=')) or
+                (current_line and len(lines[start_idx]) - len(lines[start_idx].lstrip()) > 
+                 len(lines[start_idx - 1]) - len(lines[start_idx - 1].lstrip()))):
+                statement_lines.insert(0, lines[start_idx - 1])
+                start_idx -= 1
+            else:
+                break
+        
+        # Look forwards for the end of the statement
+        end_idx = match_line_idx
+        while end_idx < len(lines) - 1:
+            current_line = lines[end_idx].rstrip()
+            next_line = lines[end_idx + 1].strip()
+            
+            # If current line ends with continuation or next line is indented more
+            if (current_line.endswith(('\\', ',', '(', '[', '{')) or
+                current_line.endswith(('and', 'or', '+', '-', '*', '/', '=')) or
+                (next_line and len(lines[end_idx + 1]) - len(lines[end_idx + 1].lstrip()) > 
+                 len(lines[end_idx]) - len(lines[end_idx].lstrip()))):
+                statement_lines.append(lines[end_idx + 1])
+                end_idx += 1
+            else:
+                break
+        
+        # Join the statement lines, preserving internal structure but creating a clean single statement
+        statement = ' '.join(line.strip() for line in statement_lines if line.strip())
+        
+        self.logger.debug(f"   📍 Statement extraction: lines {start_idx}-{end_idx}: {repr(statement)}")
+        return statement
+    
+    def _should_skip_variable_in_except_context(self, var_id: str, match, content: str) -> bool:
+        """
+        Check if a variable should be skipped because it's in an except clause context.
+        This protects exception variables like 'e' in 'except Exception as e:'.
+        Uses syntax-aware statement analysis instead of fixed character windows.
+        """
+        # Get the complete statement containing this match
+        statement = self._extract_statement_containing_match(match, content)
+        self.logger.debug(f"   🔍 Checking except context for '{var_id}' in: {repr(statement)}")
+        
+        # Check if this variable appears in an except clause within this statement
+        except_patterns = [
+            rf'except\s+\w+(\.\w+)?\s+as\s+{re.escape(var_id)}\s*:',    # except Exception as var:
+            rf'except\s+\w+\s+{re.escape(var_id)}\s*:',                 # except Exception var: (no 'as')
+        ]
+        
+        for pattern in except_patterns:
+            if re.search(pattern, statement):
+                self.logger.info(f"   🛡️ Protected variable '{var_id}' in except clause context")
+                return True
+        
+        return False
+    
     def _fix_cai3_syntax(self, content: str) -> str:
         """Enhanced CAI3 syntax fixing using AST-based approach with Black formatting."""
         self.logger.info("🔧 Starting CAI3 syntax fixing...")
@@ -413,6 +651,21 @@ class CAI3ResolutionPipeline:
         if any(marker in content for marker in cai3_markers):
             self.logger.info("🚨 Content appears to be in CAI3 format - SKIPPING syntax fixes")
             return content
+        
+        # CRITICAL FIX: Check if content already has well-formed try/except structure
+        # If it does, don't process it further to avoid corruption
+        if ('try:' in content and 'except ' in content and 
+            content.count('try:') == content.count('except ')):
+            # Validate that the try/except structure is syntactically correct
+            try:
+                import ast
+                ast.parse(content)
+                self.logger.info("✅ Content already has valid try/except structure - SKIPPING modifications")
+                return content
+            except SyntaxError:
+                # Structure is malformed, continue with processing
+                self.logger.info("⚠️ Try/except structure found but malformed - continuing with fixes")
+                pass
         
         original_content = content
         
@@ -665,16 +918,14 @@ class CAI3ResolutionPipeline:
             if not line.rstrip().endswith(':'):
                 line = line.rstrip() + ':'
         
-        # Handle bare 'else' case - add pass
+        # Handle bare 'else' case - DON'T add pass here, let _final_syntax_cleanup handle it
         if stripped == 'else:':
-            return ' ' * indent + 'else:\n' + ' ' * (indent + 4) + 'pass'
+            return ' ' * indent + 'else:'
         elif stripped == 'else':
-            return ' ' * indent + 'else:\n' + ' ' * (indent + 4) + 'pass'
+            return ' ' * indent + 'else:'
         
-        # Handle other bare control structures that need pass
-        bare_structures = ['try:', 'except:', 'finally:', 'if:', 'elif:']
-        if any(stripped.endswith(struct) for struct in bare_structures) and len(stripped.split()) <= 2:
-            return line + '\n' + ' ' * (indent + 4) + 'pass'
+        # REMOVED: Don't add pass statements here - _final_syntax_cleanup handles this more intelligently
+        # This prevents duplicate pass statements and allows proper content detection
         
         return line
 
@@ -914,15 +1165,11 @@ class CAI3ResolutionPipeline:
         # Simple split on semicolons
         raw_statements = [stmt.strip() for stmt in body.split(';') if stmt.strip()]
         
-        # CRITICAL FIX: Only remove unreachable code after UNCONDITIONAL return statements
+        # CRITICAL FIX: In try/except blocks, ALL statements should remain part of the try block
+        # Don't remove statements as "unreachable" after return - they belong in the same scope
         statements = []
-        found_unconditional_return = False
         
         for i, stmt in enumerate(raw_statements):
-            if found_unconditional_return:
-                # Skip any statements after an unconditional return (they're unreachable)
-                self.logger.info(f"   ⚠️ Skipping unreachable statement after return: {stmt}")
-                continue
             
             # CRITICAL FIX: Handle for loops that have break statements after them
             stmt_clean = stmt.strip()
@@ -972,29 +1219,6 @@ class CAI3ResolutionPipeline:
                 continue
                 
             statements.append(stmt)
-            
-            # Check if this statement contains a return
-            if 'return ' in stmt:
-                self.logger.info(f"   🔍 Found return statement: {stmt}")
-                
-                # CRITICAL: Only mark as unreachable if it's truly unconditional
-                stmt_clean = stmt.strip()
-                
-                # Check if the return is conditional
-                is_conditional = (
-                    stmt_clean.startswith('if ') or  # if condition: return
-                    ':return ' in stmt or            # condition: return
-                    ':return{' in stmt or            # condition: return{...}
-                    'else:' in stmt or               # else clause
-                    stmt_clean.startswith('elif ')   # elif condition
-                )
-                
-                if not is_conditional:
-                    # Only non-conditional returns make code unreachable
-                    found_unconditional_return = True
-                    self.logger.info(f"   � Unconditional return found - marking rest as unreachable")
-                else:
-                    self.logger.info(f"   ✅ Conditional return found - code remains reachable")
         
         return statements
 
@@ -1355,7 +1579,7 @@ class CAI3ResolutionPipeline:
         return last_indent
 
     def _final_syntax_cleanup(self, content: str) -> str:
-        """Final cleanup to ensure valid Python syntax."""
+        """Final cleanup to ensure valid Python syntax - more conservative approach."""
         lines = content.split('\n')
         cleaned_lines = []
         
@@ -1363,23 +1587,61 @@ class CAI3ResolutionPipeline:
             stripped = line.strip()
             indent = len(line) - len(line.lstrip())
             
-            # Check for bare control structures that need pass
-            if (stripped in ['else:', 'try:', 'except:', 'finally:'] or
+            # Only add pass for TRULY empty control structures
+            # Be much more conservative - only add pass if we're sure it's needed
+            if (stripped in ['else:', 'try:', 'finally:'] or
+                stripped == 'except:' or  # Bare except
+                re.match(r'^except\s+\w+(\s+as\s+\w+)?:$', stripped) or  # except Exception [as var]:
                 re.match(r'^(if|elif|for|while|with|def|class)\s+[^:]*:$', stripped)):
                 
-                # Check if next line exists and has proper indentation
-                next_line_has_body = False
-                if i + 1 < len(lines):
-                    next_line = lines[i + 1].strip()
-                    next_indent = len(lines[i + 1]) - len(lines[i + 1].lstrip()) if lines[i + 1].strip() else 0
-                    if next_line and next_indent > indent:
-                        next_line_has_body = True
+                # IMPROVED: Only check the next actual line (ignore empty lines)
+                has_body_content = False
+                has_existing_pass = False
+                
+                # Look at the very next non-empty line only 
+                for j in range(i + 1, min(i + 3, len(lines))):  # Only look 2 lines ahead max
+                    next_line = lines[j].strip()
+                    if not next_line:  # Skip empty lines
+                        continue
+                        
+                    next_indent = len(lines[j]) - len(lines[j].lstrip())
+                    
+                    # If we hit a line at same or lower indentation, we've reached the end
+                    if next_indent <= indent:
+                        # Check if this is a continuation (like another except block)
+                        if (next_line.startswith(('except ', 'elif ', 'else:', 'finally:')) and 
+                            next_indent == indent):
+                            # This is a continuation - no content in current block
+                            break
+                        elif next_indent < indent:
+                            # Definitely end of block
+                            break
+                        # If same indent but not a continuation, might have content
+                    
+                    # Check if this line belongs to our control structure
+                    if next_indent > indent:
+                        if next_line == 'pass':
+                            has_existing_pass = True
+                            break
+                        elif next_line.startswith('#'):
+                            # Comments don't count - continue looking
+                            continue
+                        else:
+                            # Found actual content
+                            has_body_content = True
+                            break
+                    
+                    # Only check one actual line to be conservative
+                    break
                 
                 cleaned_lines.append(line)
                 
-                # Add pass if no body follows
-                if not next_line_has_body:
-                    cleaned_lines.append(' ' * (indent + 4) + 'pass')
+                # CRITICAL: Only add pass for truly empty blocks that are single statements
+                # Don't add pass if this looks like it's part of a larger structure
+                if not has_body_content and not has_existing_pass:
+                    # Extra check: don't add pass if this is likely a test case or incomplete snippet
+                    if not (stripped.endswith(':') and i == len(lines) - 1):  # Don't add to last line
+                        cleaned_lines.append(' ' * (indent + 4) + 'pass')
             else:
                 cleaned_lines.append(line)
         

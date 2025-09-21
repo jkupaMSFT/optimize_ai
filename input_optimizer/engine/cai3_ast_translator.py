@@ -318,7 +318,7 @@ class ParseContext:
 class CAI3BodyParser:
     """Production-ready CAI3 body parser with all fixes applied."""
     
-    # Multiline-aware normalizations with remainder preservation
+    # Multiline-aware normalizations with remainder preservation - FIXED REGEX
     NORMALIZATIONS = [
         # Basic prefixes - multiline aware
         (r'(?m)^if_', 'if '),
@@ -329,7 +329,7 @@ class CAI3BodyParser:
         (r'(?m)^return___', 'return {'),
         (r'(?m)^return_(\w+)', r'return \1'),
         
-        # Complex if-in patterns with proper grouping
+        # Complex if-in patterns with proper grouping - FIXED
         (r'if__([^_]+)__in_([^_]+)_(.+)', r'if \1 in \2:\n    \3'),
         (r'elif__([^_]+)__in_([^_]+)_(.+)', r'elif \1 in \2:\n    \3'),
         
@@ -3384,7 +3384,7 @@ class CAI3Translator:
         return [part for part in parts if part]
     
     def _process_statements_with_indentation(self, all_content: List[str]) -> List[str]:
-        """Process statements with proper indentation context tracking."""
+        """Process statements with proper indentation context tracking - FIXED CONTROL FLOW."""
         statements = []
         i = 0
         
@@ -3396,7 +3396,21 @@ class CAI3Translator:
             
             self.logger.debug(f"🔍 Processing content piece {i}: {repr(content)}")
             
-            # Handle if statements that might have inline content
+            # Handle return statements with dictionaries - format properly for Black
+            if content.startswith('return {') and content.endswith('}'):
+                formatted_return = self._format_return_dict(content)
+                statements.extend(formatted_return)
+                i += 1
+                continue
+            
+            # Handle try/except blocks with proper indentation
+            if content.startswith('try:'):
+                statements.extend(self._format_try_except_block(all_content, i))
+                # Skip ahead past the processed block
+                i = self._find_end_of_try_block(all_content, i) + 1
+                continue
+            
+            # Handle if statements that might have inline content - FIXED
             if content.startswith('if ') and ':' in content:
                 colon_pos = content.find(':')
                 condition_part = content[:colon_pos + 1]
@@ -3413,29 +3427,269 @@ class CAI3Translator:
                         block_statements = remaining_part.split('SEMICOLON_IN_BLOCK')
                         for stmt in block_statements:
                             stmt = stmt.strip()
-                            if stmt:
+                            if stmt and not stmt.startswith(('else:', 'elif ')):
                                 statements.append(f"    {stmt}")  # Add extra indentation for if block
                     else:
-                        statements.append(f"    {remaining_part}")  # Add extra indentation for if block
+                        # Single statement - check if it's a control keyword
+                        if remaining_part.startswith(('else:', 'elif ')):
+                            # This is part of the if-else chain, add at same level
+                            statements.append(remaining_part)
+                        else:
+                            statements.append(f"    {remaining_part}")  # Add extra indentation for if block
                 
-                # Continue processing - look for more statements that should be in this if block
-                j = i + 1
-                while j < len(all_content):
-                    next_content = all_content[j].strip()
-                    # If next statement is another control structure, break
-                    if any(next_content.startswith(kw) for kw in ['if ', 'for ', 'while ', 'def ', 'class ', 'return ', 'elif ', 'else']):
-                        break
-                    # Otherwise, it's part of the if block
-                    if next_content:
-                        statements.append(f"    {next_content}")  # Add extra indentation
-                    j += 1
-                
-                i = j  # Skip processed statements
-            else:
+                i += 1
+                continue
+            
+            # Handle else/elif statements that should be at same level as if
+            if content.startswith(('else:', 'elif ')):
                 statements.append(content)
                 i += 1
+                continue
+            
+            # Regular statement processing
+            statements.append(content)
+            i += 1
         
         return statements
+
+    def _format_return_dict(self, return_statement: str) -> List[str]:
+        """Format a return statement with a dictionary for proper Black parsing - FIXED ROOT CAUSE."""
+        self.logger.debug(f"🔧 Formatting return dict: {repr(return_statement)}")
+        
+        # Extract the dictionary part
+        if not (return_statement.startswith('return {') and return_statement.endswith('}')):
+            return [return_statement]
+        
+        dict_part = return_statement[7:].strip()  # Remove 'return '
+        if not (dict_part.startswith('{') and dict_part.endswith('}')):
+            return [return_statement]
+        
+        # Remove outer braces and split by commas
+        dict_content = dict_part[1:-1].strip()
+        if not dict_content:
+            return ['return {}']
+        
+        # Smart comma splitting (respect nested structures)
+        items = self._smart_comma_split(dict_content)
+        
+        if len(items) <= 1:
+            # Single item or empty, keep on one line but ensure proper format
+            if items and ':' in items[0]:
+                # Ensure proper spacing around colon
+                item = items[0].strip()
+                if ':' in item and ': ' not in item:
+                    # Fix spacing: "key:value" -> "key: value"
+                    key, value = item.split(':', 1)
+                    item = f'{key.strip()}: {value.strip()}'
+                return [f'return {{{item}}}']
+            return [return_statement]
+        
+        # Multiple items, format across multiple lines for Black compatibility
+        formatted_lines = ['return {']
+        for i, item in enumerate(items):
+            item = item.strip()
+            if item and ':' in item:
+                # Ensure proper spacing around colon
+                if ': ' not in item:
+                    key, value = item.split(':', 1)
+                    item = f'{key.strip()}: {value.strip()}'
+                
+                comma = ',' if i < len(items) - 1 else ''
+                # Use 4 spaces for proper indentation that Black expects
+                formatted_lines.append(f'    {item}{comma}')
+            elif item:
+                # Non-key-value item, add as is
+                comma = ',' if i < len(items) - 1 else ''
+                formatted_lines.append(f'    {item}{comma}')
+        formatted_lines.append('}')
+        
+        self.logger.debug(f"🔧 Formatted return dict into {len(formatted_lines)} lines")
+        return formatted_lines
+
+    def _smart_comma_split(self, content: str) -> List[str]:
+        """Split dictionary content by commas while respecting nested structures."""
+        items = []
+        current_item = []
+        depth = 0
+        in_quotes = False
+        quote_char = None
+        
+        i = 0
+        while i < len(content):
+            char = content[i]
+            
+            # Handle quotes
+            if char in ['"', "'"] and (i == 0 or content[i-1] != '\\'):
+                if not in_quotes:
+                    in_quotes = True
+                    quote_char = char
+                elif char == quote_char:
+                    in_quotes = False
+                    quote_char = None
+            
+            # Handle nested structures
+            elif not in_quotes:
+                if char in ['{', '[', '(']:
+                    depth += 1
+                elif char in ['}', ']', ')']:
+                    depth -= 1
+                elif char == ',' and depth == 0:
+                    # Top-level comma, split here
+                    if current_item:
+                        items.append(''.join(current_item).strip())
+                        current_item = []
+                    i += 1
+                    continue
+            
+            current_item.append(char)
+            i += 1
+        
+        # Add last item
+        if current_item:
+            items.append(''.join(current_item).strip())
+        
+        return items
+
+    def _format_try_except_block(self, all_content: List[str], start_index: int) -> List[str]:
+        """Format a try/except block with proper indentation - FIXED ROOT CAUSE."""
+        self.logger.debug(f"🔧 Formatting try/except block starting at index {start_index}")
+        
+        formatted_lines = []
+        i = start_index
+        
+        # Get the complete content for this try block
+        content = all_content[i].strip()
+        self.logger.debug(f"🔧 Try block content: {repr(content)}")
+        
+        # Handle compressed format: try:statements;except Exception as e:return
+        if ';except ' in content:
+            self.logger.debug("🔧 Handling compressed try-except format")
+            parts = content.split(';except ', 1)
+            try_part = parts[0]
+            except_part = 'except ' + parts[1]
+            
+            # Build proper try block
+            formatted_lines.append('try:')
+            
+            # Parse try body (remove 'try:' prefix)
+            try_body = try_part[4:].strip() if try_part.startswith('try:') else try_part
+            if ';' in try_body:
+                # Multiple statements in try block
+                try_statements = [stmt.strip() for stmt in try_body.split(';') if stmt.strip()]
+                for stmt in try_statements:
+                    formatted_lines.append(f'    {stmt}')
+            else:
+                # Single statement in try block
+                if try_body:
+                    formatted_lines.append(f'    {try_body}')
+                else:
+                    formatted_lines.append('    pass')
+            
+            # Parse except clause
+            if ':' in except_part:
+                except_header, except_body = except_part.split(':', 1)
+                except_header = except_header.strip()
+                except_body = except_body.strip()
+                
+                # Add except header with proper formatting
+                if not except_header.endswith(':'):
+                    except_header += ':'
+                formatted_lines.append(except_header)
+                
+                # Add except body with proper indentation
+                if except_body:
+                    formatted_lines.append(f'    {except_body}')
+                else:
+                    formatted_lines.append('    pass')
+            else:
+                # Malformed except clause, add as-is with colon
+                if not except_part.endswith(':'):
+                    except_part += ':'
+                formatted_lines.append(except_part)
+                formatted_lines.append('    pass')
+            
+            self.logger.debug(f"🔧 Compressed format processed into {len(formatted_lines)} lines")
+            return formatted_lines
+        
+        # Handle standard format
+        formatted_lines.append(content)  # Add try statement
+        i += 1
+        
+        # Process try block body
+        while i < len(all_content):
+            line = all_content[i].strip()
+            if not line:
+                i += 1
+                continue
+            
+            # Check if we've reached except clause
+            if line.startswith('except '):
+                break
+            
+            # Add line with proper indentation for try block
+            formatted_lines.append(f'    {line}')
+            i += 1
+        
+        # Process except clause(s)
+        while i < len(all_content):
+            line = all_content[i].strip()
+            if not line:
+                i += 1
+                continue
+                
+            if line.startswith('except '):
+                # Ensure except clause is properly formatted at the SAME level as try
+                if ':' not in line:
+                    line = f'{line}:'
+                formatted_lines.append(line)  # NO EXTRA INDENTATION - same level as try
+                i += 1
+                
+                # Process except block body
+                while i < len(all_content):
+                    if i >= len(all_content):
+                        break
+                    except_body_line = all_content[i].strip()
+                    if not except_body_line:
+                        i += 1
+                        continue
+                    
+                    # Check if we've reached end of except block
+                    if (except_body_line.startswith(('def ', 'class ', 'if ', 'for ', 'while ', 'try:', 'except ')) 
+                        and not except_body_line.startswith('return ')):
+                        break
+                    
+                    # Add line with proper indentation for except block (ONE level in from except)
+                    formatted_lines.append(f'    {except_body_line}')
+                    i += 1
+            else:
+                break
+        
+        self.logger.debug(f"🔧 Formatted try/except block into {len(formatted_lines)} lines")
+        return formatted_lines
+
+    def _find_end_of_try_block(self, all_content: List[str], start_index: int) -> int:
+        """Find the end index of a try/except block."""
+        i = start_index + 1  # Start after 'try:'
+        in_except = False
+        
+        while i < len(all_content):
+            line = all_content[i].strip()
+            if not line:
+                i += 1
+                continue
+            
+            if line.startswith('except '):
+                in_except = True
+                i += 1
+                continue
+            
+            # If we're past except and hit a new top-level construct, we're done
+            if in_except and line.startswith(('def ', 'class ', 'if ', 'for ', 'while ', 'try:')):
+                return i - 1
+            
+            i += 1
+        
+        return i - 1
     
     def _is_body_assigned(self, body_id: str, structure: StructureInfo) -> bool:
         """Check if a body ID is already assigned to a function/method."""
@@ -3597,7 +3851,7 @@ if __name__ == "__main__":
             return self._apply_manual_formatting(code)
     
     def _apply_manual_formatting(self, code: str) -> str:
-        """Smart manual formatting that preserves proper class/method hierarchy."""
+        """Smart manual formatting that preserves proper class/method hierarchy - FIXED EXCEPT INDENTATION."""
         if not code.strip():
             return code
             
@@ -3640,9 +3894,21 @@ if __name__ == "__main__":
                     self.logger.debug(f"   → Function detected, next indent level: {indent_level}")
                 continue
             
-            # Handle dedentation keywords
-            if any(stripped.startswith(kw) for kw in ['else:', 'elif ', 'except:', 'finally:']):
-                # Reduce by 1 but maintain minimum based on context
+            # Handle dedentation keywords - FIXED: except should be at SAME level as try
+            if stripped.startswith('except ') or stripped == 'except:':
+                # Except should be at the SAME level as its corresponding try
+                # Look backward to find the matching try statement
+                try_level = self._find_matching_try_level(formatted_lines)
+                if try_level is not None:
+                    indent_level = try_level  # Same level as try
+                else:
+                    # Fallback: reduce by 1 but maintain minimum based on context
+                    min_indent = 2 if in_class else 1
+                    indent_level = max(min_indent, indent_level - 1)
+                self.logger.debug(f"   → Except clause, indent level: {indent_level}")
+            elif (any(stripped.startswith(kw) for kw in ['else:', 'elif ']) or
+                  any(stripped.startswith(kw) for kw in ['finally:'])):
+                # Other dedentation keywords
                 min_indent = 2 if in_class else 1
                 indent_level = max(min_indent, indent_level - 1)
                 self.logger.debug(f"   → Dedent keyword, new indent level: {indent_level}")
@@ -3654,7 +3920,7 @@ if __name__ == "__main__":
             
             # Increase indentation for block starters (but not class/def which we handled above)
             if (stripped.endswith(':') and 
-                not stripped.startswith(('class ', 'def ', 'else:', 'elif ', 'except:', 'finally:'))):
+                not stripped.startswith(('class ', 'def '))):
                 indent_level += 1
                 self.logger.debug(f"   → Block starter, next indent level: {indent_level}")
                 
@@ -3667,6 +3933,17 @@ if __name__ == "__main__":
         result = '\n'.join(formatted_lines)
         self.logger.info(f"✅ Smart manual formatting complete: {len(result)} chars")
         return result
+    
+    def _find_matching_try_level(self, formatted_lines: List[str]) -> Optional[int]:
+        """Find the indentation level of the matching try statement."""
+        # Look backward through formatted lines to find the most recent try statement
+        for line in reversed(formatted_lines):
+            stripped = line.strip()
+            if stripped.startswith('try:'):
+                # Calculate the indentation level of this try statement
+                leading_spaces = len(line) - len(line.lstrip())
+                return leading_spaces // 4  # Convert spaces to indent level
+        return None
 
     def _resolve_imports_with_resolver(self, imports, resolver):
         """Resolve imports using the hash resolver."""

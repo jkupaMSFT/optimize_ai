@@ -91,7 +91,11 @@ class CAI3CodeValidator:
             token = match.group(1)
             # CRITICAL FIX: Don't convert common legitimate numbers to hashes
             # Skip decimal numbers that might just happen to use hex digits
-            if token in ['1024', '2048', '4096', '8192']:  # Common legitimate numbers
+            if token in ['1024', '2048', '4096', '8192', '15000', '10000']:  # Common legitimate numbers
+                return token
+            
+            # CRITICAL FIX: Never convert plain decimal numbers to hash patterns
+            if token.isdigit():
                 return token
             
             # Check if it's a valid hex number that might be a hash

@@ -959,7 +959,7 @@ class CAI3ResolutionPipeline:
             # Try full formatting first
             try:
                 mode = black.Mode(
-                    line_length=88,
+                    line_length=120,  # Increased from 88 to reduce inconsistent line breaks
                     target_versions={black.TargetVersion.PY38},
                 )
                 return black.format_str(content, mode=mode)

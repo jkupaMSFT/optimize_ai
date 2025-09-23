@@ -38,6 +38,10 @@ class HashResolver:
         if not token_str:
             return token_str
         
+        # CRITICAL FIX: Never convert plain numbers to hashes
+        if token_str.isdigit():
+            return token_str
+        
         # Handle #XXXX format (both hex and non-hex)
         if token_str.startswith('#'):
             suffix = token_str[1:].lower()
@@ -59,6 +63,10 @@ class HashResolver:
         """Resolve a token with context awareness - PROPERLY FIXED to resolve mappings."""
         with self._lock:
             if context == 'store':
+                return token_str
+            
+            # CRITICAL FIX: Never treat plain numbers as hashes
+            if token_str.isdigit():
                 return token_str
             
             normalized = self.normalize_hash(token_str)

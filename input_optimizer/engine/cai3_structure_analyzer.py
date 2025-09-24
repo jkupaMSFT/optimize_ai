@@ -50,7 +50,7 @@ class CAI3StructureAnalyzer:
         self.cai3_full = cai3_full
         self.ast_obj = None  # Will be set when analyze() is called
     
-    def analyze(self, ast_obj=None, cai3_map=None, cai3_full=None) -> StructureInfo:
+    def analyze(self, ast_obj=None, cai3_map=None, cai3_full=None, original_cai3_content=None) -> StructureInfo:
         """Main analysis method."""
         if ast_obj is not None:
             self.ast_obj = ast_obj
@@ -60,6 +60,10 @@ class CAI3StructureAnalyzer:
             self.cai3_map = cai3_map
         if cai3_full is not None:
             self.cai3_full = cai3_full
+        
+        # Store original CAI3 content for header-based method resolution
+        if original_cai3_content is not None:
+            self.original_cai3_content = original_cai3_content
         
         try:
             self.logger.info(f"🔍 Starting structure analysis...")
@@ -536,7 +540,16 @@ class CAI3StructureAnalyzer:
                             structure.classes[class_names[1]]['parent'] = class_names[0]
     
     def _infer_method_name(self, body_content: str, pools: Dict) -> str:
-        """Infer method name from body content."""
+        """
+        DEPRECATED: Infer method name from body content.
+        
+        This method is deprecated in favor of header-based method resolution.
+        Method names should be defined in the V: section of CAI3 content for robust resolution.
+        """
+        self.logger.warning("⚠️ DEPRECATED: _infer_method_name() is deprecated. Use V: section mappings instead.")
+        self.logger.warning("   For robust method resolution, ensure method names are mapped in V: section header.")
+        
+        # Fallback for backward compatibility - but this should not be used in production
         if body_content.startswith('p28(') or 'p28' in pools and pools['p28'] == '__init__':
             return '__init__'
         
@@ -764,7 +777,28 @@ class CAI3StructureAnalyzer:
         """Resolve compressed method names using CAI3 mappings and breadcrumbs."""
         self.logger.info(f"🔍 RESOLVING METHOD NAME: '{method_name}'")
         
-        # First, check if we have explicit method mappings
+        # PRIORITY 1: Check parsed V: section from AST object (MOST ROBUST)
+        if hasattr(self, 'ast_obj') and self.ast_obj and hasattr(self.ast_obj, 'variables') and self.ast_obj.variables:
+            if method_name in self.ast_obj.variables:
+                resolved = self.ast_obj.variables[method_name]
+                self.logger.info(f"   ✅ Resolved via parsed V: section from AST: {method_name} -> {resolved}")
+                return resolved
+        
+        # PRIORITY 1.5: Check V: section header for method name mappings (FALLBACK)
+        if hasattr(self, 'original_cai3_content') and self.original_cai3_content:
+            resolved_from_header = self._resolve_method_name_from_v_section(method_name, self.original_cai3_content)
+            if resolved_from_header != f"unknown_{method_name}":  # Successfully resolved
+                self.logger.info(f"   ✅ Resolved via V: section header: {method_name} -> {resolved_from_header}")
+                return resolved_from_header
+        
+        # PRIORITY 1.6: Check if we have the CAI3 content stored in cai3_full or cai3_map
+        if hasattr(self, 'cai3_full') and self.cai3_full and hasattr(self.cai3_full, 'original_content'):
+            resolved_from_header = self._resolve_method_name_from_v_section(method_name, self.cai3_full.original_content)
+            if resolved_from_header != f"unknown_{method_name}":  # Successfully resolved
+                self.logger.info(f"   ✅ Resolved via V: section header (from cai3_full): {method_name} -> {resolved_from_header}")
+                return resolved_from_header
+        
+        # PRIORITY 2: Check if we have explicit method mappings in CAI3Map
         if hasattr(self, 'cai3_map') and self.cai3_map:
             self.logger.info(f"   📋 cai3_map available: {type(self.cai3_map)}")
             
@@ -774,17 +808,17 @@ class CAI3StructureAnalyzer:
                 self.logger.info(f"   ✅ Resolved via method_mappings: {method_name} -> {resolved}")
                 return resolved
             
-            # Check reverse_name_map
+            # Check reverse_name_map (PRIORITY: Use variable mappings over breadcrumbs)
             if hasattr(self.cai3_map, 'reverse_name_map') and method_name in self.cai3_map.reverse_name_map:
                 resolved = self.cai3_map.reverse_name_map[method_name]
                 self.logger.info(f"   ✅ Resolved via reverse_name_map: {method_name} -> {resolved}")
                 return resolved
                 
-            # Check name_map for reverse lookup
+            # Check name_map for reverse lookup (PRIORITY: Use variable mappings over breadcrumbs)
             if hasattr(self.cai3_map, 'name_map'):
                 for original, compressed in self.cai3_map.name_map.items():
                     if compressed == method_name:
-                        self.logger.info(f"   ✅ Resolved via name_map: {method_name} -> {original}")
+                        self.logger.info(f"   ✅ Resolved via name_map reverse lookup: {method_name} -> {original}")
                         return original
         
         # Extract method mappings from CAI3 table breadcrumbs if available
@@ -818,6 +852,48 @@ class CAI3StructureAnalyzer:
         self.logger.info(f"   🔄 Fallback resolution: {method_name} -> {resolved}")
         return resolved
     
+    def _resolve_method_name_from_v_section(self, method_name: str, cai3_content: str) -> str:
+        """
+        Resolve method name from V: section header instead of using inference.
+        This replaces the unreliable infer_method_name approach.
+        
+        Args:
+            method_name: The compressed method name (e.g., 'et', 'gr')
+            cai3_content: The full CAI3 content containing V: section
+            
+        Returns:
+            The resolved method name or f"unknown_{method_name}" if not found
+        """
+        if not cai3_content:
+            self.logger.warning(f"⚠️ No CAI3 content provided for V: section resolution")
+            return f"unknown_{method_name}"
+        
+        # Extract method name mappings from V: section with improved parsing
+        v_section_match = re.search(r'V:([^\n\r]*)', cai3_content, re.IGNORECASE)
+        if v_section_match:
+            v_content = v_section_match.group(1).strip()
+            self.logger.info(f"🔍 Found V: section content: {v_content[:100]}...")
+            
+            # Find method name mappings: compressed_name=full_method_name
+            # Handle both comma-separated and other delimiter patterns
+            mappings = re.split(r'[,;]\s*', v_content)
+            for mapping in mappings:
+                mapping = mapping.strip()
+                if '=' in mapping:
+                    parts = mapping.split('=', 1)
+                    if len(parts) == 2:
+                        key = parts[0].strip()
+                        value = parts[1].strip().strip('"\'')  # Remove quotes if present
+                        if key == method_name:
+                            self.logger.info(f"✅ Header-based resolution: '{method_name}' -> '{value}' from V: section")
+                            return value
+        else:
+            self.logger.warning(f"⚠️ No V: section found in CAI3 content")
+        
+        # If not found in V: section, this should be caught by validation
+        self.logger.warning(f"⚠️ Method '{method_name}' not found in V: section - falling back to inference")
+        return f"unknown_{method_name}"  # Clear indicator that header mapping is missing
+    
     def _extract_method_mappings_from_table(self) -> Dict[str, str]:
         """Extract method mappings from CAI3 table breadcrumbs."""
         method_mappings = {}
@@ -849,17 +925,13 @@ class CAI3StructureAnalyzer:
         """Infer meaningful method name from body content analysis."""
         content_lower = body_content.lower()
         
-        # Known patterns based on analysis
+        # Known patterns based on analysis - UPDATED with missing mappings
         known_patterns = {
             'ia': 'init_analyzer',
-            'gc': 'get_config', 
+
             'i': '__init__',
             'ic': 'init_config',
-            'af': 'analyze_file',
-            'ba': 'build_analysis',
-            'gb': 'get_batch',
             'i0': '__init__',
-            'ec': 'estimate_cost',
         }
         
         if method_name in known_patterns:
@@ -905,12 +977,13 @@ class CAI3StructureAnalyzer:
     def _intelligent_method_name_fallback(self, method_name: str) -> str:
         """Intelligent fallback for method name resolution."""
         
-        # Known method patterns from analysis
+        # Known method patterns from analysis - COMPREHENSIVE MAPPING
         method_patterns = {
             'ia': 'init_analyzer',
             'gc': 'get_config',
             'i': '__init__', 
             'ic': 'init_config',
+            'et': 'estimate_tiers',  # FIX: Add missing estimate_tiers mapping
             'af': 'analyze_file',
             'ba': 'build_analysis',
             'gb': 'get_batch',
@@ -951,3 +1024,42 @@ class CAI3StructureAnalyzer:
         if hasattr(self.ast_obj, 'bodies') and body_id in self.ast_obj.bodies:
             return self.ast_obj.bodies[body_id]
         return f"# TODO: Implement {body_id}"
+    
+    def _resolve_variable_name(self, variable_name: str) -> str:
+        """
+        Resolve any compressed variable name using V: section mappings.
+        This is a general-purpose resolver for all variables, not just method names.
+        """
+        self.logger.info(f"🔍 RESOLVING VARIABLE: '{variable_name}'")
+        
+        # PRIORITY 1: Check parsed V: section from AST object (MOST ROBUST)
+        if hasattr(self, 'ast_obj') and self.ast_obj and hasattr(self.ast_obj, 'variables') and self.ast_obj.variables:
+            if variable_name in self.ast_obj.variables:
+                resolved = self.ast_obj.variables[variable_name]
+                self.logger.info(f"   ✅ Variable resolved via parsed V: section: {variable_name} -> {resolved}")
+                return resolved
+        
+        # PRIORITY 2: Check CAI3Map variable mappings
+        if hasattr(self, 'cai3_map') and self.cai3_map:
+            # Check reverse_name_map
+            if hasattr(self.cai3_map, 'reverse_name_map') and variable_name in self.cai3_map.reverse_name_map:
+                resolved = self.cai3_map.reverse_name_map[variable_name]
+                self.logger.info(f"   ✅ Variable resolved via reverse_name_map: {variable_name} -> {resolved}")
+                return resolved
+                
+            # Check name_map for reverse lookup
+            if hasattr(self.cai3_map, 'name_map'):
+                for original, compressed in self.cai3_map.name_map.items():
+                    if compressed == variable_name:
+                        self.logger.info(f"   ✅ Variable resolved via name_map reverse lookup: {variable_name} -> {original}")
+                        return original
+        
+        # PRIORITY 3: Check pools if the variable name is a pool reference
+        if hasattr(self, 'ast_obj') and self.ast_obj and hasattr(self.ast_obj, 'pools') and variable_name in self.ast_obj.pools:
+            resolved = self.ast_obj.pools[variable_name]
+            self.logger.info(f"   ✅ Variable resolved via pools: {variable_name} -> {resolved}")
+            return resolved
+        
+        # FALLBACK: Return the variable name unchanged with a warning
+        self.logger.warning(f"   ⚠️ Variable '{variable_name}' could not be resolved - keeping original name")
+        return variable_name

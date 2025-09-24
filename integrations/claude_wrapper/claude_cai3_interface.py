@@ -307,11 +307,13 @@ This includes ALL self-attribute patterns like s.na, s.th, s.co, etc.
 
 ❌ WRONG (Missing V: section):
 D:hash_ca00=error,hash_e29c=name
+T:C:ct,M:ct.ia#a0
 B#a0:s.na='test';i=len(s.fp);j=i/4;for k in r:v=s.af(k)
 
 ✅ CORRECT (Complete V: section with ALL variable mappings including self-attributes):
 D:hash_ca00=error,hash_e29c=name
-V:s=self,na=name,fp=file_path,af=analyze_file,i=index,j=result,k=key,v=value,t=total,u=usage_stats,w=tier_name,g=size,n=tier,o=item,m=metadata,r=requests
+T:C:ct,M:ct.ex#a0
+V:s=self,na=name,fp=file_path,af=analyze_file,i=index,j=result,k=key,v=value,t=total,u=usage_stats,w=tier_name,g=size,n=tier,o=item,m=metadata,r=requests,ex=example_method
 B#a0:s.na='test';i=len(s.fp);j=i/4;for k in r:v=s.af(k)
 
 🚨 CRITICAL D: SECTION REQUIREMENT - HASH MAPPING COMPLETENESS:
@@ -330,14 +332,14 @@ B#a1:k=hash_7b30(hash_2308)
 🎯 CORRECT CAI3-LITE EXAMPLE WITH COMPLETE HASH MAPPINGS:
 #C3L v2 py=3.11 f=example.py
 D:g0=o.name,hash_ca00=error,hash_e29c=name,hash_e0f8=threshold,hash_c904=description
-V:s=self,i=index,j=result,k=key,v=value,t=total,u=usage_stats,w=tier_name,g=size,n=tier,o=item
+V:s=self,i=index,j=result,k=key,v=value,t=total,u=usage_stats,w=tier_name,g=size,n=tier,o=item,r=result,ex=example_method
 P:p0="value1",p1="value2"
 X:a0=hash1,a1=hash2
-T:C:ct,M:ct.ia#a2,M:ct.gc#a3,C:ca,M:ca.i#a4
+T:C:ct,M:ct.em#a2
 ---
 B#a2:return s.mi
 B#a3:return {{hash_e29c:s.na,hash_e0f8:s.th,p8:s.co,hash_c904:s.de}}
-B#a4:s.na='CompressionAnalyzer';if hash_ca00 in result:return result
+B#a4:s.na='CompressionAnalyzer';if hash_ca00 in r:return r
 
 ❌ WRONG (Python-mixed):
 T:C:CompressionTier,M:CompressionTier.is_initialized#a2
@@ -351,11 +353,12 @@ p25: "user_email_address"
 s: self
 i: index
 v: value
+ia: initialize_analyzer
 
 === CAI3-LITE ===
 #C3L v2 py=3.11 f=example.py
 D:hash_1234=calculate_total_method
-V:s=self,i=index,v=value
+V:s=self,i=index,v=value,ia=initialize_analyzer
 P:p0="value1",p25="user_email_address"
 X:a0=calc1,a1=calc2
 T:C:ct,M:ct.ia#a0
@@ -377,7 +380,7 @@ CONSTRAINTS (VIOLATION = FAILURE):
 12. 🚨 USE SHORT ALIASES IN TABLE, NOT FULL CLASS NAMES
 13. 🚨 ALL BODY CONTENT MUST BE CAI3-COMPRESSED, NOT PYTHON
 14. 🚨 D: SECTION MUST CONTAIN ALL hash_XXXX MAPPINGS USED IN BODY SECTIONS
-15. 🚨 V: SECTION MUST CONTAIN ALL single-letter variable mappings used in BODY SECTIONS
+15. 🚨 V: SECTION MUST CONTAIN ALL variable mappings used in BODY and T SECTIONS
 16. 🚨 CRITICAL: USE T{{}}X(ex){{}} STRUCTURE FOR TRY/EXCEPT
 
 🔧 MANDATORY SYNTAX VALIDATION:
@@ -393,7 +396,7 @@ Before submitting your response, VERIFY:
 ✓ 🚨 NO PYTHON SYNTAX IN ANY BODY BLOCKS
 ✓ 🚨 TABLE USES SHORT ALIASES ONLY (ct, ca) NOT FULL NAMES
 ✓ 🚨 D: SECTION HAS ALL hash_XXXX MAPPINGS FOUND IN B# SECTIONS
-✓ 🚨 V: SECTION HAS ALL single-letter variable mappings found in B# SECTIONS
+✓ 🚨 V: SECTION HAS ALL variable mappings found in B# and T: SECTIONS
 
 🚨 CRITICAL PRE-SUBMISSION HASH VALIDATION:
 1. Scan ALL B# sections for hash_XXXX references
@@ -402,10 +405,11 @@ Before submitting your response, VERIFY:
 4. If hash_ca00 appears in body → D: MUST have hash_ca00=something
 
 🚨 CRITICAL PRE-SUBMISSION VARIABLE VALIDATION:
-1. Scan ALL B# sections for single-letter variables
-2. Verify EVERY single-letter variable appears in V: section with mapping
-3. Count: V: mappings ≥ unique single-letter variables in bodies
-4. If 's' appears in body → V: MUST have s=self or similar
+1. Scan ALL B# and T: sections for variables
+2. Verify EVERY variable in the V: section has a mapping
+3. If 's' appears in body → V: MUST have s=self or similar
+4. Count: V: mappings ≥ unique variables in bodies and T: section
+
 
 🚨 SELF-CHECK REQUIRED: After generating code, check all opening brackets/braces/parentheses have matching closing brackets/braces/parentheses. All quotes are properly paired. Validate that the output is proper CAI3-LITE syntax with NO Python mixed in. VERIFY that every hash_XXXX in body sections has a corresponding mapping in D: section. VERIFY that every single-letter variable in body sections has a corresponding mapping in V: section.
 
@@ -684,6 +688,12 @@ B#a1:# Optimized validation logic here
         v_section_violations = self._validate_v_section_constraints(cai3_output)
         violations.extend(v_section_violations)
         self.logger.info(f"  Result: {len(v_section_violations)} V: section violations")
+        
+        # 8. Validate method name mappings (CRITICAL for robust method resolution)
+        self.logger.info("🔧 Validating method name mappings...")
+        method_violations = self._validate_method_name_mappings(cai3_output)
+        violations.extend(method_violations)
+        self.logger.info(f"  Result: {len(method_violations)} method mapping violations")
         
         # Log violation details for debugging
         if violations:
@@ -1423,6 +1433,101 @@ B#a1:# Optimized validation logic here
             return True
             
         return False
+    
+    def _validate_method_name_mappings(self, cai3_output: str) -> List[ConstraintViolation]:
+        """
+        Validate that ALL method names from T: section have corresponding mappings in V: section.
+        This prevents the fallback to infer_method_name() and ensures robust method resolution.
+        """
+        violations = []
+        
+        # Extract method names from T: section (M:class.method#body entries)
+        t_section_methods = set()
+        t_section_match = re.search(r'T:([^\n]*)', cai3_output)
+        if t_section_match:
+            t_content = t_section_match.group(1)
+            # Find method definitions: M:class.method#body
+            method_matches = re.findall(r'M:[^.]+\.([^#]+)#', t_content)
+            for method_name in method_matches:
+                t_section_methods.add(method_name)
+        
+        self.logger.info(f"🔍 Found {len(t_section_methods)} method names in T: section: {sorted(t_section_methods)}")
+        
+        # Extract method name mappings from V: section
+        v_section_methods = set()
+        v_section_match = re.search(r'V:([^\n]*)', cai3_output)
+        if v_section_match:
+            v_content = v_section_match.group(1)
+            # Find method name mappings: compressed_name=full_method_name
+            # Look for patterns like et=estimate_tokens, gr=get_recommendation, etc.
+            for mapping in v_content.split(','):
+                if '=' in mapping:
+                    key, value = mapping.strip().split('=', 1)
+                    # Check if this looks like a method name mapping (not just a variable)
+                    if key in t_section_methods:
+                        v_section_methods.add(key)
+        
+        self.logger.info(f"🗺️ Found {len(v_section_methods)} method name mappings in V: section: {sorted(v_section_methods)}")
+        
+        # Find method names that are missing from V: section
+        missing_methods = t_section_methods - v_section_methods
+        
+        if missing_methods:
+            self.logger.error(f"❌ CRITICAL: {len(missing_methods)} method names missing from V: section")
+            for missing_method in sorted(missing_methods):
+                violations.append(ConstraintViolation(
+                    violation_type="missing_method_mapping",
+                    description=f"Method '{missing_method}' is defined in T: section but not mapped in V: section",
+                    location=f"Missing from V: section: {missing_method}",
+                    suggested_fix=f"Add '{missing_method}=full_method_name' to the V: section",
+                    severity="critical"
+                ))
+        else:
+            self.logger.info(f"✅ All {len(t_section_methods)} method names have mappings in V: section")
+        
+        return violations
+    
+    def _extract_method_names_from_t_section(self, cai3_output: str) -> Dict[str, str]:
+        """
+        Extract method names from T: section for header-based resolution.
+        Returns dict mapping compressed method names to their positions in T: section.
+        """
+        method_mappings = {}
+        
+        t_section_match = re.search(r'T:([^\n]*)', cai3_output)
+        if t_section_match:
+            t_content = t_section_match.group(1)
+            # Find method definitions: M:class.method#body
+            method_matches = re.findall(r'M:([^.]+)\.([^#]+)#([^,]*)', t_content)
+            for class_name, method_name, body_id in method_matches:
+                method_mappings[method_name] = {
+                    'class': class_name,
+                    'body_id': body_id,
+                    'compressed_name': method_name
+                }
+        
+        return method_mappings
+    
+    def _resolve_method_name_from_header(self, method_name: str, cai3_output: str) -> str:
+        """
+        Resolve method name from V: section header instead of using inference.
+        This replaces the unreliable infer_method_name approach.
+        """
+        # Extract method name mappings from V: section
+        v_section_match = re.search(r'V:([^\n]*)', cai3_output)
+        if v_section_match:
+            v_content = v_section_match.group(1)
+            # Find method name mappings: compressed_name=full_method_name
+            for mapping in v_content.split(','):
+                if '=' in mapping:
+                    key, value = mapping.strip().split('=', 1)
+                    if key == method_name:
+                        self.logger.info(f"✅ Resolved method '{method_name}' to '{value}' from V: section")
+                        return value
+        
+        # If not found in V: section, this is an error that should be caught by validation
+        self.logger.error(f"❌ Method '{method_name}' not found in V: section - validation should have caught this")
+        return f"unknown_{method_name}"  # Fallback, but validation should prevent this
     
     def _attempt_basic_repairs(self, cai3_output: str, violations: List[ConstraintViolation]) -> str:
         """Attempt basic repairs for common violations including delimiter balancing and hash mapping fixes."""

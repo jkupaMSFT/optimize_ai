@@ -17,6 +17,7 @@ class CAI3LiteAST:
     chain_aliases: Dict[str, str] = None  # D: section
     cid_aliases: Dict[str, str] = None    # X: section
     pools: Dict[str, str] = None          # P: section
+    variables: Dict[str, str] = None      # V: section - ADDED FOR VARIABLE MAPPINGS
     table: List[str] = None               # T: section
     bodies: Dict[str, str] = None         # B# sections
     
@@ -28,6 +29,8 @@ class CAI3LiteAST:
             self.cid_aliases = {}
         if self.pools is None:
             self.pools = {}
+        if self.variables is None:
+            self.variables = {}
         if self.table is None:
             self.table = []
         if self.bodies is None:
@@ -140,6 +143,16 @@ class CAI3LiteParser:
                     return None
                 
                 ast.pools = self._parse_pool_assignments(pool_content)
+            
+            # Parse V: section (variable mappings) - ADDED FOR ROBUST VARIABLE RESOLUTION
+            v_match = re.search(r'^V:\s*(.+?)(?=^[A-Z]:|^B\d+:|^B#|^---|$)', content, re.MULTILINE | re.DOTALL)
+            if v_match:
+                variables_content = v_match.group(1).strip()
+                self.logger.info(f"🔧 PARSING VARIABLES: Found V: section content: {variables_content[:100]}...")
+                ast.variables = self._parse_assignments(variables_content)
+                self.logger.info(f"✅ PARSING VARIABLES: Extracted {len(ast.variables)} variable mappings")
+            else:
+                self.logger.warning("⚠️ PARSING VARIABLES: No V: section found - method names may not resolve correctly")
             
             # Parse T: section (table)
             t_match = re.search(r'^T:\s*(.+?)(?=^[A-Z]:|^B\d+:|^B#|^---|$)', content, re.MULTILINE | re.DOTALL)

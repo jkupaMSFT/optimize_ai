@@ -161,7 +161,7 @@ class CAI3LiteParser:
                 self.logger.info(f"🔧 PARSING TABLE: Raw table content: '{table_content}'")
                 self.logger.info(f"🔧 PARSING TABLE: Table content length: {len(table_content)}")
                 if table_content:
-                    split_items = [item.strip() for item in table_content.split(',') if item.strip()]
+                    split_items = self._smart_split_table_entries(table_content)
                     self.logger.info(f"🔧 PARSING TABLE: Split into {len(split_items)} items: {split_items}")
                     ast.table.extend(split_items)
                 else:
@@ -266,6 +266,90 @@ class CAI3LiteParser:
                 result[pool_id] = value_str
         
         return result
+
+    def _smart_split_table_entries(self, table_content: str) -> List[str]:
+        """Split table entries intelligently, respecting parentheses and method parameters.
+        
+        This method properly handles cases like:
+        - M:ca.et(s,g)#a6 (method with multiple parameters)
+        - M:ca.af(s,k)#a7 (method with multiple parameters)
+        - C:ca (class definition)
+        - F:dc#a0 (function definition)
+        """
+        entries = []
+        current_entry = ""
+        paren_depth = 0
+        i = 0
+        
+        self.logger.info(f"🔧 SMART SPLIT: Processing table content: {table_content}")
+        
+        while i < len(table_content):
+            char = table_content[i]
+            
+            if char == '(':
+                paren_depth += 1
+                current_entry += char
+            elif char == ')':
+                paren_depth -= 1
+                current_entry += char
+            elif char == ',' and paren_depth == 0:
+                # We're at a top-level comma (not inside parentheses)
+                if current_entry.strip():
+                    entries.append(current_entry.strip())
+                    self.logger.debug(f"🔧 SMART SPLIT: Added entry: {current_entry.strip()}")
+                current_entry = ""
+            else:
+                current_entry += char
+            
+            i += 1
+        
+        # Add the final entry
+        if current_entry.strip():
+            entries.append(current_entry.strip())
+            self.logger.debug(f"🔧 SMART SPLIT: Added final entry: {current_entry.strip()}")
+        
+        self.logger.info(f"🔧 SMART SPLIT: Successfully split into {len(entries)} entries")
+        
+        # Additional validation - check for malformed entries
+        validated_entries = []
+        for entry in entries:
+            if self._validate_table_entry(entry):
+                validated_entries.append(entry)
+            else:
+                self.logger.warning(f"🔧 SMART SPLIT: Skipping malformed entry: {entry}")
+        
+        return validated_entries
+
+    def _validate_table_entry(self, entry: str) -> bool:
+        """Validate that a table entry has proper structure."""
+        entry = entry.strip()
+        
+        # Empty entries are invalid
+        if not entry:
+            return False
+        
+        # Valid patterns:
+        # - C:classname (class definition)
+        # - M:class.method(params)#bodyid (method definition)  
+        # - F:function#bodyid (function definition)
+        # - Other section indicators (D:, X:, etc.)
+        
+        valid_patterns = [
+            r'^C:[a-zA-Z_]\w*$',                                    # Class: C:MyClass
+            r'^M:[a-zA-Z_]\w*\.[a-zA-Z_]\w*\([^)]*\)#[a-zA-Z0-9_]+$',  # Method: M:class.method(params)#id
+            r'^F:[a-zA-Z_]\w*#[a-zA-Z0-9_]+$',                     # Function: F:func#id
+            r'^D:\s*.+',                                            # Definition section
+            r'^X:\s*.+',                                            # Execution section
+            r'^[a-zA-Z0-9_]+\)#[a-zA-Z0-9_]+$',                   # Continuation of method params
+        ]
+        
+        for pattern in valid_patterns:
+            if re.match(pattern, entry):
+                return True
+        
+        # Log unmatched entries for debugging
+        self.logger.debug(f"🔧 VALIDATION: Entry doesn't match known patterns: {entry}")
+        return True  # Allow unknown patterns for now, just log them
 
     def validate_ast(self, ast: CAI3LiteAST) -> Tuple[bool, List[str]]:
         """Validate the parsed AST for completeness and consistency."""

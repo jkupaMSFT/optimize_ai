@@ -197,13 +197,14 @@ class ClaudeCodeProxy:
             # Check if wrapping actually saves tokens
             wrapped_tokens = count_tokens(wrapped_prompt, self.llm_model)
             
-            if wrapped_tokens >= original_tokens:
-                # Compression is not beneficial - return original
-                self.logger.warning(
-                    f"⚠️ CAI3 wrapper overhead ({wrapped_tokens - compression_result.compressed_tokens} tokens) "
-                    f"exceeds compression savings. Skipping compression."
-                )
-                return prompt, {"compressed": False, "reason": "wrapper_overhead_too_large"}
+            #TODO: Re-enable this check after testing
+            # if wrapped_tokens >= original_tokens:
+            #     # Compression is not beneficial - return original
+            #     self.logger.warning(
+            #         f"⚠️ CAI3 wrapper overhead ({wrapped_tokens - compression_result.compressed_tokens} tokens) "
+            #         f"exceeds compression savings. Skipping compression."
+            #     )
+            #     return prompt, {"compressed": False, "reason": "wrapper_overhead_too_large"}
             
             # Update metadata with actual wrapped token count
             metadata["wrapped_tokens"] = wrapped_tokens

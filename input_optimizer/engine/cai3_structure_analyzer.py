@@ -1,25 +1,8 @@
 """
-CAI3 Structure Analyzer - Extr        try:
-            # Check for table attribute (correct CAI3 format)
-            if hasattr(self.ast_obj, 'table'):
-                # Parse the table entries
-                if isinstance(self.ast_obj.table, list):
-                    structure = self.ast_obj.table
-                elif isinstance(self.ast_obj.table, str):
-                    structure = self._parse_structure_string(self.ast_obj.table)
-                else:
-                    structure = []
-            # Fallback to structure attribute  
-            elif hasattr(self.ast_obj, 'structure'):
-                # Parse the structure table
-                if isinstance(self.ast_obj.structure, list):
-                    structure = self.ast_obj.structure
-                elif isinstance(self.ast_obj.structure, str):
-                    structure = self._parse_structure_string(self.ast_obj.structure)
-                else:
-                    structure = []
-            else:
-                structure = []on structure from CAI3-LITE definitions.
+CAI3 Structure Analyzer - Extract Python structure from CAI3-LITE definitions.
+
+This module analyzes CAI3-LITE AST objects and extracts meaningful Python structure
+information including classes, methods, functions, and parameter mappings.
 """
 
 import re
@@ -137,10 +120,14 @@ class CAI3StructureAnalyzer:
                         
                         # Add method to class
                         resolved_method_name = self._resolve_method_name(method_info['method_name'])
+                        
+                        # Resolve method parameters from extracted params
+                        resolved_args = self._resolve_method_parameters(method_info)
+                        
                         all_classes[class_name]['methods'][resolved_method_name] = {
                             'name': resolved_method_name,
                             'body_id': method_info['body_id'],
-                            'args': ['self'],  # Default args, could be enhanced
+                            'args': resolved_args,
                             'body_content': self._get_resolved_body_content(method_info['body_id'])
                         }
                         self.logger.info(f"✅ Added method {resolved_method_name} to class {class_name}")
@@ -747,7 +734,7 @@ class CAI3StructureAnalyzer:
         return False
     
     def _extract_method_structure(self, item: str) -> Optional[Dict[str, Any]]:
-        """Extract method structure from CAI3 table item."""
+        """Extract method structure from CAI3 table item with parameter information."""
         self.logger.info(f"🔍 Extracting method structure from: {item}")
         
         # Parse M:classname.methodname#bodyid format
@@ -759,19 +746,107 @@ class CAI3StructureAnalyzer:
                 
                 # Split classname.methodname
                 if '.' in method_part:
-                    class_name, method_name = method_part.split('.', 1)
+                    class_name, method_with_params = method_part.split('.', 1)
+                    
+                    # Parse method name and parameters separately
+                    # Format: methodname(param1,param2) -> methodname and [param1,param2]  
+                    method_name, extracted_params = self._parse_method_name_and_params(method_with_params)
+                    self.logger.info(f"🔍 Parsed method: name='{method_name}', params={extracted_params}")
                     
                     method_info = {
                         'class_name': class_name,
                         'method_name': method_name,
-                        'body_id': body_id
+                        'body_id': body_id,
+                        'extracted_params': extracted_params,
+                        'parameters': self._extract_method_parameters(item, body_id)
                     }
+                    
+                    # Add resolved args for Python reconstructor
+                    method_info['args'] = self._resolve_method_parameters(method_info)
                     
                     self.logger.info(f"✅ Extracted method: {method_info}")
                     return method_info
         
         self.logger.warning(f"⚠️ Could not extract method structure from: {item}")
         return None
+    
+    def _parse_method_name_and_params(self, method_with_params: str) -> tuple:
+        """Parse method name and parameters from format like 'methodname(param1,param2)'."""
+        if '(' in method_with_params and method_with_params.endswith(')'):
+            # Extract method name and parameters
+            paren_pos = method_with_params.find('(')
+            method_name = method_with_params[:paren_pos]
+            params_str = method_with_params[paren_pos+1:-1]  # Remove ( and )
+            
+            # Parse parameters
+            if params_str.strip():
+                # Split by comma and clean up
+                extracted_params = [p.strip() for p in params_str.split(',') if p.strip()]
+            else:
+                extracted_params = []
+                
+            return method_name, extracted_params
+        else:
+            # No parameters in parentheses
+            return method_with_params, []
+    
+    def _resolve_method_parameters(self, method_info: Dict[str, Any]) -> List[str]:
+        """Resolve method parameters using variable mappings."""
+        resolved_args = []
+        
+        # Get extracted parameters from method signature
+        extracted_params = method_info.get('extracted_params', [])
+        self.logger.info(f"🔧 Resolving parameters: {extracted_params}")
+        
+        if extracted_params:
+            # Resolve each parameter using variable mappings
+            for param in extracted_params:
+                resolved_param = self._resolve_parameter_name(param)
+                resolved_args.append(resolved_param)
+                self.logger.info(f"   📋 {param} -> {resolved_param}")
+        else:
+            # Default to self if no parameters extracted
+            resolved_args = ['self']
+            
+        self.logger.info(f"✅ Final resolved args: {resolved_args}")
+        return resolved_args
+    
+    def _resolve_parameter_name(self, param_name: str) -> str:
+        """Resolve a single parameter name using variable mappings."""
+        # Check AST object variable mappings first
+        if hasattr(self, 'ast_obj') and self.ast_obj and hasattr(self.ast_obj, 'variables'):
+            if param_name in self.ast_obj.variables:
+                resolved = self.ast_obj.variables[param_name]
+                self.logger.info(f"   ✅ Resolved parameter via AST variables: {param_name} -> {resolved}")
+                return resolved
+        
+        # Check if we have CAI3 variable mappings stored 
+        variable_mappings = getattr(self, 'variable_mappings', {})
+        if param_name in variable_mappings:
+            resolved = variable_mappings[param_name]
+            self.logger.info(f"   ✅ Resolved parameter via variable mappings: {param_name} -> {resolved}")
+            return resolved
+            
+        # Common parameter mappings as fallback
+        common_mappings = {
+            's': 'self',
+            'o': 'tier', 
+            'k': 'file_path',
+            'r': 'files',
+            'y': 'counts',
+            'i': 'total_items',
+            'aa': 'analyzer',
+            'ab': 'analysis_data'
+        }
+        
+        if param_name in common_mappings:
+            resolved = common_mappings[param_name]
+            self.logger.info(f"   ✅ Resolved parameter via common mappings: {param_name} -> {resolved}")
+            return resolved
+            
+        # Return as-is if no mapping found
+        self.logger.warning(f"   ⚠️ No resolution found for parameter: {param_name}")
+        return param_name
     
     def _resolve_method_name(self, method_name: str) -> str:
         """Resolve compressed method names using CAI3 mappings and breadcrumbs."""
@@ -893,6 +968,266 @@ class CAI3StructureAnalyzer:
         # If not found in V: section, this should be caught by validation
         self.logger.warning(f"⚠️ Method '{method_name}' not found in V: section - falling back to inference")
         return f"unknown_{method_name}"  # Clear indicator that header mapping is missing
+    
+    def _extract_method_parameters(self, table_item: str, body_id: str) -> List[Dict[str, Any]]:
+        """Extract method parameters from CAI3 table item and body content."""
+        self.logger.info(f"🔍 Extracting parameters for method item: {table_item} with body: {body_id}")
+        
+        parameters = []
+        
+        # Strategy 1: Extract parameters from V: section mappings
+        v_section_params = self._extract_parameters_from_v_section(table_item)
+        if v_section_params:
+            parameters.extend(v_section_params)
+            self.logger.info(f"✅ Found {len(v_section_params)} parameters from V: section")
+        
+        # Strategy 2: Extract parameters from body content analysis
+        body_params = self._extract_parameters_from_body(body_id)
+        if body_params and not parameters:  # Only use if V: section didn't provide params
+            parameters.extend(body_params)
+            self.logger.info(f"✅ Found {len(body_params)} parameters from body analysis")
+        
+        # Strategy 3: Fallback to compressed parameter patterns
+        if not parameters:
+            compressed_params = self._extract_compressed_parameters(table_item)
+            parameters.extend(compressed_params)
+            self.logger.info(f"📋 Using {len(compressed_params)} compressed parameter patterns")
+        
+        self.logger.info(f"✅ Total parameters extracted: {len(parameters)}")
+        return parameters
+    
+    def _extract_parameters_from_v_section(self, table_item: str) -> List[Dict[str, Any]]:
+        """Extract parameter mappings from V: section for a specific method."""
+        parameters = []
+        
+        # Get the method name from table item
+        if not table_item.startswith('M:') or '#' not in table_item:
+            return parameters
+        
+        method_part = table_item[2:].split('#')[0]  # Remove M: and body part
+        if '.' not in method_part:
+            return parameters
+        
+        class_name, method_name = method_part.split('.', 1)
+        
+        # Check if we have V: section content
+        v_content = None
+        if hasattr(self, 'original_cai3_content') and self.original_cai3_content:
+            v_content = self.original_cai3_content
+        elif hasattr(self, 'cai3_full') and self.cai3_full and hasattr(self.cai3_full, 'original_content'):
+            v_content = self.cai3_full.original_content
+        
+        if not v_content:
+            self.logger.warning("⚠️ No V: section content available for parameter extraction")
+            return parameters
+        
+        # Extract V: section
+        v_section_match = re.search(r'V:([^\n\r]*)', v_content, re.IGNORECASE)
+        if not v_section_match:
+            return parameters
+        
+        v_section_content = v_section_match.group(1).strip()
+        
+        # Look for parameter mappings in format: compressed_param=full_param_name
+        # Parameters often follow patterns like: s=self, p=parameter, k=key, etc.
+        param_pattern = r'([a-z])=([a-zA-Z_][a-zA-Z0-9_]*)'
+        matches = re.findall(param_pattern, v_section_content)
+        
+        for compressed, full_name in matches:
+            # Only include if this looks like a parameter (common parameter names or single letters)
+            if self._is_likely_parameter(full_name, compressed):
+                param_info = {
+                    'name': full_name,
+                    'compressed': compressed,
+                    'type': self._infer_parameter_type(full_name),
+                    'source': 'v_section'
+                }
+                parameters.append(param_info)
+                self.logger.info(f"   📋 Parameter from V: section: {compressed} -> {full_name}")
+        
+        return parameters
+    
+    def _extract_parameters_from_body(self, body_id: str) -> List[Dict[str, Any]]:
+        """Extract parameter information from method body content."""
+        parameters = []
+        
+        if not body_id:
+            return parameters
+        
+        # Get body content
+        body_content = self._get_body_content(body_id)
+        if not body_content:
+            return parameters
+        
+        # Look for parameter usage patterns in the body
+        # Common patterns: self.something, parameter usage, etc.
+        param_patterns = [
+            r'\b(self)\b',  # self parameter
+            r'\b([a-z][a-zA-Z0-9_]*)\s*=',  # assignment patterns
+            r'def\s+\w+\s*\(\s*([^)]+)\s*\)',  # function definitions with parameters
+        ]
+        
+        found_params = set()
+        for pattern in param_patterns:
+            matches = re.findall(pattern, body_content)
+            for match in matches:
+                if isinstance(match, tuple):
+                    for param in match:
+                        if param and self._is_likely_parameter(param, ''):
+                            found_params.add(param.strip())
+                else:
+                    if match and self._is_likely_parameter(match, ''):
+                        found_params.add(match.strip())
+        
+        # Convert to parameter info
+        for param_name in found_params:
+            param_info = {
+                'name': param_name,
+                'compressed': self._get_compressed_form(param_name),
+                'type': self._infer_parameter_type(param_name),
+                'source': 'body_analysis'
+            }
+            parameters.append(param_info)
+            self.logger.info(f"   📋 Parameter from body: {param_name}")
+        
+        return parameters
+    
+    def _extract_compressed_parameters(self, table_item: str) -> List[Dict[str, Any]]:
+        """Extract parameters using compressed parameter patterns."""
+        parameters = []
+        
+        # Standard CAI3 parameter compressions
+        standard_params = {
+            's': 'self',
+            'p': 'parameter', 
+            'k': 'key',
+            'v': 'value',
+            'i': 'index',
+            'n': 'name',
+            'd': 'data',
+            'r': 'result',
+            'o': 'obj',
+            'a': 'args',
+            'kw': 'kwargs'
+        }
+        
+        # Add standard parameters as defaults
+        for compressed, full_name in standard_params.items():
+            param_info = {
+                'name': full_name,
+                'compressed': compressed,
+                'type': self._infer_parameter_type(full_name),
+                'source': 'compressed_standard'
+            }
+            parameters.append(param_info)
+        
+        return parameters[:3]  # Limit to most common ones
+    
+    def _is_likely_parameter(self, name: str, compressed: str = '') -> bool:
+        """Check if a name is likely to be a parameter."""
+        if not name or len(name) < 1:
+            return False
+        
+        # Common parameter names
+        common_params = {
+            'self', 'cls', 'parameter', 'param', 'arg', 'args', 'kwargs',
+            'key', 'value', 'data', 'item', 'index', 'name', 'obj', 'result',
+            'input', 'output', 'content', 'text', 'file', 'path', 'url'
+        }
+        
+        if name.lower() in common_params:
+            return True
+        
+        # Single letter parameters (common in compressed form)
+        if len(name) == 1 and name.islower():
+            return True
+        
+        # Parameter-like patterns
+        if name.startswith('param') or name.endswith('_param'):
+            return True
+        
+        # Avoid internal/private names
+        if name.startswith('_') or name.startswith('__'):
+            return False
+        
+        # Avoid method/class names
+        if name[0].isupper():  # Likely class name
+            return False
+        
+        return len(name) <= 20  # Reasonable parameter name length
+    
+    def _infer_parameter_type(self, param_name: str) -> str:
+        """Infer parameter type from name patterns."""
+        name_lower = param_name.lower()
+        
+        # Type inference based on common naming patterns
+        if name_lower in ['self', 'cls']:
+            return 'instance'
+        elif name_lower in ['args']:
+            return '*args'
+        elif name_lower in ['kwargs']:
+            return '**kwargs'
+        elif name_lower in ['index', 'i', 'idx']:
+            return 'int'
+        elif name_lower in ['name', 'key', 'text', 'content']:
+            return 'str'
+        elif name_lower in ['data', 'obj', 'item']:
+            return 'Any'
+        elif name_lower in ['result', 'output']:
+            return 'Any'
+        else:
+            return 'Any'  # Default type
+    
+    def _get_compressed_form(self, param_name: str) -> str:
+        """Get compressed form of parameter name."""
+        # Standard compressions
+        compressions = {
+            'self': 's',
+            'parameter': 'p',
+            'key': 'k', 
+            'value': 'v',
+            'index': 'i',
+            'name': 'n',
+            'data': 'd',
+            'result': 'r',
+            'object': 'o',
+            'args': 'a'
+        }
+        
+        return compressions.get(param_name.lower(), param_name[0].lower())
+    
+    def _get_body_content(self, body_id: str) -> str:
+        """Get body content for a given body ID."""
+        if not body_id:
+            return ""
+        
+        # Try to get from B# section
+        if hasattr(self, 'original_cai3_content') and self.original_cai3_content:
+            return self._extract_body_from_content(body_id, self.original_cai3_content)
+        elif hasattr(self, 'cai3_full') and self.cai3_full and hasattr(self.cai3_full, 'original_content'):
+            return self._extract_body_from_content(body_id, self.cai3_full.original_content)
+        
+        return ""
+    
+    def _extract_body_from_content(self, body_id: str, content: str) -> str:
+        """Extract body content from CAI3 content."""
+        # Look for B# section
+        b_section_pattern = r'B#\s*([^#]*?)(?=\n[A-Z]:|$)'
+        b_match = re.search(b_section_pattern, content, re.DOTALL)
+        
+        if not b_match:
+            return ""
+        
+        b_content = b_match.group(1).strip()
+        
+        # Look for specific body ID
+        body_pattern = rf'{re.escape(body_id)}:([^a-z0-9]*?)(?=[a-z0-9]+:|$)'
+        body_match = re.search(body_pattern, b_content, re.DOTALL)
+        
+        if body_match:
+            return body_match.group(1).strip()
+        
+        return ""
     
     def _extract_method_mappings_from_table(self) -> Dict[str, str]:
         """Extract method mappings from CAI3 table breadcrumbs."""
@@ -1063,3 +1398,204 @@ class CAI3StructureAnalyzer:
         # FALLBACK: Return the variable name unchanged with a warning
         self.logger.warning(f"   ⚠️ Variable '{variable_name}' could not be resolved - keeping original name")
         return variable_name
+    
+    def validate_parameter_extraction(self) -> Dict[str, List[str]]:
+        """Validate that method parameters are properly extracted and preserved."""
+        self.logger.info("🔍 Validating parameter extraction across CAI3 structure")
+        
+        validation_results = {
+            'missing_parameters': [],
+            'malformed_parameters': [],
+            'v_section_missing': [],
+            'parameter_warnings': []
+        }
+        
+        if not hasattr(self, 'ast_obj') or not self.ast_obj or not hasattr(self.ast_obj, 'table'):
+            validation_results['parameter_warnings'].append("No table data available for parameter validation")
+            return validation_results
+        
+        # Validate each method in the table
+        for item in self.ast_obj.table:
+            if self._is_method_definition(item):
+                method_struct = self._extract_method_structure(item)
+                if method_struct:
+                    self._validate_method_parameters(method_struct, validation_results)
+        
+        # Summary logging
+        total_issues = sum(len(issues) for issues in validation_results.values())
+        if total_issues == 0:
+            self.logger.info("✅ Parameter validation passed - all methods have proper parameter extraction")
+        else:
+            self.logger.warning(f"⚠️ Parameter validation found {total_issues} issues")
+            for issue_type, issues in validation_results.items():
+                if issues:
+                    self.logger.warning(f"   {issue_type}: {len(issues)} issues")
+        
+        return validation_results
+    
+    def _validate_method_parameters(self, method_struct: Dict[str, Any], validation_results: Dict[str, List[str]]) -> None:
+        """Validate parameters for a specific method structure."""
+        method_name = method_struct.get('method_name', 'unknown')
+        class_name = method_struct.get('class_name', 'unknown')
+        body_id = method_struct.get('body_id', 'unknown')
+        parameters = method_struct.get('parameters', [])
+        
+        method_identifier = f"{class_name}.{method_name}"
+        
+        # Check if method has any parameters
+        if not parameters:
+            # Check if the body suggests parameters should exist
+            body_content = self._get_body_content(body_id)
+            if self._body_suggests_parameters(body_content):
+                validation_results['missing_parameters'].append(
+                    f"{method_identifier} (body: {body_id}) - body suggests parameters but none extracted"
+                )
+                self.logger.warning(f"❌ Missing parameters for {method_identifier}")
+            else:
+                self.logger.info(f"✅ {method_identifier} - no parameters needed")
+            return
+        
+        # Validate parameter structure
+        for i, param in enumerate(parameters):
+            if not isinstance(param, dict):
+                validation_results['malformed_parameters'].append(
+                    f"{method_identifier} - parameter {i} is not a dictionary"
+                )
+                continue
+            
+            # Check required fields
+            required_fields = ['name', 'compressed', 'type', 'source']
+            for field in required_fields:
+                if field not in param:
+                    validation_results['malformed_parameters'].append(
+                        f"{method_identifier} - parameter {i} missing field '{field}'"
+                    )
+            
+            # Validate parameter source
+            valid_sources = ['v_section', 'body_analysis', 'compressed_standard']
+            if param.get('source') not in valid_sources:
+                validation_results['malformed_parameters'].append(
+                    f"{method_identifier} - parameter {i} has invalid source '{param.get('source')}'"
+                )
+            
+            # Check if V: section parameters are properly mapped
+            if param.get('source') == 'v_section':
+                if not self._validate_v_section_parameter_mapping(param):
+                    validation_results['v_section_missing'].append(
+                        f"{method_identifier} - parameter '{param.get('name')}' not found in V: section"
+                    )
+        
+        self.logger.info(f"✅ Validated {len(parameters)} parameters for {method_identifier}")
+    
+    def _validate_v_section_parameter_mapping(self, param: Dict[str, Any]) -> bool:
+        """Validate that a parameter mapping exists in the V: section."""
+        compressed = param.get('compressed', '')
+        full_name = param.get('name', '')
+        
+        if not compressed or not full_name:
+            return False
+        
+        # Check V: section content
+        v_content = None
+        if hasattr(self, 'original_cai3_content') and self.original_cai3_content:
+            v_content = self.original_cai3_content
+        elif hasattr(self, 'cai3_full') and self.cai3_full and hasattr(self.cai3_full, 'original_content'):
+            v_content = self.cai3_full.original_content
+        
+        if not v_content:
+            return False
+        
+        # Extract V: section
+        v_section_match = re.search(r'V:([^\n\r]*)', v_content, re.IGNORECASE)
+        if not v_section_match:
+            return False
+        
+        v_section_content = v_section_match.group(1).strip()
+        
+        # Look for the specific mapping
+        mapping_pattern = rf'\b{re.escape(compressed)}\s*=\s*{re.escape(full_name)}\b'
+        return bool(re.search(mapping_pattern, v_section_content))
+    
+    def _body_suggests_parameters(self, content: str) -> bool:
+        """Check if body content suggests parameter usage."""
+        if not content:
+            return False
+        
+        # Patterns that suggest parameter usage
+        param_indicators = [
+            r'\bself\.',           # self.attribute access
+            r'\b[a-z][a-zA-Z0-9_]*\s*=',  # variable assignments
+            r'def\s+\w+\s*\([^)]+\)',     # function definitions with params
+            r'return\s+[a-z]',           # return statements with variables
+            r'\b[a-z]\s*\+\s*[a-z]',     # variable operations
+        ]
+        
+        for pattern in param_indicators:
+            if re.search(pattern, content):
+                return True
+        
+        return False
+    
+    def extract_parameter_summary(self) -> Dict[str, Any]:
+        """Extract a summary of parameter extraction across all methods."""
+        self.logger.info("🔍 Extracting parameter summary")
+        
+        summary = {
+            'total_methods': 0,
+            'methods_with_parameters': 0,
+            'total_parameters': 0,
+            'parameter_sources': {
+                'v_section': 0,
+                'body_analysis': 0,
+                'compressed_standard': 0
+            },
+            'methods': []
+        }
+        
+        if not hasattr(self, 'ast_obj') or not self.ast_obj or not hasattr(self.ast_obj, 'table'):
+            self.logger.warning("⚠️ No table data available for parameter summary")
+            return summary
+        
+        # Process each method
+        for item in self.ast_obj.table:
+            if self._is_method_definition(item):
+                summary['total_methods'] += 1
+                method_struct = self._extract_method_structure(item)
+                
+                if method_struct:
+                    parameters = method_struct.get('parameters', [])
+                    method_name = method_struct.get('method_name', 'unknown')
+                    class_name = method_struct.get('class_name', 'unknown')
+                    
+                    method_info = {
+                        'name': f"{class_name}.{method_name}",
+                        'parameter_count': len(parameters),
+                        'parameters': []
+                    }
+                    
+                    if parameters:
+                        summary['methods_with_parameters'] += 1
+                        summary['total_parameters'] += len(parameters)
+                        
+                        for param in parameters:
+                            source = param.get('source', 'unknown')
+                            if source in summary['parameter_sources']:
+                                summary['parameter_sources'][source] += 1
+                            
+                            method_info['parameters'].append({
+                                'name': param.get('name', 'unknown'),
+                                'compressed': param.get('compressed', ''),
+                                'type': param.get('type', 'Any'),
+                                'source': source
+                            })
+                    
+                    summary['methods'].append(method_info)
+        
+        # Log summary
+        self.logger.info(f"📊 Parameter Summary:")
+        self.logger.info(f"   Total methods: {summary['total_methods']}")
+        self.logger.info(f"   Methods with parameters: {summary['methods_with_parameters']}")
+        self.logger.info(f"   Total parameters: {summary['total_parameters']}")
+        self.logger.info(f"   Parameter sources: {summary['parameter_sources']}")
+        
+        return summary

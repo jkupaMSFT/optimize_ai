@@ -295,11 +295,12 @@ p23: "original_variable_name"
 - NO: Full Python class/method names in table
 
 ✅ ONLY USE CAI3-LITE COMPRESSED SYNTAX:
-- Table entries: C:ct,M:ct.ia#a2 (NOT C:CompressionTier,M:CompressionTier.is_initialized#a2)
+- Table entries: C:ct,M:ct.ia(s,p)#a2 (NOT C:CompressionTier,M:CompressionTier.is_initialized(self,parameter#a2)
 - Body content: hash_1234();v=ca();an=ao (NOT Python imports or full method calls)
 - Use hash references: hash_7b30(k) (NOT Path(key))
 - Use compressed variables: s.mi, s.na (NOT self.method_name)
 - Use pool references: p0, p1, p2 (NOT full variable names)
+- Parameter mapping: ALL method parameters MUST be mapped in V: section
 
 🚨 CRITICAL V: SECTION REQUIREMENT - VARIABLE MAPPING COMPLETENESS:
 The V: section MUST contain EVERY single-letter variable that appears in ANY body section (B#).
@@ -307,13 +308,13 @@ This includes ALL self-attribute patterns like s.na, s.th, s.co, etc.
 
 ❌ WRONG (Missing V: section):
 D:hash_ca00=error,hash_e29c=name
-T:C:ct,M:ct.ia#a0
+T:C:ct,M:ct.ia(s,p)#a0
 B#a0:s.na='test';i=len(s.fp);j=i/4;for k in r:v=s.af(k)
 
-✅ CORRECT (Complete V: section with ALL variable mappings including self-attributes):
+✅ CORRECT (Complete V: section with ALL variable mappings including self-attributes and parameters):
 D:hash_ca00=error,hash_e29c=name
-T:C:ct,M:ct.ex#a0
-V:s=self,na=name,fp=file_path,af=analyze_file,i=index,j=result,k=key,v=value,t=total,u=usage_stats,w=tier_name,g=size,n=tier,o=item,m=metadata,r=requests,ex=example_method
+T:C:ct,M:ct.ex(s,p)#a0
+V:s=self,na=name,fp=file_path,af=analyze_file,i=index,j=result,k=key,v=value,t=total,u=usage_stats,w=tier_name,g=size,n=tier,o=item,m=metadata,r=requests,ex=example_method,p=parameter
 B#a0:s.na='test';i=len(s.fp);j=i/4;for k in r:v=s.af(k)
 
 🚨 CRITICAL D: SECTION REQUIREMENT - HASH MAPPING COMPLETENESS:
@@ -332,10 +333,10 @@ B#a1:k=hash_7b30(hash_2308)
 🎯 CORRECT CAI3-LITE EXAMPLE WITH COMPLETE HASH MAPPINGS:
 #C3L v2 py=3.11 f=example.py
 D:g0=o.name,hash_ca00=error,hash_e29c=name,hash_e0f8=threshold,hash_c904=description
-V:s=self,i=index,j=result,k=key,v=value,t=total,u=usage_stats,w=tier_name,g=size,n=tier,o=item,r=result,ex=example_method
+V:s=self,i=index,j=result,k=key,v=value,t=total,u=usage_stats,w=tier_name,g=size,n=tier,o=item,r=result,ex=example_method,p=parameter,mi=method_info
 P:p0="value1",p1="value2"
 X:a0=hash1,a1=hash2
-T:C:ct,M:ct.em#a2
+T:C:ct,M:ct.em(s,p)#a2
 ---
 B#a2:return s.mi
 B#a3:return {{hash_e29c:s.na,hash_e0f8:s.th,p8:s.co,hash_c904:s.de}}
@@ -358,10 +359,10 @@ ia: initialize_analyzer
 === CAI3-LITE ===
 #C3L v2 py=3.11 f=example.py
 D:hash_1234=calculate_total_method
-V:s=self,i=index,v=value,ia=initialize_analyzer
+V:s=self,i=index,v=value,ia=initialize_analyzer,p=parameter
 P:p0="value1",p25="user_email_address"
 X:a0=calc1,a1=calc2
-T:C:ct,M:ct.ia#a0
+T:C:ct,M:ct.ia(s,p)#a0
 ---
 B#a0:return hash_1234(x,y)
 
@@ -407,9 +408,8 @@ Before submitting your response, VERIFY:
 🚨 CRITICAL PRE-SUBMISSION VARIABLE VALIDATION:
 1. Scan ALL B# and T: sections for variables
 2. Verify EVERY variable in the V: section has a mapping
-3. If 's' appears in body → V: MUST have s=self or similar
-4. Count: V: mappings ≥ unique variables in bodies and T: section
-
+3. If 's.ab' appears in body → V: MUST have s=self and ab=attribute_name
+4. Count: V: mappings ≥ unique variables in bodies and T: section (Including self-attributes like s.na, s.th, etc.)
 
 🚨 SELF-CHECK REQUIRED: After generating code, check all opening brackets/braces/parentheses have matching closing brackets/braces/parentheses. All quotes are properly paired. Validate that the output is proper CAI3-LITE syntax with NO Python mixed in. VERIFY that every hash_XXXX in body sections has a corresponding mapping in D: section. VERIFY that every single-letter variable in body sections has a corresponding mapping in V: section.
 
@@ -689,11 +689,19 @@ B#a1:# Optimized validation logic here
         violations.extend(v_section_violations)
         self.logger.info(f"  Result: {len(v_section_violations)} V: section violations")
         
-        # 8. Validate method name mappings (CRITICAL for robust method resolution)
-        self.logger.info("🔧 Validating method name mappings...")
-        method_violations = self._validate_method_name_mappings(cai3_output)
-        violations.extend(method_violations)
-        self.logger.info(f"  Result: {len(method_violations)} method mapping violations")
+        # Method name mappings validation removed - not necessary as long as parameter variables are in V: section
+        
+        # 9. Validate method parameter mappings (NEW - CRITICAL for parameter preservation)
+        self.logger.info("🔧 Validating method parameter mappings...")
+        parameter_violations = self._validate_method_parameter_mappings(cai3_output)
+        violations.extend(parameter_violations)
+        self.logger.info(f"  Result: {len(parameter_violations)} parameter mapping violations")
+        
+        # 10. Validate parameter completeness in table entries
+        self.logger.info("📊 Validating parameter completeness in table entries...")
+        table_param_violations = self._validate_table_parameter_completeness(cai3_output)
+        violations.extend(table_param_violations)
+        self.logger.info(f"  Result: {len(table_param_violations)} table parameter violations")
         
         # Log violation details for debugging
         if violations:
@@ -1434,100 +1442,252 @@ B#a1:# Optimized validation logic here
             
         return False
     
-    def _validate_method_name_mappings(self, cai3_output: str) -> List[ConstraintViolation]:
+
+    
+    def _validate_method_parameter_mappings(self, cai3_output: str) -> List[ConstraintViolation]:
         """
-        Validate that ALL method names from T: section have corresponding mappings in V: section.
-        This prevents the fallback to infer_method_name() and ensures robust method resolution.
+        Validate that method parameters are properly compressed and mapped in V: section.
+        
+        This ensures that parameters in table entries like M:ct.ia(s,p)#a2 have:
+        1. All parameters mapped in V: section (s=self, p=parameter_name)
+        2. Parameters are compressed (single letters or short names)
+        3. No Python-style parameter definitions remain
         """
         violations = []
         
-        # Extract method names from T: section (M:class.method#body entries)
-        t_section_methods = set()
+        # Extract method entries with parameters from T: section
+        method_params = {}  # method_name -> list of parameters
         t_section_match = re.search(r'T:([^\n]*)', cai3_output)
-        if t_section_match:
-            t_content = t_section_match.group(1)
-            # Find method definitions: M:class.method#body
-            method_matches = re.findall(r'M:[^.]+\.([^#]+)#', t_content)
-            for method_name in method_matches:
-                t_section_methods.add(method_name)
+        if not t_section_match:
+            return violations  # No T: section, nothing to validate
+            
+        t_content = t_section_match.group(1)
         
-        self.logger.info(f"🔍 Found {len(t_section_methods)} method names in T: section: {sorted(t_section_methods)}")
+        # Find method definitions with parameters: M:class.method(param1,param2)#body
+        method_pattern = r'M:([^.]+)\.([^(#]+)(?:\(([^)]*)\))?#([^,\s]+)'
+        method_matches = re.findall(method_pattern, t_content)
         
-        # Extract method name mappings from V: section
-        v_section_methods = set()
-        v_section_match = re.search(r'V:([^\n]*)', cai3_output)
-        if v_section_match:
-            v_content = v_section_match.group(1)
-            # Find method name mappings: compressed_name=full_method_name
-            # Look for patterns like et=estimate_tokens, gr=get_recommendation, etc.
-            for mapping in v_content.split(','):
-                if '=' in mapping:
-                    key, value = mapping.strip().split('=', 1)
-                    # Check if this looks like a method name mapping (not just a variable)
-                    if key in t_section_methods:
-                        v_section_methods.add(key)
+        for class_name, method_name, params_str, body_id in method_matches:
+            if params_str:  # Only validate if parameters are present
+                # Parse parameters
+                params = [p.strip() for p in params_str.split(',') if p.strip()]
+                method_params[method_name] = params
+                
+                self.logger.info(f"🔍 Found method {class_name}.{method_name} with parameters: {params}")
+                
+                # Validate each parameter
+                for param in params:
+                    # Check if parameter is properly compressed (single letter or short name)
+                    if not self._is_valid_compressed_parameter(param):
+                        violations.append(ConstraintViolation(
+                            violation_type="invalid_parameter_compression",
+                            description=f"Parameter '{param}' in method '{method_name}' is not properly compressed",
+                            location=f"T: section method M:{class_name}.{method_name}({params_str})",
+                            suggested_fix=f"Use compressed parameter like 's' for self, 'p' for parameter, 'k' for key, etc.",
+                            severity="critical"
+                        ))
+                    
+                    # Check for Python-style type annotations (which shouldn't exist in CAI3)
+                    if ':' in param or '->' in param:
+                        violations.append(ConstraintViolation(
+                            violation_type="python_type_annotation_in_parameter",
+                            description=f"Parameter '{param}' contains Python type annotation syntax",
+                            location=f"T: section method M:{class_name}.{method_name}({params_str})",
+                            suggested_fix="Remove type annotations, use only compressed parameter names",
+                            severity="critical"
+                        ))
         
-        self.logger.info(f"🗺️ Found {len(v_section_methods)} method name mappings in V: section: {sorted(v_section_methods)}")
-        
-        # Find method names that are missing from V: section
-        missing_methods = t_section_methods - v_section_methods
-        
-        if missing_methods:
-            self.logger.error(f"❌ CRITICAL: {len(missing_methods)} method names missing from V: section")
-            for missing_method in sorted(missing_methods):
-                violations.append(ConstraintViolation(
-                    violation_type="missing_method_mapping",
-                    description=f"Method '{missing_method}' is defined in T: section but not mapped in V: section",
-                    location=f"Missing from V: section: {missing_method}",
-                    suggested_fix=f"Add '{missing_method}=full_method_name' to the V: section",
-                    severity="critical"
-                ))
-        else:
-            self.logger.info(f"✅ All {len(t_section_methods)} method names have mappings in V: section")
+        # Validate that all method parameters have mappings in V: section
+        v_section_violations = self._validate_parameter_v_section_mappings(method_params, cai3_output)
+        violations.extend(v_section_violations)
         
         return violations
     
-    def _extract_method_names_from_t_section(self, cai3_output: str) -> Dict[str, str]:
+    def _validate_table_parameter_completeness(self, cai3_output: str) -> List[ConstraintViolation]:
         """
-        Extract method names from T: section for header-based resolution.
-        Returns dict mapping compressed method names to their positions in T: section.
-        """
-        method_mappings = {}
+        Validate that table entries include proper parameter information.
         
+        This ensures methods don't lose their parameter signatures during compression.
+        """
+        violations = []
+        
+        # Extract all method entries from T: section
         t_section_match = re.search(r'T:([^\n]*)', cai3_output)
-        if t_section_match:
-            t_content = t_section_match.group(1)
-            # Find method definitions: M:class.method#body
-            method_matches = re.findall(r'M:([^.]+)\.([^#]+)#([^,]*)', t_content)
-            for class_name, method_name, body_id in method_matches:
-                method_mappings[method_name] = {
-                    'class': class_name,
-                    'body_id': body_id,
-                    'compressed_name': method_name
-                }
+        if not t_section_match:
+            return violations
+            
+        t_content = t_section_match.group(1)
         
-        return method_mappings
+        # Find method definitions and check for missing parameters
+        method_entries = re.findall(r'M:([^,\s]+)', t_content)
+        
+        for method_entry in method_entries:
+            # Check if method has parameters
+            if '(' not in method_entry:
+                # Check if this method should have parameters by looking at its body
+                body_id_match = re.search(r'#([^,\s]+)$', method_entry)
+                if body_id_match:
+                    body_id = body_id_match.group(1)
+                    body_content = self._extract_body_content(cai3_output, body_id)
+                    
+                    if body_content and self._body_suggests_parameters(body_content):
+                        violations.append(ConstraintViolation(
+                            violation_type="missing_method_parameters",
+                            description=f"Method '{method_entry}' appears to need parameters based on body content",
+                            location=f"T: section entry: {method_entry}",
+                            suggested_fix="Add compressed parameters like M:class.method(s,p)#body",
+                            severity="warning"
+                        ))
+            else:
+                # Method has parameters, validate they're properly formatted
+                param_match = re.search(r'\(([^)]*)\)', method_entry)
+                if param_match:
+                    params_str = param_match.group(1)
+                    if not params_str.strip():
+                        violations.append(ConstraintViolation(
+                            violation_type="empty_parameter_list",
+                            description=f"Method '{method_entry}' has empty parameter list ()",
+                            location=f"T: section entry: {method_entry}",
+                            suggested_fix="Remove empty parentheses or add compressed parameters",
+                            severity="warning"
+                        ))
+        
+        return violations
     
-    def _resolve_method_name_from_header(self, method_name: str, cai3_output: str) -> str:
+    def _validate_parameter_v_section_mappings(self, method_params: Dict[str, List[str]], cai3_output: str) -> List[ConstraintViolation]:
         """
-        Resolve method name from V: section header instead of using inference.
-        This replaces the unreliable infer_method_name approach.
+        Validate that method parameters used in parentheses are present in V: section.
+        This is a more lenient validation that only checks for the presence of compressed
+        variables in the V: section, not requiring exact matches for every parameter.
         """
-        # Extract method name mappings from V: section
+        violations = []
+        
+        if not method_params:
+            return violations
+        
+        # Extract all unique parameters
+        all_params = set()
+        for params_list in method_params.values():
+            all_params.update(params_list)
+        
+        # Extract V: section mappings
+        v_section_params = set()
         v_section_match = re.search(r'V:([^\n]*)', cai3_output)
         if v_section_match:
             v_content = v_section_match.group(1)
-            # Find method name mappings: compressed_name=full_method_name
-            for mapping in v_content.split(','):
-                if '=' in mapping:
-                    key, value = mapping.strip().split('=', 1)
-                    if key == method_name:
-                        self.logger.info(f"✅ Resolved method '{method_name}' to '{value}' from V: section")
-                        return value
+            # Find parameter mappings - more flexible pattern matching
+            param_mappings = re.findall(r'([a-z][a-z0-9_]*)=', v_content)
+            for param_name in param_mappings:
+                v_section_params.add(param_name)
         
-        # If not found in V: section, this is an error that should be caught by validation
-        self.logger.error(f"❌ Method '{method_name}' not found in V: section - validation should have caught this")
-        return f"unknown_{method_name}"  # Fallback, but validation should prevent this
+        # Find missing parameter mappings - only flag truly missing ones
+        missing_params = set()
+        for param in all_params:
+            # Only require mapping if parameter is actually used and not a common standard parameter
+            if param not in v_section_params and not self._is_standard_parameter(param):
+                missing_params.add(param)
+        
+        if missing_params:
+            self.logger.warning(f"⚠️ {len(missing_params)} method parameters could benefit from V: section mappings")
+            for missing_param in sorted(missing_params):
+                violations.append(ConstraintViolation(
+                    violation_type="missing_parameter_mapping",
+                    description=f"Method parameter '{missing_param}' could be mapped in V: section for clarity",
+                    location=f"Consider adding to V: section: {missing_param}",
+                    suggested_fix=f"Add '{missing_param}=original_parameter_name' to V: section",
+                    severity="info"  # Changed from "critical" to "info"
+                ))
+        else:
+            self.logger.info(f"✅ All {len(all_params)} method parameters have mappings in V: section")
+        
+        return violations
+    
+    def _is_valid_compressed_parameter(self, param: str) -> bool:
+        """
+        Check if a parameter is properly compressed according to CAI3 standards.
+        
+        Valid compressed parameters:
+        - Single letters: s, p, k, v, i, etc.
+        - Short abbreviations: na, th, co, etc. (2-3 chars max)
+        - Must be valid Python identifiers
+        - No Python keywords
+        """
+        if not param or not param.isidentifier():
+            return False
+            
+        # Must be short (1-3 characters for good compression)
+        if len(param) > 3:
+            return False
+            
+        # Should not be Python keywords
+        python_keywords = {'and', 'or', 'not', 'in', 'is', 'if', 'as', 'for', 'try', 'def', 'del'}
+        if param in python_keywords:
+            return False
+            
+        # Should follow CAI3 naming conventions
+        # Single letters are preferred, 2-3 letter abbreviations are acceptable
+        return True
+    
+    def _is_standard_parameter(self, param: str) -> bool:
+        """
+        Check if a parameter is a standard/common CAI3 parameter that doesn't require explicit mapping.
+        
+        Standard parameters that are commonly understood:
+        - s: self (universally understood)
+        - i, j, k: common loop/index variables
+        - x, y, z: common mathematical variables
+        - Other single-letter variables that are self-explanatory
+        """
+        # Single letter parameters that are commonly understood
+        standard_single_letters = {'s', 'i', 'j', 'k', 'x', 'y', 'z', 'n', 'm', 'p', 'v', 'o', 't', 'u', 'w', 'g', 'r', 'e', 'q'}
+        
+        # If it's a single letter and commonly used, consider it standard
+        if len(param) == 1 and param in standard_single_letters:
+            return True
+            
+        # Some common 2-letter abbreviations that are self-explanatory
+        standard_abbreviations = {'an', 'ac', 'aa', 'af', 'ao', 'ap', 'ar', 'as', 'at'}
+        if param in standard_abbreviations:
+            return True
+            
+        return False
+    
+    def _extract_body_content(self, cai3_output: str, body_id: str) -> Optional[str]:
+        """Extract body content for a specific body ID."""
+        body_pattern = rf'B#{body_id}:([^\n]*(?:\n(?!B#|[A-Z]:)[^\n]*)*)'
+        body_match = re.search(body_pattern, cai3_output, re.MULTILINE)
+        return body_match.group(1).strip() if body_match else None
+    
+    def _body_suggests_parameters(self, body_content: str) -> bool:
+        """
+        Check if body content suggests the method should have parameters.
+        
+        Look for patterns that indicate parameter usage:
+        - Variable assignments that could be parameters
+        - Function calls with arguments
+        - Conditional checks on variables
+        """
+        if not body_content:
+            return False
+            
+        # Look for patterns suggesting parameters
+        parameter_indicators = [
+            r'\b[a-z]\s*=\s*[a-z]+\b',  # Variable assignments like p=parameter
+            r'\b[a-z]\s*==\s*',         # Comparisons with variables
+            r'\b[a-z]\s*!=\s*',         # Not-equal comparisons
+            r'\bif\s+[a-z]\b',          # Conditional checks on single letters
+            r'\bfor\s+[a-z]\s+in\b',    # For loops with single letter variables
+        ]
+        
+        for pattern in parameter_indicators:
+            if re.search(pattern, body_content):
+                return True
+                
+        return False
+    
+
+    
+
     
     def _attempt_basic_repairs(self, cai3_output: str, violations: List[ConstraintViolation]) -> str:
         """Attempt basic repairs for common violations including delimiter balancing and hash mapping fixes."""

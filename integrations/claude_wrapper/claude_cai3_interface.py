@@ -276,7 +276,7 @@ You MUST start your response with exactly these headers:
 new_identifier: original_name
 another_new: real_variable_name
 hash_1234: original_method_name
-p23: "original_variable_name"
+p0: "original_variable_name"
 
 === CAI3-LITE ===
 [Your modified CAI3-LITE code here]
@@ -293,18 +293,19 @@ p23: "original_variable_name"
 - NO: file_path.exists()
 - NO: try:/except: blocks with Python syntax
 - NO: Full Python class/method names in table
+- NO: Full private variable names more than two characters(e.g. s.variable)
 
 ✅ ONLY USE CAI3-LITE COMPRESSED SYNTAX:
 - Table entries: C:ct,M:ct.ia(s,p)#a2 (NOT C:CompressionTier,M:CompressionTier.is_initialized(self,parameter#a2)
 - Body content: hash_1234();v=ca();an=ao (NOT Python imports or full method calls)
-- Use hash references: hash_7b30(k) (NOT Path(key))
-- Use compressed variables: s.mi, s.na (NOT self.method_name)
+- Use hash references: hash_7b30 (NOT Path)
+- Use two-character private variables: s.mi, s.na (NOT self.analyzer)
 - Use pool references: p0, p1, p2 (NOT full variable names)
 - Parameter mapping: ALL method parameters MUST be mapped in V: section
 
 🚨 CRITICAL V: SECTION REQUIREMENT - VARIABLE MAPPING COMPLETENESS:
-The V: section MUST contain EVERY single-letter variable that appears in ANY body section (B#).
-This includes ALL self-attribute patterns like s.na, s.th, s.co, etc.
+The V: section MUST contain EVERY single-character variable that appears in ANY body section (B#).
+This includes ALL two-character self-attribute patterns like s.na, s.th, s.co, that appears in ANY body section (B#).
 
 ❌ WRONG (Missing V: section):
 D:hash_ca00=error,hash_e29c=name
@@ -313,8 +314,8 @@ B#a0:s.na='test';i=len(s.fp);j=i/4;for k in r:v=s.af(k)
 
 ✅ CORRECT (Complete V: section with ALL variable mappings including self-attributes and parameters):
 D:hash_ca00=error,hash_e29c=name
+V:s=self,i=index,j=result,k=key,p=parameter,v=value,t=total,u=usage_stats,w=tier_name,g=size,n=tier,o=item,m=metadata,r=requests,af=analyze_file,ex=example_method,fp=file_path,na=name
 T:C:ct,M:ct.ex(s,p)#a0
-V:s=self,na=name,fp=file_path,af=analyze_file,i=index,j=result,k=key,v=value,t=total,u=usage_stats,w=tier_name,g=size,n=tier,o=item,m=metadata,r=requests,ex=example_method,p=parameter
 B#a0:s.na='test';i=len(s.fp);j=i/4;for k in r:v=s.af(k)
 
 🚨 CRITICAL D: SECTION REQUIREMENT - HASH MAPPING COMPLETENESS:
@@ -326,16 +327,16 @@ B#a0:if hash_ca00 in v:return hash_e29c
 B#a1:k=hash_7b30(hash_2308)
 
 ✅ CORRECT (Complete D: section with ALL hash mappings):
-D:g0=o.name,hash_ca00=error,hash_e29c=name,hash_7b30=Path,hash_2308="/tmp/output"
+D:hash_ca00=error,hash_e29c=name,hash_7b30=Path,hash_2308="/tmp/output"
 B#a0:if hash_ca00 in v:return hash_e29c
 B#a1:k=hash_7b30(hash_2308)
 
 🎯 CORRECT CAI3-LITE EXAMPLE WITH COMPLETE HASH MAPPINGS:
 #C3L v2 py=3.11 f=example.py
-D:g0=o.name,hash_ca00=error,hash_e29c=name,hash_e0f8=threshold,hash_c904=description
-V:s=self,i=index,j=result,k=key,v=value,t=total,u=usage_stats,w=tier_name,g=size,n=tier,o=item,r=result,ex=example_method,p=parameter,mi=method_info
+D:hash_ca00=error,hash_e29c=name,hash_e0f8=threshold,hash_c904=description
+V:s=self,i=index,j=result,k=key,v=value,t=total,u=usage_stats,w=tier_name,g=size,n=tier,o=item,r=result,ex=example_method,p=parameter,mi=method_info,na=name_analyzer,th=threshold,cp=compression_ratio,de=description
 P:p0="value1",p1="value2"
-X:a0=hash1,a1=hash2
+X:a0=5mn3,a1=e0wr
 T:C:ct,M:ct.em(s,p)#a2
 ---
 B#a2:return s.mi
@@ -350,21 +351,23 @@ B#a7:try:file_path=Path(file_path);if not file_path.exists():
 EXAMPLE CORRECT RESPONSE:
 === MAPPINGS ===
 hash_1234: calculate_total
-p25: "user_email_address"
+p0: "value1"
+p1: "user_email_address"
 s: self
 i: index
 v: value
 ia: initialize_analyzer
+va: value
 
 === CAI3-LITE ===
 #C3L v2 py=3.11 f=example.py
-D:hash_1234=calculate_total_method
-V:s=self,i=index,v=value,ia=initialize_analyzer,p=parameter
-P:p0="value1",p25="user_email_address"
-X:a0=calc1,a1=calc2
+D:hash_1234=calculate_total
+V:s=self,i=index,v=value,ia=initialize_analyzer,p=parameter,va=value
+P:p0="value1",p1="user_email_address"
+X:a0=5mn3,a1=e0wr
 T:C:ct,M:ct.ia(s,p)#a0
 ---
-B#a0:return hash_1234(x,y)
+B#a0:s.va=v;return hash_1234
 
 CONSTRAINTS (VIOLATION = FAILURE):
 1. {hash_constraint}
@@ -377,11 +380,11 @@ CONSTRAINTS (VIOLATION = FAILURE):
 8. Exact CAI3-LITE syntax required
 9. ONLY VALID SECTIONS: #C3L, I:, D:, V:, X:, P:, T:, B# - NO R: or other sections
 10. NO raw data, base64, or R: sections allowed
-11. 🚨 NO PYTHON IMPORTS OR SYNTAX IN BODY BLOCKS
+11. 🚨 NO PYTHON IMPORTS OR SYNTAX IN B# BLOCKS
 12. 🚨 USE SHORT ALIASES IN TABLE, NOT FULL CLASS NAMES
-13. 🚨 ALL BODY CONTENT MUST BE CAI3-COMPRESSED, NOT PYTHON
-14. 🚨 D: SECTION MUST CONTAIN ALL hash_XXXX MAPPINGS USED IN BODY SECTIONS
-15. 🚨 V: SECTION MUST CONTAIN ALL variable mappings used in BODY and T SECTIONS
+13. 🚨 ALL B# CONTENT MUST BE CAI3-COMPRESSED, NOT PYTHON
+14. 🚨 D: SECTION MUST CONTAIN ALL hash_XXXX MAPPINGS USED IN B# SECTIONS
+15. 🚨 V: SECTION MUST CONTAIN ALL variable mappings used in B# and T SECTIONS
 16. 🚨 CRITICAL: USE T{{}}X(ex){{}} STRUCTURE FOR TRY/EXCEPT
 
 🔧 MANDATORY SYNTAX VALIDATION:
@@ -409,9 +412,9 @@ Before submitting your response, VERIFY:
 1. Scan ALL B# and T: sections for variables
 2. Verify EVERY variable in the V: section has a mapping
 3. If 's.ab' appears in body → V: MUST have s=self and ab=attribute_name
-4. Count: V: mappings ≥ unique variables in bodies and T: section (Including self-attributes like s.na, s.th, etc.)
+4. Count: V: mappings ≥ unique variables in bodies and T: section (Including ALL single character and two-character self-attributes like s.na, s.th,)
 
-🚨 SELF-CHECK REQUIRED: After generating code, check all opening brackets/braces/parentheses have matching closing brackets/braces/parentheses. All quotes are properly paired. Validate that the output is proper CAI3-LITE syntax with NO Python mixed in. VERIFY that every hash_XXXX in body sections has a corresponding mapping in D: section. VERIFY that every single-letter variable in body sections has a corresponding mapping in V: section.
+🚨 SELF-CHECK REQUIRED: After generating code, check all opening brackets/braces/parentheses have matching closing brackets/braces/parentheses. All quotes are properly paired. Validate that the output is proper CAI3-LITE syntax with NO Python mixed in. VERIFY that every hash_XXXX in body sections has a corresponding mapping in D: section. VERIFY that every single-character variable and every two-character self-attribute in body sections has a corresponding mapping in V: section.
 
 TASK: {task}
 

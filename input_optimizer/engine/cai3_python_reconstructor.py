@@ -1,39 +1,5 @@
 """
-CAI3 Python Reconstructor - Reconstructs Python cod                    # Add imports
-        self.logger.info(f"📦 Adding {len(structure.imports)} imports")
-        for imp in structure.imports:
-            self.logger.info(f"   ➕ import {imp}")
-            builder.add_import(f"import {imp}")
-        
-        # Add regular classes with methods FIRST
-        self.logger.info(f"🏗️  Adding {len(structure.classes)} classes")
-        for class_name, class_def in structure.classes.items():
-            if class_def.get('is_enum'):
-                self.logger.info(f"   ⏭️  Skipping enum class {class_name}")
-                continue  # Already handled
-                
-            self.logger.info(f"   🏗️  Building class {class_name} with {len(class_def['methods'])} methods")
-            class_builder = builder.add_class(class_name, class_def.get('parent'))
-            
-            # Add methods
-            for method_name, method_info in class_def['methods'].items():
-                self.logger.info(f"      ⚙️  Building method {method_name}")
-                method_code = self._build_method_content(
-                    method_name, method_info, ast_obj, cai3_full, cai3_map
-                )
-                self.logger.info(f"      ✅ Method {method_name} code: {method_code[:100]}...")
-                self.logger.info(f"      🎯 Adding method {method_name} to class {class_name}")
-                # Don't add extra indentation - ClassBuilder handles it
-                class_builder.add_method(method_code)
-        
-        # Add functions (at module level) - AFTER classes
-        for func_name, func_def in structure.functions.items():
-            func_code = self._build_standalone_function(
-                func_name, func_def, ast_obj, cai3_full, cai3_map
-            )
-            builder.add_function(func_code)
-        
-        # Add main blockom analyzed structure.
+CAI3 Python Reconstructor - Reconstructs Python code from CAI3 structure.
 """
 
 import ast
@@ -95,15 +61,33 @@ class CAI3PythonReconstructor:
             builder.add_class(class_name, method_codes, parent)
         
         # Add functions (at module level) AFTER classes
-        self.logger.info(f"🔧 Adding {len(structure.functions)} functions")
-        for func_name, func_def in structure.functions.items():
-            self.logger.info(f"   🔧 Building function {func_name}")
-            func_code = self._build_standalone_function(
-                func_name, func_def, ast_obj, cai3_full, cai3_map
-            )
-            self.logger.info(f"   ✅ Function {func_name} code: {func_code[:100]}...")
-            self.logger.info(f"   🎯 Adding function {func_name} to module level")
-            builder.add_function(func_code)
+        # Handle both dictionary and list formats for functions
+        functions_data = structure.get('functions', []) if isinstance(structure, dict) else (structure.functions if hasattr(structure, 'functions') else [])
+        self.logger.info(f"🔧 Adding {len(functions_data)} functions")
+        
+        # Handle functions as either dictionary or list
+        if isinstance(functions_data, dict):
+            # Dictionary format: {func_name: func_def}
+            for func_name, func_def in functions_data.items():
+                self.logger.info(f"   🔧 Building function {func_name}")
+                func_code = self._build_standalone_function(
+                    func_name, func_def, ast_obj, cai3_full, cai3_map
+                )
+                self.logger.info(f"   ✅ Function {func_name} code: {func_code[:100]}...")
+                self.logger.info(f"   🎯 Adding function {func_name} to module level")
+                builder.add_function(func_code)
+        elif isinstance(functions_data, list):
+            # List format: [{name: func_name, ...}, ...]
+            for func_def in functions_data:
+                if isinstance(func_def, dict) and 'name' in func_def:
+                    func_name = func_def['name']
+                    self.logger.info(f"   🔧 Building function {func_name}")
+                    func_code = self._build_standalone_function(
+                        func_name, func_def, ast_obj, cai3_full, cai3_map
+                    )
+                    self.logger.info(f"   ✅ Function {func_name} code: {func_code[:100]}...")
+                    self.logger.info(f"   🎯 Adding function {func_name} to module level")
+                    builder.add_function(func_code)
         
         # Add main block
         if structure.main_block:
@@ -281,13 +265,16 @@ class CAI3PythonReconstructor:
         """Build standalone function code."""
         self.logger.info(f"🔧 Building standalone function {func_name}")
         
+        # Handle both formats: direct name or name from dict
+        actual_func_name = func_def.get('name', func_name) if isinstance(func_def, dict) else func_name
         args = func_def.get('args', [])
         body_content = func_def.get('body_content', '')
         
+        self.logger.info(f"   📋 Function name: {actual_func_name}")
         self.logger.info(f"   📋 Args: {args}")
-        self.logger.info(f"   📝 Body content: {body_content[:200]}...")
+        self.logger.info(f"   📝 Body content: {body_content[:200] if body_content else 'None'}...")
         
-        func_def_line = f"def {func_name}({', '.join(args)}):"
+        func_def_line = f"def {actual_func_name}({', '.join(args)}):"
         
         if body_content:
             self.logger.info(f"   🔄 Resolving function body...")
@@ -295,9 +282,12 @@ class CAI3PythonReconstructor:
             if resolved_body:
                 self.logger.info(f"   ✅ Resolved body: {resolved_body[:100]}...")
                 lines = [func_def_line]
+                
+                # Handle multi-line body content properly
                 for stmt in resolved_body.split('\n'):
                     if stmt.strip():
                         lines.append(f"    {stmt}")
+                
                 result = '\n'.join(lines)
                 self.logger.info(f"   🎯 Final function: {result}")
                 return result

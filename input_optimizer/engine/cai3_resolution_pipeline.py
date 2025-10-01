@@ -1059,91 +1059,233 @@ class CAI3ResolutionPipeline:
         return content
 
     def _translate_try_except_structures(self, content: str) -> str:
-        """Translate CAI3 T{}X{} structures to Python try/except blocks."""
+        """Translate CAI3 T{}X{} structures to Python try/except blocks.
+        
+        Uses multi-pass iterative approach with bracket counting to handle nested T{}X{} structures.
+        Each pass translates the innermost T{}X{} blocks, naturally handling
+        arbitrary nesting depth and complex internal brace patterns.
+        """
         self.logger.info("🔄 Translating T{}X{} structures to try/except blocks...")
         
-        # CRITICAL DEBUG: Let's test multiple patterns
-        test_patterns = [
-            r'T\{([^{}]*(?:\{[^{}]*\}[^{}]*)*)\}X\(([^)]+)\)\{([^{}]*(?:\{[^{}]*\}[^{}]*)*)\}',
-            r'T\{(.+?)\}X\(([^)]+)\)\{(.+?)\}',
-            r'T\{(.+)\}X\(([^)]+)\)\{(.+)\}',
-            r'T\{(.+?)\}X\(([^)]+)\)\{(.+)$',
-            r'T\{(.+)\}X\(([^)]+)\)\{(.+)$',
-        ]
+        max_iterations = 10  # Prevent infinite loops
+        iteration = 0
+        total_translated = 0
         
-        self.logger.info(f"🔍 Testing T{{}}X{{}} patterns on content: {content[:100]}...")
-        
-        for i, pattern in enumerate(test_patterns):
-            matches = re.findall(pattern, content, re.DOTALL)
-            self.logger.info(f"   Pattern {i}: {pattern}")
+        while iteration < max_iterations:
+            iteration += 1
+            original_content = content
+            
+            # Find T{}X{} structures using bracket counting instead of regex
+            matches = self._find_try_except_structures(content)
+            
             if matches:
-                self.logger.info(f"   ✅ MATCHED! Found {len(matches)} matches: {matches[0] if matches else 'None'}")
+                self.logger.info(f"🔄 Iteration {iteration}: Found {len(matches)} T{{}}X{{}} structure(s) to translate")
+                self.logger.debug(f"   Match positions: {[(m['start'], m['end']) for m in matches]}")
+            
+            # Apply translations in reverse order to preserve positions
+            for match in reversed(matches):
+                try_body = match['try_body']
+                exception_part = match['exception']
+                except_body = match['except_body']
+                
+                # Translate this structure
+                translated = self._build_try_except_block(try_body, exception_part, except_body)
+                
+                # Replace in content
+                content = content[:match['start']] + translated + content[match['end']:]
+                
+                self.logger.debug(f"   ✅ Translated T{{}}X{{}} at position {match['start']}-{match['end']}")
+            
+            if content == original_content:
+                # No more changes, we're done
+                self.logger.info(f"✅ Completed T{{}}X{{}} translation in {iteration} iteration(s) - translated {total_translated} total structure(s)")
                 break
             else:
-                self.logger.info(f"   ❌ No match")
+                total_translated += len(matches)
         
-        # Use the working pattern (simplified for the actual structure)
-        # The content appears to be all on one line, so we need a pattern that handles that
-        pattern = r'T\{(.+)\}X\(([^)]+)\)\{(.+)\}'
-        
-        def replace_try_except(match):
-            try_body = match.group(1).strip()
-            exception_part = match.group(2).strip()
-            except_body = match.group(3).strip()
-            
-            self.logger.info(f"🔍 Found T{{}}X{{}} pattern:")
-            self.logger.info(f"   Try body: {try_body[:100]}...")
-            self.logger.info(f"   Exception: {exception_part}")
-            self.logger.info(f"   Except body: {except_body[:100]}...")
-            
-            # Parse exception part: "Exception as var_name" format (already correct in CAI3-LITE)
-            exception_parts = exception_part.split()
-            if len(exception_parts) >= 3 and exception_parts[1] == 'as':
-                exception_type = exception_parts[0]
-                var_name = exception_parts[2]
-            elif len(exception_parts) >= 2:
-                exception_type = exception_parts[0]
-                var_name = exception_parts[1]  # Assume "Exception var" format
-            else:
-                exception_type = "Exception"
-                var_name = "e"
-            
-            # CRITICAL FIX: Handle semicolon-separated statements properly
-            # Convert semicolon-separated statements to newline-separated with proper indentation
-            try_statements = self._split_statements_with_indentation(try_body)
-            except_statements = self._split_statements_with_indentation(except_body)
-            
-            # Build properly indented Python try/except
-            result_lines = ["try:"]
-            for stmt in try_statements:
-                if stmt.strip():  # Check if statement has content
-                    # CRITICAL FIX: Preserve the indentation from _split_statements_with_indentation
-                    # Don't strip it and re-add base indentation - the splitting logic already handled nesting
-                    result_lines.append(f"    {stmt}")
-            
-            result_lines.append(f"except {exception_type} as {var_name}:")
-            for stmt in except_statements:
-                if stmt.strip():  # Check if statement has content
-                    # CRITICAL FIX: Preserve the indentation from _split_statements_with_indentation
-                    result_lines.append(f"    {stmt}")
-            
-            result = '\n'.join(result_lines)
-            
-            self.logger.info(f"✅ Translated T{{}}X{{}} structure: {exception_type} as {var_name}")
-            self.logger.info(f"🔍 Result:\n{result}")
-            return result
-        
-        # Apply the translation
-        original_content = content
-        content = re.sub(pattern, replace_try_except, content)
-        
-        if content != original_content:
-            self.logger.info("✅ Successfully translated T{}X{} structures to try/except blocks")
-        else:
-            self.logger.info("ℹ️ No T{}X{} structures found to translate")
-            self.logger.info(f"🔍 Content to search: {content}")
+        if iteration >= max_iterations:
+            self.logger.warning(f"⚠️ Reached max iterations ({max_iterations}) for T{{}}X{{}} translation")
+            self.logger.warning(f"   Translated {total_translated} structures, but content may still contain untranslated T{{}}X{{}} blocks")
         
         return content
+    
+    def _find_try_except_structures(self, content: str) -> List[Dict[str, Any]]:
+        """Find all T{}X(){} structures using bracket counting.
+        
+        Returns list of ONLY innermost matches (those without nested T{} inside them).
+        This ensures we process structures from the inside out, naturally handling nesting.
+        """
+        all_matches = []
+        i = 0
+        
+        while i < len(content) - 4:  # Need at least "T{}X"
+            # Look for "T{"
+            if content[i:i+2] == 'T{':
+                start_pos = i
+                i += 2
+                
+                # Count brackets to find matching }
+                try_body, close_pos = self._extract_balanced_content(content, i, '{', '}')
+                
+                if close_pos is None:
+                    i = start_pos + 1
+                    continue
+                
+                i = close_pos + 1  # Move past the '}'
+                
+                # Should be followed by "X("
+                if i >= len(content) - 1 or content[i:i+2] != 'X(':
+                    i = start_pos + 1
+                    continue
+                
+                i += 2  # Move past "X("
+                
+                # Find the exception part (content until ')')
+                paren_end = content.find(')', i)
+                if paren_end == -1:
+                    i = start_pos + 1
+                    continue
+                
+                exception_part = content[i:paren_end]
+                i = paren_end + 1  # Move past ')'
+                
+                # Should be followed by '{'
+                if i >= len(content) or content[i] != '{':
+                    i = start_pos + 1
+                    continue
+                
+                i += 1  # Move past '{'
+                
+                # Extract except body
+                except_body, except_close_pos = self._extract_balanced_content(content, i, '{', '}')
+                
+                if except_close_pos is None:
+                    i = start_pos + 1
+                    continue
+                
+                end_pos = except_close_pos + 1  # Include closing '}'
+                
+                # Check if this structure contains nested T{ (not innermost)
+                has_nested_try = 'T{' in try_body or 'T{' in except_body
+                
+                all_matches.append({
+                    'start': start_pos,
+                    'end': end_pos,
+                    'try_body': try_body,
+                    'exception': exception_part,
+                    'except_body': except_body,
+                    'has_nested': has_nested_try
+                })
+                
+                # Continue searching after this match
+                i = end_pos
+            else:
+                i += 1
+        
+        if not all_matches:
+            return []
+        
+        # FILTER to only innermost structures (those without nested T{})
+        # By returning only these, each iteration processes the deepest level first
+        innermost = [m for m in all_matches if not m['has_nested']]
+        
+        # If no innermost found, something is wrong (shouldn't happen)
+        # But return all matches as fallback
+        if not innermost:
+            self.logger.warning("⚠️ No innermost structures found, but structures exist. Returning all.")
+            innermost = all_matches
+        
+        # Sort by position for predictable order (we'll reverse when applying)
+        innermost.sort(key=lambda m: m['start'])
+        
+        return innermost
+    
+    def _extract_balanced_content(self, content: str, start: int, open_char: str, close_char: str) -> tuple:
+        """Extract content from start position until balanced closing character.
+        
+        Returns: (content_string, closing_position) or (content_string, None) if unbalanced
+        """
+        depth = 1
+        i = start
+        
+        while i < len(content) and depth > 0:
+            if content[i] == open_char:
+                depth += 1
+            elif content[i] == close_char:
+                depth -= 1
+                if depth == 0:
+                    return content[start:i], i
+            i += 1
+        
+        # Unbalanced - return what we have
+        return content[start:], None
+    
+    def _build_try_except_block(self, try_body: str, exception_part: str, except_body: str) -> str:
+        """Build a Python try/except block from CAI3 components."""
+        try_body = try_body.strip()
+        exception_part = exception_part.strip()
+        except_body = except_body.strip()
+        
+        self.logger.debug(f"🔍 Building try/except:")
+        self.logger.debug(f"   Try body: {try_body[:100]}...")
+        self.logger.debug(f"   Exception: {exception_part}")
+        self.logger.debug(f"   Except body: {except_body[:100]}...")
+        
+        # Parse exception part: can be "Exception as var_name", "Exception var_name", or just "var_name"
+        exception_parts = exception_part.split()
+        if len(exception_parts) >= 3 and exception_parts[1] == 'as':
+            # Format: "Exception as var_name"
+            exception_type = exception_parts[0]
+            var_name = exception_parts[2]
+        elif len(exception_parts) == 2:
+            # Format: "Exception var_name" - check if first part looks like an exception type
+            if exception_parts[0][0].isupper():  # Exception types start with capital letter
+                exception_type = exception_parts[0]
+                var_name = exception_parts[1]
+            else:
+                # Both lowercase - treat as just variable name
+                exception_type = "Exception"
+                var_name = exception_parts[0]
+        elif len(exception_parts) == 1:
+            # Just a variable name (common in CAI3)
+            exception_type = "Exception"
+            var_name = exception_parts[0]
+        else:
+            # Default fallback
+            exception_type = "Exception"
+            var_name = "e"
+        
+        # Handle semicolon-separated statements
+        try_statements = self._split_statements_with_indentation(try_body)
+        except_statements = self._split_statements_with_indentation(except_body)
+        
+        # Build properly indented Python try/except
+        result_lines = ["try:"]
+        for stmt in try_statements:
+            if stmt.strip():
+                result_lines.append(f"    {stmt}")
+        
+        result_lines.append(f"except {exception_type} as {var_name}:")
+        for stmt in except_statements:
+            if stmt.strip():
+                result_lines.append(f"    {stmt}")
+        
+        result = '\n'.join(result_lines)
+        
+        self.logger.debug(f"✅ Built try/except block ({len(result_lines)} lines)")
+        return result
+    
+    def _replace_try_except(self, match) -> str:
+        """Deprecated: Replace a single T{}X{} match with try/except block.
+        
+        This method is kept for backward compatibility but is no longer the primary translation method.
+        The new bracket-counting approach in _translate_try_except_structures is preferred.
+        """
+        try_body = match.group(1).strip()
+        exception_part = match.group(2).strip()
+        except_body = match.group(3).strip()
+        
+        return self._build_try_except_block(try_body, exception_part, except_body)
     
     def _split_statements_with_indentation(self, body: str) -> List[str]:
         """Split semicolon-separated statements while preserving logical structure."""
@@ -1156,8 +1298,12 @@ class CAI3ResolutionPipeline:
         # CRITICAL FIX: In try/except blocks, ALL statements should remain part of the try block
         # Don't remove statements as "unreachable" after return - they belong in the same scope
         statements = []
+        processed_indices = set()  # Track which statements we've already processed
         
         for i, stmt in enumerate(raw_statements):
+            # Skip if already processed
+            if i in processed_indices:
+                continue
             
             # CRITICAL FIX: Handle for loops that have break statements after them
             stmt_clean = stmt.strip()
@@ -1184,12 +1330,13 @@ class CAI3ResolutionPipeline:
                         if if_body:
                             statements.append(f"        {if_body}")
                             
-                        # The break should be at the if level (nested inside the for loop)
+                        # CRITICAL FIX: The break should be at the if level (nested inside the for loop)
+                        # Check if next statement is break/continue - move it inside the if block
                         if i + 1 < len(raw_statements) and raw_statements[i + 1].strip() in ['break', 'continue']:
                             statements.append(f"        {raw_statements[i + 1].strip()}")
-                            self.logger.debug(f"   ✅ Moved '{raw_statements[i + 1].strip()}' inside if statement within for loop")
+                            self.logger.debug(f"   ✅ Moved '{raw_statements[i + 1].strip()}' inside if statement within for loop (indent=8)")
                             # Mark the break statement as processed
-                            raw_statements[i + 1] = ""
+                            processed_indices.add(i + 1)
                     else:
                         # Simple content after for loop
                         statements.append(f"    {remaining_part}")
@@ -1197,9 +1344,9 @@ class CAI3ResolutionPipeline:
                         # Check if next statement is break/continue - move it inside the loop
                         if i + 1 < len(raw_statements) and raw_statements[i + 1].strip() in ['break', 'continue']:
                             statements.append(f"    {raw_statements[i + 1].strip()}")
-                            self.logger.debug(f"   ✅ Moved '{raw_statements[i + 1].strip()}' inside for loop")
+                            self.logger.debug(f"   ✅ Moved '{raw_statements[i + 1].strip()}' inside for loop (indent=4)")
                             # Mark the break statement as processed
-                            raw_statements[i + 1] = ""
+                            processed_indices.add(i + 1)
                 continue
             
             # Skip empty statements (already processed break/continue)

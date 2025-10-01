@@ -272,12 +272,6 @@ class ClaudeCAI3Interface:
 
 You MUST start your response with exactly these headers:
 
-=== MAPPINGS ===
-new_identifier: original_name
-another_new: real_variable_name
-hash_1234: original_method_name
-p0: "original_variable_name"
-
 === CAI3-LITE ===
 [Your modified CAI3-LITE code here]
 
@@ -349,15 +343,6 @@ B#a0:from dataclasses import dataclass;analyzer=CompressionAnalyzer()
 B#a7:try:file_path=Path(file_path);if not file_path.exists():
 
 EXAMPLE CORRECT RESPONSE:
-=== MAPPINGS ===
-hash_1234: calculate_total
-p0: "value1"
-p1: "user_email_address"
-s: self
-i: index
-v: value
-ia: initialize_analyzer
-va: value
 
 === CAI3-LITE ===
 #C3L v2 py=3.11 f=example.py
@@ -421,7 +406,7 @@ TASK: {task}
 EXISTING CAI3-LITE:
 {cai3_lite}
 
-🚨 REMINDER: Start with "=== MAPPINGS ===" then "=== CAI3-LITE ===" - NO other text allowed."""
+🚨 REMINDER: Start with "=== CAI3-LITE ===" - NO other text allowed."""
 
         return prompt
     

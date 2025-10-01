@@ -26,6 +26,7 @@ class CompressionResult:
     content: str
     chunks: Optional[List[str]] = None
     metadata: Dict[str, Any] = None
+    cai3_map: Optional[Any] = None  # CAI3Map with variable mappings
     
     def __post_init__(self):
         if self.metadata is None:

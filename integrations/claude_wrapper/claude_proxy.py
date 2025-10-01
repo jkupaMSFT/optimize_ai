@@ -143,16 +143,17 @@ class ClaudeCodeProxy:
             self.logger.info(f"CAI3 Debug - Original tokens: {original_tokens}")
             self.logger.info(f"CAI3 Debug - Compressed tokens: {compression_result.compressed_tokens}")
             
+            # TODO: UNCOMMENT THESE CHECKS AFTER TESTING cai3_map FORWARDING
             # Check if compression actually worked
-            if compression_result.compressed_tokens >= original_tokens * 0.8:
-                # Compression saved less than 20% - not worth it
-                self.logger.warning(f"CAI3 compression ineffective: only {original_tokens - compression_result.compressed_tokens} tokens saved")
-                return prompt, {"compressed": False, "reason": "compression_ineffective"}
-            
-            if len(compression_result.content) >= len(file_content) * 0.9:
-                # Character compression is minimal - likely not worth wrapper overhead
-                self.logger.warning(f"CAI3 character compression minimal: {len(file_content)} → {len(compression_result.content)} chars")
-                return prompt, {"compressed": False, "reason": "minimal_character_reduction"}
+            # if compression_result.compressed_tokens >= original_tokens * 0.8:
+            #     # Compression saved less than 20% - not worth it
+            #     self.logger.warning(f"CAI3 compression ineffective: only {original_tokens - compression_result.compressed_tokens} tokens saved")
+            #     return prompt, {"compressed": False, "reason": "compression_ineffective"}
+            # 
+            # if len(compression_result.content) >= len(file_content) * 0.9:
+            #     # Character compression is minimal - likely not worth wrapper overhead
+            #     self.logger.warning(f"CAI3 character compression minimal: {len(file_content)} → {len(compression_result.content)} chars")
+            #     return prompt, {"compressed": False, "reason": "minimal_character_reduction"}
             
             # Build initial metadata (needed for wrapper creation)
             metadata = {
@@ -170,7 +171,8 @@ class ClaudeCodeProxy:
                     original_tokens - compression_result.compressed_tokens
                 ),
                 "original_source": file_content,  # PRESERVE ORIGINAL SOURCE FOR CONTEXT VALIDATION
-                "cai3_cache": True
+                "cai3_cache": True,
+                "cai3_map": compression_result.cai3_map  # Forward cai3_map for output translation
             }
             
             # Create ultra-minimal wrapper and check actual token savings
@@ -1431,7 +1433,8 @@ Please manually review and correct the code."""
             python_code = self._translate_cai3_to_python(
                 cai3_lite_content=cai3_content,
                 source_path=self.source_path,
-                claude_mappings=claude_mappings
+                claude_mappings=claude_mappings,
+                cai3_map=metadata.get('cai3_map')  # Pass cai3_map with existing variable mappings
             )
             
             # LOG TRANSLATION RESULT
@@ -2523,8 +2526,8 @@ B#a1:# Enhanced validation with optimized logic here
     # Replace the _translate_cai3_to_python method (around line 2500)
 
     def _translate_cai3_to_python(self, cai3_lite_content: str, source_path: Path, 
-                                claude_mappings: Dict[str, Any]) -> str:
-        """Translate CAI3-LITE to Python with proper mapping extraction."""
+                                  claude_mappings: Dict[str, Any], cai3_map=None) -> str:
+        """Translate CAI3-LITE to Python with proper mapping extraction and cai3_map merging."""
         try:
             self.logger.info("🔄 Starting CAI3 to Python translation with comprehensive mapping debugging")
             
@@ -2554,6 +2557,24 @@ B#a1:# Enhanced validation with optimized logic here
             # Log what we're passing to the translator
             self.logger.info(f"📊 Final mappings being passed to translator:")
             self.logger.info(f"   Hash mappings: {len(claude_mappings.get('hash_mappings', {}))}")
+            self.logger.info(f"   Pool mappings: {len(claude_mappings.get('pools', {}))}")
+            self.logger.info(f"   Variable mappings: {len(claude_mappings.get('variables', {}))}")
+            
+            # 🔑 MERGE existing variable mappings from cai3_map with Claude's new mappings
+            if cai3_map and hasattr(cai3_map, 'name_map') and cai3_map.name_map:
+                existing_vars = {k: v for k, v in cai3_map.name_map.items()}
+                self.logger.info(f"📥 Merging {len(existing_vars)} existing variable mappings from cai3_map")
+                
+                # Claude's mappings take precedence (they're newer)
+                variables_before_merge = len(claude_mappings.get('variables', {}))
+                claude_mappings.setdefault('variables', {}).update(existing_vars)
+                
+                self.logger.info(f"✅ Variable mapping merge complete:")
+                self.logger.info(f"   - From cai3_map: {len(existing_vars)}")
+                self.logger.info(f"   - From Claude: {variables_before_merge}")
+                self.logger.info(f"   - Total after merge: {len(claude_mappings['variables'])}")
+            else:
+                self.logger.warning("⚠️  No cai3_map provided - only using Claude's variable mappings")
             self.logger.info(f"   Pool mappings: {len(claude_mappings.get('pools', {}))}")
             self.logger.info(f"   Variable mappings: {len(claude_mappings.get('variables', {}))}")
             

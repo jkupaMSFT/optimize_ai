@@ -205,15 +205,126 @@ class CAI3WaterfallEnhancement:
             assert edit_scope_cids, "No edit-scope CIDs selected; bodies would be empty."
             
             cai3_map = self._create_cai3_map_enhanced(cai3_full, minified_source)
+            
+            # 🔍 LOG CAI3_MAP CONTENTS - Critical for understanding variable resolution
+            self.logger.info("=" * 80)
+            self.logger.info("🗺️  CAI3 MAP CREATED - Variable & Name Mappings")
+            self.logger.info("=" * 80)
+            self.logger.info(f"📊 Total name_map entries: {len(cai3_map.name_map)}")
+            self.logger.info(f"📊 Total reverse_name_map entries: {len(cai3_map.reverse_name_map)}")
+            
+            # Log variable mappings (short -> original)
+            if cai3_map.name_map:
+                self.logger.info("\n🔤 NAME_MAP (compressed -> original) - First 20 entries:")
+                for i, (compressed, original) in enumerate(list(cai3_map.name_map.items())[:20]):
+                    self.logger.info(f"  {compressed:20s} -> {original}")
+                if len(cai3_map.name_map) > 20:
+                    self.logger.info(f"  ... and {len(cai3_map.name_map) - 20} more entries")
+            
+            # Log reverse mappings (original -> short)
+            if cai3_map.reverse_name_map:
+                self.logger.info("\n🔄 REVERSE_NAME_MAP (original -> compressed) - First 20 entries:")
+                for i, (original, compressed) in enumerate(list(cai3_map.reverse_name_map.items())[:20]):
+                    self.logger.info(f"  {original:30s} -> {compressed}")
+                if len(cai3_map.reverse_name_map) > 20:
+                    self.logger.info(f"  ... and {len(cai3_map.reverse_name_map) - 20} more entries")
+            
+            # Log local compressions (CID-prefixed entries)
+            local_compressions = {k: v for k, v in cai3_map.name_map.items() if ':' in k}
+            if local_compressions:
+                self.logger.info(f"\n🎯 LOCAL COMPRESSIONS (with CID prefix): {len(local_compressions)} entries")
+                for i, (key, value) in enumerate(list(local_compressions.items())[:10]):
+                    self.logger.info(f"  {key:30s} -> {value}")
+                if len(local_compressions) > 10:
+                    self.logger.info(f"  ... and {len(local_compressions) - 10} more entries")
+            
+            # Log attribute compressions
+            attr_compressions = {k: v for k, v in cai3_map.name_map.items() 
+                               if ':' in k and not k.split(':')[1].startswith('hash_')}
+            if attr_compressions:
+                self.logger.info(f"\n📦 ATTRIBUTE COMPRESSIONS: {len(attr_compressions)} entries")
+                for i, (key, value) in enumerate(list(attr_compressions.items())[:10]):
+                    self.logger.info(f"  {key:30s} -> {value}")
+            
+            self.logger.info("=" * 80)
+            
             cai3_lite = self._create_cai3_lite_dense_ultra(cai3_full, cai3_map, edit_scope_cids, cid_index, minified_source, tree)
             
             # Store FULL and MAP locally
             if source_path:
                 self.cai3_cache.store_full(source_path, cai3_full)
                 self.cai3_cache.store_map(source_path, cai3_map)
+                self.logger.info(f"💾 Stored CAI3 FULL and MAP to cache for {source_path}")
             
             # Serialize only LITE for the LLM
             lite_content = cai3_lite.serialize()
+            
+            # 🔍 LOG SERIALIZED CAI3 LITE CONTENT
+            self.logger.info("=" * 80)
+            self.logger.info("📤 SERIALIZED CAI3 LITE FOR CLAUDE")
+            self.logger.info("=" * 80)
+            self.logger.info(f"📏 Total length: {len(lite_content)} characters")
+            
+            # Parse sections from serialized content
+            sections = lite_content.split('\n')
+            header_found = False
+            imports_found = False
+            chain_aliases_found = False
+            cid_aliases_found = False
+            pools_found = False
+            variables_found = False
+            table_start = -1
+            bodies_start = -1
+            
+            for i, line in enumerate(sections):
+                if line.startswith('#C3L'):
+                    header_found = True
+                    self.logger.info(f"  📋 Header: {line}")
+                elif line.startswith('I:'):
+                    imports_found = True
+                    self.logger.info(f"  📦 Imports: {line[:100]}{'...' if len(line) > 100 else ''}")
+                elif line.startswith('D:'):
+                    chain_aliases_found = True
+                    self.logger.info(f"  🔗 Chain aliases: {line[:100]}{'...' if len(line) > 100 else ''}")
+                elif line.startswith('X:'):
+                    cid_aliases_found = True
+                    self.logger.info(f"  🆔 CID aliases: {line[:100]}{'...' if len(line) > 100 else ''}")
+                elif line.startswith('P:'):
+                    pools_found = True
+                    self.logger.info(f"  🏊 Pools: {line[:100]}{'...' if len(line) > 100 else ''}")
+                elif line.startswith('V:'):
+                    variables_found = True
+                    self.logger.info(f"  🔤 Variables: {line[:100]}{'...' if len(line) > 100 else ''}")
+                    # Show full V: section since it's critical
+                    if len(line) > 100:
+                        self.logger.info(f"     Full V: section: {line}")
+                elif line.startswith('---'):
+                    bodies_start = i
+                    self.logger.info(f"  🔀 Separator at line {i}")
+                elif line.startswith(('C:', 'M:', 'F:')) and table_start == -1:
+                    table_start = i
+            
+            if table_start >= 0:
+                self.logger.info(f"  📊 Table section starts at line {table_start}")
+            if bodies_start >= 0:
+                body_count = len(sections) - bodies_start - 1
+                self.logger.info(f"  📝 Bodies section starts at line {bodies_start} ({body_count} bodies)")
+            
+            # Critical checks
+            if not variables_found:
+                self.logger.warning("⚠️  WARNING: NO V: SECTION FOUND IN SERIALIZED CAI3!")
+                self.logger.warning("⚠️  This means NO variable mappings will be sent to Claude!")
+                self.logger.warning(f"⚠️  But cai3_map contains {len(cai3_map.name_map)} mappings that Claude won't see!")
+            else:
+                self.logger.info("✅ V: section found - variable mappings will be sent to Claude")
+            
+            # Show first few lines of serialized content
+            self.logger.info("\n📄 First 10 lines of serialized CAI3:")
+            for i, line in enumerate(sections[:10]):
+                self.logger.info(f"  {i+1:3d}: {line[:120]}{'...' if len(line) > 120 else ''}")
+            
+            self.logger.info("=" * 80)
+            
             compressed_tokens = count_tokens(lite_content, self.llm_model)
             
             compression_ratio = (1 - compressed_tokens / original_tokens) * 100
@@ -252,6 +363,7 @@ class CAI3WaterfallEnhancement:
                 tier_used=tier_used,
                 method_used="cai3_enhanced",
                 content=lite_content,
+                cai3_map=cai3_map,  # Include cai3_map with all variable mappings
                 metadata={
                     'cai3_mode': True,
                     'dense_flow': True,
@@ -1248,12 +1360,21 @@ class CAI3WaterfallEnhancement:
         parent_map = {}
         children_map = {}
         
+        # Track statistics for logging
+        global_name_count = 0
+        local_compression_count = 0
+        attr_compression_count = 0
+        
+        self.logger.debug("🏗️  Building CAI3 map from %d nodes", len(cai3_full.nodes))
+        
         # Build mappings including local compressions
         for node in cai3_full.nodes:
             # Global name mappings
             if node.short_name != node.name:
                 name_map[node.short_name] = node.name
                 reverse_name_map[node.name] = node.short_name
+                global_name_count += 1
+                self.logger.debug(f"  Global name: {node.short_name} -> {node.name}")
             
             # Add local compressions to map
             if 'local_compressions' in node.metadata:
@@ -1262,6 +1383,8 @@ class CAI3WaterfallEnhancement:
                     key = f"{node.cid}:{compressed}"
                     name_map[key] = orig
                     reverse_name_map[f"{node.cid}:{orig}"] = compressed
+                    local_compression_count += 1
+                    self.logger.debug(f"  Local compression [{node.cid}]: {compressed} -> {orig}")
             
             # Add class attribute compressions to map
             if 'attr_compressions' in node.metadata:
@@ -1270,7 +1393,9 @@ class CAI3WaterfallEnhancement:
                     attr_key = f"{node.cid}:{compressed_attr}"
                     name_map[attr_key] = orig_attr
                     reverse_name_map[f"{node.cid}:{orig_attr}"] = compressed_attr
-                    self.logger.debug(f"Added attribute mapping: {attr_key} -> {orig_attr}")
+                    attr_compression_count += 1
+                    self.logger.debug(f"  Attribute compression [{node.cid}]: {compressed_attr} -> {orig_attr}")
+
             
             # Span and byte mappings
             if node.span:
@@ -1297,6 +1422,12 @@ class CAI3WaterfallEnhancement:
                 if node.parent_cid not in children_map:
                     children_map[node.parent_cid] = []
                 children_map[node.parent_cid].append(node.cid)
+        
+        # Log summary statistics
+        self.logger.info(f"📊 CAI3 Map created: {global_name_count} global names, "
+                        f"{local_compression_count} local compressions, "
+                        f"{attr_compression_count} attribute compressions")
+        self.logger.info(f"📊 Total mappings: {len(name_map)} (name_map), {len(reverse_name_map)} (reverse)")
         
         return CAI3Map(
             name_map=name_map,

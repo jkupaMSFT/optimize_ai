@@ -2126,9 +2126,16 @@ class CAI3Translator:
 
     def translate_cai3_lite_to_python(self, cai3_lite_content: str, 
                                     source_path: Path,
-                                    claude_mappings: Dict[str, Any] = None) -> str:
+                                    claude_mappings: Dict[str, Any] = None,
+                                    cai3_map: Any = None) -> str:
         """
         Main entry point for CAI3-LITE to Python translation with proper mapping extraction.
+        
+        Args:
+            cai3_lite_content: The CAI3-LITE formatted content to translate
+            source_path: Path to the source file
+            claude_mappings: Mappings extracted from Claude's response
+            cai3_map: Optional CAI3Map object with additional variable mappings
         """
         try:
             self.logger.info("🔧 Starting CAI3-LITE to Python translation with mapping extraction fix")
@@ -2149,6 +2156,12 @@ class CAI3Translator:
                 elif isinstance(claude_mappings, dict):
                     # Already extracted, merge them
                     extracted_mappings.update(claude_mappings)
+            
+            # Step 1.5: Merge cai3_map variable mappings if provided
+            if cai3_map and hasattr(cai3_map, 'variable_map'):
+                self.logger.info(f"📥 Merging {len(cai3_map.variable_map)} variable mappings from cai3_map")
+                extracted_mappings['variables'].update(cai3_map.variable_map)
+                self.logger.info(f"✅ Total variables after merge: {len(extracted_mappings['variables'])}")
             
             # Step 2: Extract pools from CAI3 content itself
             cai3_pools = self._extract_pools_from_cai3_content(cai3_lite_content)

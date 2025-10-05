@@ -2596,11 +2596,12 @@ B#a1:# Enhanced validation with optimized logic here
             self.logger.debug(f"🔧 CAI3 content length: {len(cai3_lite_content)}")
             self.logger.debug(f"🔧 Claude mappings keys: {list(claude_mappings.keys())}")
             
-            # Call the translator with properly structured mappings
+            # Call the translator with properly structured mappings AND cai3_map
             result = self.cai3_translator.translate_cai3_lite_to_python(
                 cai3_lite_content=cai3_lite_content,
                 source_path=source_path,
-                claude_mappings=claude_mappings
+                claude_mappings=claude_mappings,
+                cai3_map=cai3_map  # CRITICAL: Pass cai3_map to translator
             )
             
             # LOG TRANSLATION RESULT ANALYSIS

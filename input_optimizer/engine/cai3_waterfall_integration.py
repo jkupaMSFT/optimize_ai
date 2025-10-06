@@ -364,6 +364,7 @@ class CAI3WaterfallEnhancement:
                 method_used="cai3_enhanced",
                 content=lite_content,
                 cai3_map=cai3_map,  # Include cai3_map with all variable mappings
+                cai3_full=cai3_full,  # Include cai3_full with complete structure
                 metadata={
                     'cai3_mode': True,
                     'dense_flow': True,
@@ -977,7 +978,7 @@ class CAI3WaterfallEnhancement:
         frequency_map = self._analyze_variable_frequency(method_node)
         
         # Single char pool (excluding reserved)
-        single_chars = 'abcdefhijklmnqrtuvwxyz'  # Skip reserved: g, p, s, o
+        single_chars = 'abcdefhijklmnoqrtuvwxyz'  # Skip reserved: g, p, s
         char_index = 0
         
         # Compress parameters first (they're usually most used)
@@ -1028,21 +1029,21 @@ class CAI3WaterfallEnhancement:
     
     def _generate_short_name(self, original: str, used: Set[str]) -> str:
         """Generate shortest possible name not in use."""
-        # Try first char
+        # Try first char (but never 's', 'g', 'p' - reserved)
         if original[0].lower() not in used and original[0].lower() not in 'gps':
             return original[0].lower()
         
-        # Try first+last char
+        # Try first+last char (but never starting with 's', 'g', 'p')
         if len(original) > 1:
             candidate = original[0].lower() + original[-1].lower()
-            if candidate not in used and not candidate.startswith(('g', 'p')):
+            if candidate not in used and not candidate.startswith(('g', 'p', 's')):
                 return candidate
         
-        # Try char + digit
+        # Try char + digit (excluding reserved chars 's', 'g', 'p')
         for i in range(10):
-            for c in 'abcdefhijklmnqrtuvwxyz':
+            for c in 'abcdefhijklmnqrtuvwxyz':  # This already excludes s, g, p
                 candidate = f"{c}{i}"
-                if candidate not in used and not candidate.startswith(('g', 'p')):
+                if candidate not in used:
                     return candidate
         
         # Fallback: use hash
@@ -1091,7 +1092,7 @@ class CAI3WaterfallEnhancement:
             'name': 'n',
             'id': 'i',
             'type': 't',
-            'status': 's',
+            'status': 'st',  # Changed from 's' to avoid conflict with 'self'
             'result': 'r',
             'cache': 'h',
             'buffer': 'b',
@@ -1135,7 +1136,7 @@ class CAI3WaterfallEnhancement:
         Compress a local variable name to 1-2 chars.
         Prohibits p\d+ and g\d+ patterns to avoid conflicts with pools/aliases.
         """
-        # Common patterns
+        # Common patterns (NOTE: 's' is reserved for 'self', never use it)
         common_map = {
             'result': 'r',
             'results': 'rs',
@@ -1164,31 +1165,35 @@ class CAI3WaterfallEnhancement:
         # Check common patterns first
         for pattern, short in common_map.items():
             if pattern in name.lower():
-                if short not in local_used and not self._is_reserved_pattern(short):
+                # Explicitly reject 's' even if it passes other checks
+                if short != 's' and short not in local_used and not self._is_reserved_pattern(short):
                     local_used.add(short)
                     return short
         
-        # Use first char
+        # Use first char (but never 's' - reserved for self)
         first = name[0].lower()
-        if first not in local_used and not self._is_reserved_pattern(first):
+        if first not in local_used and first != 's' and not self._is_reserved_pattern(first):
             local_used.add(first)
             return first
         
         # Try first char + number, but avoid reserved patterns
-        for i in range(10):
-            candidate = f"{first}{i}"
-            if candidate not in local_used and not self._is_reserved_pattern(candidate):
-                local_used.add(candidate)
-                return candidate
+        # Skip this entirely if first char is 's' (reserved for self)
+        if first != 's':
+            for i in range(10):
+                candidate = f"{first}{i}"
+                if candidate not in local_used and not self._is_reserved_pattern(candidate):
+                    local_used.add(candidate)
+                    return candidate
         
-        # Use first 2 chars, avoiding reserved patterns
+        # Use first 2 chars, avoiding reserved patterns  
         two_char = name[:2].lower()
-        if two_char not in local_used and not self._is_reserved_pattern(two_char):
+        # Explicitly avoid 's' prefix
+        if two_char not in local_used and not two_char.startswith('s') and not self._is_reserved_pattern(two_char):
             local_used.add(two_char)
             return two_char
         
-        # Fallback: try alternative single chars
-        for char in 'abcdefhjlmnqsuvwyz':  # Skip chars that might conflict
+        # Fallback: try alternative single chars (exclude reserved: g, p, s, o)
+        for char in 'abcdefhjlmnqtuvwyz':  # 's' removed to avoid conflict with 'self'
             if char not in local_used and not self._is_reserved_pattern(char):
                 local_used.add(char)
                 return char

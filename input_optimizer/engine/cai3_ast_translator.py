@@ -2183,15 +2183,29 @@ class CAI3Translator:
                 self.logger.error("Failed to parse CAI3-LITE content")
                 return self._create_fallback_code(source_path, "Parse failed")
             
-            # Step 5: Create resolution pipeline with extracted mappings
+            # Step 5: Create resolution pipeline with extracted mappings (including self_attrs)
             from .cai3_resolution_pipeline import CAI3ResolutionPipeline
+            
+            # Extract self_attrs from ast_obj if available
+            self_attrs = {}
+            if hasattr(ast_obj, 'self_attrs') and ast_obj.self_attrs:
+                self_attrs = ast_obj.self_attrs
+                self.logger.info(f"📥 Extracted {len(self_attrs)} self-attributed variables from S: section")
+            
+            # Also extract variables from V: section
+            variables = extracted_mappings.get('variables', {})
+            if hasattr(ast_obj, 'variables') and ast_obj.variables:
+                variables.update(ast_obj.variables)
+                self.logger.info(f"📥 Extracted {len(ast_obj.variables)} variables from V: section")
+            
             pipeline = CAI3ResolutionPipeline(
                 hash_mappings=extracted_mappings['hash_mappings'],
                 pools=extracted_mappings['pools'],
-                variables=extracted_mappings['variables']
+                variables=variables,
+                self_attrs=self_attrs
             )
             
-            self.logger.info(f"✅ Created resolution pipeline with mappings")
+            self.logger.info(f"✅ Created resolution pipeline with mappings (including {len(self_attrs)} self attrs)")
             
             # Step 6: Resolve all bodies before reconstruction
             if hasattr(ast_obj, 'bodies'):

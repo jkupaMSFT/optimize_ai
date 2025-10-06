@@ -172,7 +172,8 @@ class ClaudeCodeProxy:
                 ),
                 "original_source": file_content,  # PRESERVE ORIGINAL SOURCE FOR CONTEXT VALIDATION
                 "cai3_cache": True,
-                "cai3_map": compression_result.cai3_map  # Forward cai3_map for output translation
+                "cai3_map": compression_result.cai3_map,  # Forward cai3_map for validation and translation
+                "cai3_full": compression_result.cai3_full  # Forward cai3_full for validation constraints
             }
             
             # Create ultra-minimal wrapper and check actual token savings
@@ -248,10 +249,14 @@ class ClaudeCodeProxy:
             
             # Use the constraint interface to create a properly constrained prompt
             try:
-                # Load CAI3Full from cache for constraints
-                cai3_full = None
-                if self.source_path:
-                    cai3_full = self.cai3_cache.load_full(self.source_path)
+                # Get CAI3Full directly from metadata (no cache loading needed)
+                cai3_full = metadata.get('cai3_full')
+                cai3_map = metadata.get('cai3_map')
+                
+                if cai3_full:
+                    self.logger.info(f"✅ Using cai3_full from compression (direct data flow)")
+                else:
+                    self.logger.warning("⚠️ No cai3_full in metadata - validation will be limited")
                 
                 # Create constraint-based prompt using the interface
                 constrained_prompt = self.cai3_interface._create_constrained_prompt(
@@ -2092,7 +2097,7 @@ Please manually review and correct the code."""
         return content.replace(code_blocks[0][1], code_content)
     
     def process_with_constraints(self, cai3_lite: str, task: str, 
-                               cai3_full = None) -> Tuple[str, Dict[str, str]]:
+                               cai3_full = None, cai3_map = None) -> Tuple[str, Dict[str, str]]:
         """
         Process CAI3 edits using the advanced constraint-based interface.
         
@@ -2102,7 +2107,8 @@ Please manually review and correct the code."""
         Args:
             cai3_lite: CAI3-LITE compressed representation
             task: Task description for Claude
-            cai3_full: Full CAI3 structure with constraints (loaded from cache if None)
+            cai3_full: Full CAI3 structure with constraints (from compression_result.cai3_full)
+            cai3_map: CAI3Map with compression mappings (from compression_result.cai3_map)
             
         Returns:
             Tuple of (processed_cai3_output, mappings_dict)
@@ -2111,9 +2117,18 @@ Please manually review and correct the code."""
             self.logger.warning("Constraint system not available, falling back to standard processing")
             return self._fallback_processing(cai3_lite, task)
         
-        # Load CAI3Full from cache if not provided
-        if cai3_full is None and self.source_path:
-            cai3_full = self.cai3_cache.load_full(self.source_path)
+        # Use cai3_full and cai3_map from compression result (direct data flow)
+        # No cache loading needed - these come directly from the compression
+        if cai3_full is not None:
+            self.logger.info(f"✅ Using cai3_full from compression (direct data flow)")
+        else:
+            self.logger.warning("⚠️ No cai3_full provided - validation will be limited")
+        
+        # cai3_map is passed as a parameter (from compression_result.cai3_map)
+        if cai3_map and hasattr(cai3_map, 'name_map'):
+            self.logger.info(f"✅ Using cai3_map with {len(cai3_map.name_map)} mappings (direct data flow)")
+        else:
+            self.logger.warning("⚠️ No cai3_map provided - validation pool will be limited")
         
         # Check if we have valid CAI3Full structure
         if cai3_full is None:
@@ -2126,12 +2141,13 @@ Please manually review and correct the code."""
             return self._fallback_processing(cai3_lite, task)
         
         try:
-            # Use the constraint-based interface
+            # Use the constraint-based interface with cai3_map for validation
             self.logger.info("Processing with constraint-based interface")
             cai3_output, mappings = self.cai3_interface.request_cai3_edit(
                 cai3_lite=cai3_lite,
                 task=task,
-                cai3_full=cai3_full
+                cai3_full=cai3_full,
+                cai3_map=cai3_map  # Pass cai3_map separately for validation
             )
             
             # Convert output to CLI-compatible format for translation system
@@ -2564,6 +2580,34 @@ B#a1:# Enhanced validation with optimized logic here
             if cai3_map and hasattr(cai3_map, 'name_map') and cai3_map.name_map:
                 existing_vars = {k: v for k, v in cai3_map.name_map.items()}
                 self.logger.info(f"📥 Merging {len(existing_vars)} existing variable mappings from cai3_map")
+                
+                # LOG DETAILED MAPPING INFORMATION
+                self.logger.info("\n" + "=" * 80)
+                self.logger.info("🗺️  CAI3 MAP FORWARDING - DETAILED BREAKDOWN")
+                self.logger.info("=" * 80)
+                
+                # Categorize the mappings
+                global_methods = {k: v for k, v in existing_vars.items() if not k.startswith('mt_')}
+                local_compressions = {k: v for k, v in existing_vars.items() if k.startswith('mt_')}
+                
+                self.logger.info(f"\n📦 GLOBAL METHOD/CLASS COMPRESSIONS: {len(global_methods)}")
+                for compressed, original in sorted(global_methods.items())[:20]:  # Show first 20
+                    self.logger.info(f"   {compressed:20s} -> {original}")
+                if len(global_methods) > 20:
+                    self.logger.info(f"   ... and {len(global_methods) - 20} more")
+                
+                self.logger.info(f"\n🎯 LOCAL COMPRESSIONS (with CID prefix): {len(local_compressions)}")
+                for compressed, original in sorted(local_compressions.items())[:20]:  # Show first 20
+                    self.logger.info(f"   {compressed:20s} -> {original}")
+                if len(local_compressions) > 20:
+                    self.logger.info(f"   ... and {len(local_compressions) - 20} more")
+                
+                # Check if 'af' is in the mappings
+                if 'af' in existing_vars:
+                    self.logger.info(f"\n🔍 SPECIFIC MAPPING CHECK: 'af' -> '{existing_vars['af']}'")
+                    self.logger.info("   ⚠️  This mapping can be reused for both global method calls AND self.af attributes")
+                
+                self.logger.info("=" * 80 + "\n")
                 
                 # Claude's mappings take precedence (they're newer)
                 variables_before_merge = len(claude_mappings.get('variables', {}))

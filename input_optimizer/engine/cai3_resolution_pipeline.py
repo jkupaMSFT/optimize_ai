@@ -12,10 +12,11 @@ import logging
 class CAI3ResolutionPipeline:
     """Unified pipeline for resolving all CAI3 references."""
     
-    def __init__(self, hash_mappings: Dict[str, str], pools: Dict[str, Any], variables: Dict[str, str] = None):
+    def __init__(self, hash_mappings: Dict[str, str], pools: Dict[str, Any], variables: Dict[str, str] = None, self_attrs: Dict[str, str] = None):
         self.hash_resolver = HashResolver(hash_mappings)
         self.pools = pools
         self.variables = variables or {}
+        self.self_attrs = self_attrs or {}
         self.logger = logging.getLogger(__name__)
     
     def resolve_content(self, content: str) -> str:
@@ -321,17 +322,21 @@ class CAI3ResolutionPipeline:
         return clean_value
     
     def _resolve_variables(self, content: str) -> str:
-        """Resolve variable references using the variables mapping with Python keyword protection."""
-        if not self.variables:
+        """Resolve variable references using both self_attrs and variables mappings with Python keyword protection."""
+        # Merge self_attrs and variables, with self_attrs taking precedence for self.* patterns
+        merged_variables = {**self.variables, **self.self_attrs}
+        
+        if not merged_variables:
             self.logger.warning("⚠️ No variable mappings available for resolution!")
             return content
         
-        self.logger.info(f"🔄 Resolving {len(self.variables)} variable references...")
+        self.logger.info(f"🔄 Resolving {len(merged_variables)} variable references ({len(self.self_attrs)} self attrs, {len(self.variables)} other vars)...")
+        self.logger.info(f"🔍 DEBUG: Self-attrs mappings: {self.self_attrs}")
         self.logger.info(f"🔍 DEBUG: Variable mappings: {self.variables}")
         self.logger.info(f"🔍 DEBUG: Input content for variable resolution:\n{content}")
         
         # Sort by key length (longest first) to avoid partial replacements
-        sorted_variables = sorted(self.variables.items(), key=lambda x: len(x[0]), reverse=True)
+        sorted_variables = sorted(merged_variables.items(), key=lambda x: len(x[0]), reverse=True)
         
         for var_id, value in sorted_variables:
             self.logger.info(f"🔍 DEBUG: Looking for variable '{var_id}' -> '{value}'")
@@ -368,6 +373,9 @@ class CAI3ResolutionPipeline:
                         self.logger.info(f"⚠️ SKIPPING Python keyword '{var_id}' - found in grammatical context")
                         continue
             
+            # SPECIAL HANDLING: For self_attrs, prioritize self.* patterns
+            is_self_attr = var_id in self.self_attrs
+            
             # Use multiple patterns to catch variables in different contexts
             patterns = [
                 rf'\b{re.escape(var_id)}\b',  # Standard word boundary
@@ -377,6 +385,15 @@ class CAI3ResolutionPipeline:
                 rf'^{re.escape(var_id)}\b',  # At start of line
                 rf'(?<=[^a-zA-Z0-9_]){re.escape(var_id)}(?=[^a-zA-Z0-9_])'  # Non-identifier characters around
             ]
+            
+            # If this is a self attribute, add specific self.* patterns first
+            if is_self_attr:
+                self_patterns = [
+                    rf'(?<=self\.){re.escape(var_id)}\b',  # self.attr pattern
+                    rf'(?<=\bse\.){re.escape(var_id)}\b',  # se.attr pattern (if 'se' is mapped to 'self')
+                ]
+                patterns = self_patterns + patterns
+                self.logger.info(f"   🔑 Using self-attribute resolution for '{var_id}'")
             
             all_matches = []
             for i, pattern in enumerate(patterns):

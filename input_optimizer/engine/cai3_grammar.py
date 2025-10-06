@@ -17,7 +17,8 @@ class CAI3LiteAST:
     chain_aliases: Dict[str, str] = None  # D: section
     cid_aliases: Dict[str, str] = None    # X: section
     pools: Dict[str, str] = None          # P: section
-    variables: Dict[str, str] = None      # V: section - ADDED FOR VARIABLE MAPPINGS
+    self_attrs: Dict[str, str] = None     # S: section - SELF-ATTRIBUTED VARIABLES
+    variables: Dict[str, str] = None      # V: section - OTHER VARIABLE MAPPINGS
     table: List[str] = None               # T: section
     bodies: Dict[str, str] = None         # B# sections
     
@@ -29,6 +30,8 @@ class CAI3LiteAST:
             self.cid_aliases = {}
         if self.pools is None:
             self.pools = {}
+        if self.self_attrs is None:
+            self.self_attrs = {}
         if self.variables is None:
             self.variables = {}
         if self.table is None:
@@ -143,6 +146,16 @@ class CAI3LiteParser:
                     return None
                 
                 ast.pools = self._parse_pool_assignments(pool_content)
+            
+            # Parse S: section (self-attributed variables) - NEW SECTION
+            s_match = re.search(r'^S:\s*(.+?)(?=^[A-Z]:|^B\d+:|^B#|^---|$)', content, re.MULTILINE | re.DOTALL)
+            if s_match:
+                self_attrs_content = s_match.group(1).strip()
+                self.logger.info(f"🔑 PARSING SELF ATTRS: Found S: section content: {self_attrs_content[:100]}...")
+                ast.self_attrs = self._parse_assignments(self_attrs_content)
+                self.logger.info(f"✅ PARSING SELF ATTRS: Extracted {len(ast.self_attrs)} self-attributed variable mappings")
+            else:
+                self.logger.debug("⚠️ PARSING SELF ATTRS: No S: section found")
             
             # Parse V: section (variable mappings) - ADDED FOR ROBUST VARIABLE RESOLUTION
             v_match = re.search(r'^V:\s*(.+?)(?=^[A-Z]:|^B\d+:|^B#|^---|$)', content, re.MULTILINE | re.DOTALL)

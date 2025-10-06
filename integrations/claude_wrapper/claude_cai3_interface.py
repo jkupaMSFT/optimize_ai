@@ -32,7 +32,8 @@ VALID SECTION IDENTIFIERS ONLY:
 - D: (chain aliases)
 - X: (CID aliases)
 - P: (pools)
-- V: (variable/attribute mappings) - REQUIRED
+- S: (self-attributed variables) - NEW: self.* attributes
+- V: (variable/attribute mappings) - other variables
 - T: (table)
 - B# (bodies)
 - --- (separator)
@@ -139,7 +140,7 @@ class ClaudeCAI3Interface:
         self.max_repair_attempts = 3
         self.enable_constraint_learning = True
         
-    def request_cai3_edit(self, cai3_lite: str, task: str, cai3_full: CAI3Full) -> Tuple[str, Dict[str, str]]:
+    def request_cai3_edit(self, cai3_lite: str, task: str, cai3_full: CAI3Full, cai3_map: Optional[Any] = None) -> Tuple[str, Dict[str, str]]:
         """
         Request a CAI3 edit from Claude with comprehensive constraint enforcement.
         
@@ -147,6 +148,7 @@ class ClaudeCAI3Interface:
             cai3_lite: The CAI3-LITE compressed representation
             task: The task/modification to perform
             cai3_full: Full CAI3 structure with context and constraints
+            cai3_map: Optional CAI3Map with compression mappings for validation pool
             
         Returns:
             Tuple of (cai3_output, mappings_dict)
@@ -162,8 +164,8 @@ class ClaudeCAI3Interface:
         # 3. Parse response for mappings and code
         cai3_output, mappings = self._parse_response(response)
         
-        # 4. Validate output against constraints
-        validation_result = self._validate_constraints(cai3_output, cai3_full, mappings)
+        # 4. Validate output against constraints (pass cai3_map for validation pool)
+        validation_result = self._validate_constraints(cai3_output, cai3_full, mappings, cai3_map)
         
         if not validation_result.is_valid:
             # 5. Request fixes with specific violations highlighted
@@ -297,20 +299,26 @@ You MUST start your response with exactly these headers:
 - Use pool references: p0, p1, p2 (NOT full variable names)
 - Parameter mapping: ALL method parameters MUST be mapped in V: section
 
-🚨 CRITICAL V: SECTION REQUIREMENT - VARIABLE MAPPING COMPLETENESS:
-The V: section MUST contain EVERY single-character variable that appears in ANY body section (B#).
-This includes ALL two-character self-attribute patterns like s.na, s.th, s.co, that appears in ANY body section (B#).
+🚨 CRITICAL VARIABLE MAPPING REQUIREMENTS:
 
-❌ WRONG (Missing V: section):
-D:hash_ca00=error,hash_e29c=name
-T:C:ct,M:ct.ia(s,p)#a0
-B#a0:s.na='test';i=len(s.fp);j=i/4;for k in r:v=s.af(k)
+S: SECTION - SELF-ATTRIBUTES (REQUIRED if using self):
+Contains self mapping and ALL self-attribute suffixes
+- Format: S:s=self,na=name,th=threshold,co=features,af=analyze_file
+- Rule: if body has s.ti or s.af → S: MUST have ti=..., af=...
 
-✅ CORRECT (Complete V: section with ALL variable mappings including self-attributes and parameters):
-D:hash_ca00=error,hash_e29c=name
-V:s=self,i=index,j=result,k=key,p=parameter,v=value,t=total,u=usage_stats,w=tier_name,g=size,n=tier,o=item,m=metadata,r=requests,af=analyze_file,ex=example_method,fp=file_path,na=name
-T:C:ct,M:ct.ex(s,p)#a0
-B#a0:s.na='test';i=len(s.fp);j=i/4;for k in r:v=s.af(k)
+V: SECTION - LOCAL VARIABLES (REQUIRED):
+Contains ONLY single/multi-letter local variables, NO self-attributes
+- Format: V:i=index,k=key,v=value,o=item,aa=analyzer,ac=config
+- Rule: All local variables (i, j, k, aa, ab) used in B# sections
+
+❌ WRONG (self-attributes mixed with variables):
+V:s=self,i=index,k=key,v=value,ti=tiers,af=analyze_file
+B#a0:for o in s.ti:v=s.af(k)
+
+✅ CORRECT (separated S: and V: sections):
+S:s=self,ti=tiers,af=analyze_file
+V:i=index,k=key,v=value,o=item
+B#a0:for o in s.ti:v=s.af(k)
 
 🚨 CRITICAL D: SECTION REQUIREMENT - HASH MAPPING COMPLETENESS:
 The D: section MUST contain EVERY hash_XXXX reference that appears in ANY body section (B#).
@@ -325,17 +333,6 @@ D:hash_ca00=error,hash_e29c=name,hash_7b30=Path,hash_2308="/tmp/output"
 B#a0:if hash_ca00 in v:return hash_e29c
 B#a1:k=hash_7b30(hash_2308)
 
-🎯 CORRECT CAI3-LITE EXAMPLE WITH COMPLETE HASH MAPPINGS:
-#C3L v2 py=3.11 f=example.py
-D:hash_ca00=error,hash_e29c=name,hash_e0f8=threshold,hash_c904=description
-V:s=self,i=index,j=result,k=key,v=value,t=total,u=usage_stats,w=tier_name,g=size,n=tier,o=item,r=result,ex=example_method,p=parameter,mi=method_info,na=name_analyzer,th=threshold,cp=compression_ratio,de=description
-P:p0="value1",p1="value2"
-X:a0=5mn3,a1=e0wr
-T:C:ct,M:ct.em(s,p)#a2
----
-B#a2:return s.mi
-B#a3:return {{hash_e29c:s.na,hash_e0f8:s.th,p8:s.co,hash_c904:s.de}}
-B#a4:s.na='CompressionAnalyzer';if hash_ca00 in r:return r
 
 ❌ WRONG (Python-mixed):
 T:C:CompressionTier,M:CompressionTier.is_initialized#a2
@@ -347,12 +344,13 @@ EXAMPLE CORRECT RESPONSE:
 === CAI3-LITE ===
 #C3L v2 py=3.11 f=example.py
 D:hash_1234=calculate_total
-V:s=self,i=index,v=value,ia=initialize_analyzer,p=parameter,va=value
+S:s=self,va=value
+V:i=index,v=value,n=name,p=parameter
 P:p0="value1",p1="user_email_address"
 X:a0=5mn3,a1=e0wr
 T:C:ct,M:ct.ia(s,p)#a0
 ---
-B#a0:s.va=v;return hash_1234
+B#a0:s.va=v;i=p0;n=p;return hash_1234
 
 CONSTRAINTS (VIOLATION = FAILURE):
 1. {hash_constraint}
@@ -363,14 +361,15 @@ CONSTRAINTS (VIOLATION = FAILURE):
 6. NO "(was ...)" or "(originally ...)" text ANYWHERE
 7. NO "..." truncation markers ANYWHERE
 8. Exact CAI3-LITE syntax required
-9. ONLY VALID SECTIONS: #C3L, I:, D:, V:, X:, P:, T:, B# - NO R: or other sections
+9. ONLY VALID SECTIONS: #C3L, I:, D:, S:, V:, X:, P:, T:, B# - NO R: or other sections
 10. NO raw data, base64, or R: sections allowed
 11. 🚨 NO PYTHON IMPORTS OR SYNTAX IN B# BLOCKS
 12. 🚨 USE SHORT ALIASES IN TABLE, NOT FULL CLASS NAMES
 13. 🚨 ALL B# CONTENT MUST BE CAI3-COMPRESSED, NOT PYTHON
 14. 🚨 D: SECTION MUST CONTAIN ALL hash_XXXX MAPPINGS USED IN B# SECTIONS
-15. 🚨 V: SECTION MUST CONTAIN ALL variable mappings used in B# and T SECTIONS
-16. 🚨 CRITICAL: USE T{{}}X(ex){{}} STRUCTURE FOR TRY/EXCEPT
+15. 🚨 S: SECTION MUST CONTAIN s=self AND ALL self-attribute mappings 
+16. 🚨 V: SECTION MUST CONTAIN ALL local variable mappings 
+17. 🚨 CRITICAL: USE T{{}}X(ex){{}} STRUCTURE FOR TRY/EXCEPT
 
 🔧 MANDATORY SYNTAX VALIDATION:
 Before submitting your response, VERIFY:
@@ -385,7 +384,8 @@ Before submitting your response, VERIFY:
 ✓ 🚨 NO PYTHON SYNTAX IN ANY BODY BLOCKS
 ✓ 🚨 TABLE USES SHORT ALIASES ONLY (ct, ca) NOT FULL NAMES
 ✓ 🚨 D: SECTION HAS ALL hash_XXXX MAPPINGS FOUND IN B# SECTIONS
-✓ 🚨 V: SECTION HAS ALL variable mappings found in B# and T: SECTIONS
+✓ 🚨 S: SECTION HAS s=self AND ALL self-attribute mappings found in B# sections
+✓ 🚨 V: SECTION HAS ALL local variable mappings found in B# and T: SECTIONS
 
 🚨 CRITICAL PRE-SUBMISSION HASH VALIDATION:
 1. Scan ALL B# sections for hash_XXXX references
@@ -394,12 +394,12 @@ Before submitting your response, VERIFY:
 4. If hash_ca00 appears in body → D: MUST have hash_ca00=something
 
 🚨 CRITICAL PRE-SUBMISSION VARIABLE VALIDATION:
-1. Scan ALL B# and T: sections for variables
-2. Verify EVERY variable in the V: section has a mapping
-3. If 's.ab' appears in body → V: MUST have s=self and ab=attribute_name
-4. Count: V: mappings ≥ unique variables in bodies and T: section (Including ALL single character and two-character self-attributes like s.na, s.th,)
+1. Scan ALL B# sections for local variables (i, j, k, aa, ab, etc.) → add to V: section
+2. Scan ALL B# sections for self-attributes (s.na, s.ti, s.af → extract: na, ti, af) → add to S: section  
+3. Verify S: section contains s=self AND ALL self-attribute suffixes 
+4. Verify V: section contains ALL local variables 
 
-🚨 SELF-CHECK REQUIRED: After generating code, check all opening brackets/braces/parentheses have matching closing brackets/braces/parentheses. All quotes are properly paired. Validate that the output is proper CAI3-LITE syntax with NO Python mixed in. VERIFY that every hash_XXXX in body sections has a corresponding mapping in D: section. VERIFY that every single-character variable and every two-character self-attribute in body sections has a corresponding mapping in V: section.
+🚨 SELF-CHECK REQUIRED: After generating code, check all opening brackets/braces/parentheses have matching closing brackets/braces/parentheses. All quotes are properly paired. Validate that the output is proper CAI3-LITE syntax with NO Python mixed in. VERIFY that every hash_XXXX in body sections has a corresponding mapping in D: section. VERIFY that every local variable in body sections has a corresponding mapping in V: section. VERIFY that every self-attribute in the body sections has corresponding mapping in S: section.
 
 TASK: {task}
 
@@ -618,17 +618,24 @@ B#a1:# Optimized validation logic here
         return mappings
     
     def _validate_constraints(self, cai3_output: str, cai3_full: CAI3Full, 
-                            mappings: Dict[str, str]) -> CAI3ValidationResult:
+                            mappings: Dict[str, str], cai3_map: Optional[Any] = None) -> CAI3ValidationResult:
         """
         Validate CAI3 output against constraints and return detailed results.
         
         This is the core validation logic that checks for constraint violations.
+        
+        Args:
+            cai3_output: The CAI3-LITE output to validate
+            cai3_full: Full CAI3 structure with constraints
+            mappings: Extracted mappings from Claude's response
+            cai3_map: Optional CAI3Map with compression mappings for validation pool
         """
         self.logger.info("🔍 STARTING CONSTRAINT VALIDATION")
         self.logger.info(f"📊 Input metrics:")
         self.logger.info(f"  - CAI3 output: {len(cai3_output)} chars")
         self.logger.info(f"  - Mappings: {len(mappings)} items")
         self.logger.info(f"  - Has CAI3Full: {cai3_full is not None}")
+        self.logger.info(f"  - Has CAI3Map: {cai3_map is not None}")
         
         violations = []
         
@@ -673,9 +680,15 @@ B#a1:# Optimized validation logic here
         
         # 7. Validate V: section variable mappings (if present)
         self.logger.info("🔤 Validating V: section variable mappings...")
-        v_section_violations = self._validate_v_section_constraints(cai3_output)
+        v_section_violations = self._validate_v_section_constraints(cai3_output, cai3_full, cai3_map)
         violations.extend(v_section_violations)
         self.logger.info(f"  Result: {len(v_section_violations)} V: section violations")
+        
+        # 7.5 Validate S: section self-attributed variable mappings (NEW)
+        self.logger.info("🔑 Validating S: section self-attributed variable mappings...")
+        s_section_violations = self._validate_s_section_constraints(cai3_output, cai3_full, cai3_map)
+        violations.extend(s_section_violations)
+        self.logger.info(f"  Result: {len(s_section_violations)} S: section violations")
         
         # Method name mappings validation removed - not necessary as long as parameter variables are in V: section
         
@@ -1217,8 +1230,8 @@ B#a1:# Optimized validation logic here
         """Validate that only allowed CAI3-LITE section identifiers are used."""
         violations = []
         
-        # Define valid CAI3-LITE section identifiers - include R: for raw data and V: for variable mappings
-        valid_sections = {'#C3L', 'I:', 'D:', 'V:', 'X:', 'P:', 'T:', 'B#', 'R:', '---'}
+        # Define valid CAI3-LITE section identifiers - include S: for self-attrs, V: for variables, R: for raw data
+        valid_sections = {'#C3L', 'I:', 'D:', 'S:', 'V:', 'X:', 'P:', 'T:', 'B#', 'R:', '---'}
         
         lines = cai3_output.split('\n')
         for line_num, line in enumerate(lines, 1):
@@ -1246,9 +1259,63 @@ B#a1:# Optimized validation logic here
         
         return violations
     
-    def _validate_v_section_constraints(self, cai3_output: str) -> List[ConstraintViolation]:
-        """Validate V: section variable mappings - ensure ALL single-letter variables in body sections have mappings in V: section."""
+    def _validate_v_section_constraints(self, cai3_output: str, cai3_full: CAI3Full = None, cai3_map: Optional[Any] = None) -> List[ConstraintViolation]:
+        """
+        Validate V: section variable mappings - ensure ALL single-letter variables in body sections have mappings.
+        
+        IMPORTANT: This validation EXCLUDES self-attributed variables (s.*, se.*) which should be in S: section.
+        
+        Args:
+            cai3_output: The CAI3-LITE output to validate
+            cai3_full: Full CAI3 structure (optional)
+            cai3_map: CAI3Map with compression mappings for validation pool (optional)
+        """
         violations = []
+        
+        # Extract existing local variable compressions from original CAI3Full (if available)
+        existing_local_compressions = set()
+        
+        # PRIORITY: Use cai3_map directly if provided
+        if cai3_map and hasattr(cai3_map, 'name_map') and cai3_map.name_map:
+            self.logger.info("� Using CAI3Map for validation pool (direct mapping)...")
+            # Add all compressions to the validation pool - they can all be reused as local variables
+            for compressed_name in cai3_map.name_map.keys():
+                existing_local_compressions.add(compressed_name)
+            self.logger.info(f"✅ Added {len(cai3_map.name_map)} compressions from CAI3Map to V: validation pool")
+            
+            # Log specific mappings for debugging
+            if 'af' in cai3_map.name_map:
+                self.logger.info(f"   ✓ Including 'af' ({cai3_map.name_map['af']}) in validation pool")
+        
+        # Fallback: Extract from CAI3Full nodes if cai3_map not provided
+        if not existing_local_compressions and cai3_full and hasattr(cai3_full, 'nodes'):
+            self.logger.info("📦 Fallback: Extracting from CAI3Full nodes...")
+            for node in cai3_full.nodes:
+                if hasattr(node, 'metadata') and isinstance(node.metadata, dict):
+                    if 'local_compressions' in node.metadata:
+                        local_map = node.metadata['local_compressions']
+                        for orig_var, compressed_var in local_map.items():
+                            existing_local_compressions.add(compressed_var)
+                            self.logger.debug(f"  Found existing local compression: {compressed_var} → {orig_var}")
+        
+        if existing_local_compressions:
+            self.logger.info(f"📥 Total existing compressions available for V: validation: {len(existing_local_compressions)}")
+        else:
+            self.logger.warning("⚠️ No CAI3Map or CAI3Full provided - validation pool is empty!")
+        
+        # Extract S: section variables to exclude from V: section validation
+        s_section_vars = set()
+        s_section_match = re.search(r'S:([^\n]*)', cai3_output)
+        if s_section_match:
+            s_content = s_section_match.group(1)
+            # Extract the self identifier (se, s, etc.) from S: section
+            self_identifiers = re.findall(r'\b([a-z]{1,2})=self\b', s_content)
+            s_section_vars.update(self_identifiers)
+            # Also extract attribute abbreviations from S: section
+            attr_mappings = re.findall(r'\b([a-z]{1,3})=', s_content)
+            s_section_vars.update(attr_mappings)
+        
+        self.logger.info(f"🔑 S: section variables to exclude from V: validation: {sorted(s_section_vars)}")
         
         # Extract single-letter variable references from body sections
         body_variable_refs = set()
@@ -1268,6 +1335,10 @@ B#a1:# Optimized validation logic here
             var_matches.extend(re.findall(r'if\s+([a-z])\b', body_content))
             
             for var_letter in var_matches:
+                # CRITICAL: Skip if this variable is in S: section (self-attributed)
+                if var_letter in s_section_vars:
+                    continue
+                    
                 # Filter out obvious non-variables (reserved words, etc.)
                 if var_letter not in ['f', 'r', 'x', 'y', 'z'] and len(var_letter) == 1:
                     # CRITICAL FIX: Filter out compressed self.attribute patterns and method calls
@@ -1275,7 +1346,7 @@ B#a1:# Optimized validation logic here
                     if not self._is_compressed_attribute_reference(var_letter, body_content):
                         body_variable_refs.add(var_letter)
         
-        self.logger.info(f"🔍 Found {len(body_variable_refs)} unique single-letter variables in body sections: {sorted(body_variable_refs)}")
+        self.logger.info(f"🔍 Found {len(body_variable_refs)} unique single-letter variables in body sections (excluding S: section vars): {sorted(body_variable_refs)}")
         
         # Extract variable mappings from V: section
         v_section_variables = set()
@@ -1289,22 +1360,32 @@ B#a1:# Optimized validation logic here
         
         self.logger.info(f"🗺️ Found {len(v_section_variables)} variable mappings in V: section: {sorted(v_section_variables)}")
         
-        # Find variable references that are missing from V: section
-        missing_variables = body_variable_refs - v_section_variables
+                # Combine V: section mappings with existing local compressions from original CAI3
+        all_valid_variables = v_section_variables | existing_local_compressions
+        self.logger.info(f"✅ Total valid variable mappings (V: section + existing): {len(all_valid_variables)}: {sorted(all_valid_variables)}")
+        
+        # Find variable references that are missing from BOTH V: section AND original compression
+        missing_variables = body_variable_refs - all_valid_variables
         
         if missing_variables:
-            self.logger.error(f"❌ CRITICAL: {len(missing_variables)} single-letter variables missing from V: section")
+            self.logger.error(f"❌ CRITICAL: {len(missing_variables)} NET NEW single-letter variables missing from BOTH V: section AND original compression")
+            self.logger.error(f"   These are new variables not in original CAI3: {sorted(missing_variables)}")
             for missing_var in sorted(missing_variables):
                 violations.append(ConstraintViolation(
                     violation_type="missing_variable_mapping",
-                    description=f"Single-letter variable '{missing_var}' is used in body sections but not defined in V: section",
-                    location=f"Missing from V: section: {missing_var}",
-                    suggested_fix=f"Add '{missing_var}=original_variable_name' to the V: section",
+                    description=f"NET NEW single-letter variable '{missing_var}' is used in body sections but not defined in V: section OR original CAI3 compression",
+                    location=f"Missing from V: section and original compression: {missing_var}",
+                    suggested_fix=f"Add '{missing_var}=original_variable_name' to the V: section (this is a new variable not in original code)",
                     severity="critical"
                 ))
         else:
-            self.logger.info(f"✅ All {len(body_variable_refs)} single-letter variables have mappings in V: section")
-        
+            if body_variable_refs:
+                existing_count = len(body_variable_refs & existing_local_compressions)
+                new_count = len(body_variable_refs & v_section_variables)
+                self.logger.info(f"✅ All {len(body_variable_refs)} single-letter variables have mappings:")
+                self.logger.info(f"   - {existing_count} from original CAI3 compression")
+                self.logger.info(f"   - {new_count} from V: section (new variables)")
+                
         # Validate V: section format (should be V:var=value,var2=value2,...)
         if v_section_match:
             v_content = v_section_match.group(1).strip()
@@ -1313,7 +1394,7 @@ B#a1:# Optimized validation logic here
                     violation_type="invalid_v_section_format",
                     description=f"V: section format is invalid. Expected format: 'V:var=value,var2=value2'",
                     location=f"V: section content: {v_content}",
-                    suggested_fix="Use format V:s=self,i=index,v=value (comma-separated, single letters only)",
+                    suggested_fix="Use format V:s=size,i=index,v=value (comma-separated, single letters only)",
                     severity="warning"
                 ))
         
@@ -1323,72 +1404,162 @@ B#a1:# Optimized validation logic here
             self.logger.warning(f"⚠️ Found {len(orphaned_variables)} variable mappings in V: section not used in body sections: {sorted(orphaned_variables)}")
             # This is just a warning, not an error - extra mappings are OK for future use
         
-        # NEW: Validate self-attribute patterns specifically
-        self_attribute_violations = self._validate_self_attribute_completeness(cai3_output)
-        violations.extend(self_attribute_violations)
+        return violations
+    
+    def _validate_s_section_constraints(self, cai3_output: str, cai3_full: CAI3Full = None, cai3_map: Optional[Any] = None) -> List[ConstraintViolation]:
+        """Validate S: section self-attributed variable mappings - ensure ALL self.* patterns have mappings.
+        
+        Args:
+            cai3_output: The CAI3-LITE output to validate
+            cai3_full: Full CAI3 structure (optional)
+            cai3_map: CAI3Map with compression mappings for validation pool (optional)
+        """
+        violations = []
+        
+        # Extract existing attribute compressions from original CAI3Map (if available)
+        existing_attr_compressions = set()
+        
+        # PRIORITY: Use cai3_map directly if provided
+        if cai3_map and hasattr(cai3_map, 'name_map') and cai3_map.name_map:
+            self.logger.info("� Using CAI3Map for S: section validation pool (direct mapping)...")
+            # Add all compressions to the validation pool - they can all be reused as self-attributes
+            # For example: 'af' can be both a global method compression AND self.af attribute
+            for compressed_name, original_name in cai3_map.name_map.items():
+                existing_attr_compressions.add(compressed_name)
+            self.logger.info(f"✅ Added {len(cai3_map.name_map)} compressions from CAI3Map to S: validation pool")
+            
+            # Log specific mappings for debugging
+            if 'af' in cai3_map.name_map:
+                self.logger.info(f"   ✓ Including 'af' ({cai3_map.name_map['af']}) - can be used as s.af (self.analyze_file)")
+        
+        # Fallback: Extract from CAI3Full nodes if cai3_map not provided
+        if not existing_attr_compressions and cai3_full:
+            self.logger.info("📦 Fallback: Extracting from CAI3Full nodes...")
+            if hasattr(cai3_full, 'nodes'):
+                for node in cai3_full.nodes:
+                    if hasattr(node, 'metadata') and isinstance(node.metadata, dict):
+                        if 'attr_compressions' in node.metadata:
+                            attr_map = node.metadata['attr_compressions']
+                            for orig_attr, compressed_attr in attr_map.items():
+                                existing_attr_compressions.add(compressed_attr)
+                                self.logger.debug(f"  Found existing mapping: {compressed_attr} → {orig_attr}")
+        
+        if existing_attr_compressions:
+            self.logger.info(f"📥 Total existing compressions available for S: validation: {len(existing_attr_compressions)}")
+        else:
+            self.logger.warning("⚠️ No CAI3Map or CAI3Full provided - validation pool is empty!")
+        
+        # Extract self-attribute references from body sections
+        self_attr_refs = set()
+        body_sections = re.findall(r'B#[^:]*:(.*?)(?=\nB#|\n[A-Z]:|$)', cai3_output, re.DOTALL)
+        
+        for body_content in body_sections:
+            # Find compressed self.attribute patterns (se.attr or s.attr)
+            # Match patterns like: s.na, se.th, s.co, etc.
+            attr_matches = re.findall(r'\b(?:s|se)\.([a-z]{1,3})\b', body_content)
+            for attr_name in attr_matches:
+                self_attr_refs.add(attr_name)
+        
+        self.logger.info(f"🔍 Found {len(self_attr_refs)} unique self-attributed variables in body sections: {sorted(self_attr_refs)}")
+        
+        # Extract self-attribute mappings from S: section
+        s_section_attrs = set()
+        s_section_match = re.search(r'S:([^\n]*)', cai3_output)
+        if s_section_match:
+            s_content = s_section_match.group(1)
+            # Find attribute mappings in S: section (attr=value format)
+            attr_mappings = re.findall(r'\b([a-z]{1,3})=', s_content)
+            for attr_name in attr_mappings:
+                s_section_attrs.add(attr_name)
+            
+            # Validate that 'se' or 's' is mapped to 'self'
+            if not re.search(r'\b(?:se|s)=self\b', s_content):
+                violations.append(ConstraintViolation(
+                    violation_type="missing_self_identifier",
+                    description="S: section missing 'se=self' or 's=self' mapping",
+                    location="S: section",
+                    suggested_fix="Add 'se=self' or 's=self' to the S: section",
+                    severity="critical"
+                ))
+        
+        self.logger.info(f"🗺️ Found {len(s_section_attrs)} self-attributed variable mappings in S: section: {sorted(s_section_attrs)}")
+        
+        # Combine S: section mappings with existing attribute compressions from original CAI3
+        all_valid_attrs = s_section_attrs | existing_attr_compressions
+        self.logger.info(f"✅ Total valid attribute mappings (S: section + existing): {len(all_valid_attrs)}: {sorted(all_valid_attrs)}")
+        
+        # Find self-attribute references that are missing from BOTH S: section AND original compression
+        missing_attrs = self_attr_refs - all_valid_attrs
+        
+        if missing_attrs:
+            # Check if these "missing" attributes are actually in the V: section (misplaced)
+            # Extract V: section to see if they're there
+            v_section_match = re.search(r'V:([^\n]*)', cai3_output)
+            v_section_vars = set()
+            if v_section_match:
+                v_content = v_section_match.group(1)
+                v_mappings = re.findall(r'\b([a-z]{1,3})=', v_content)
+                v_section_vars = set(v_mappings)
+            
+            # Categorize missing attributes
+            misplaced_in_v = missing_attrs & v_section_vars  # Found in V: but should be in S:
+            truly_missing = missing_attrs - v_section_vars   # Not found anywhere
+            
+            if truly_missing:
+                self.logger.error(f"❌ CRITICAL: {len(truly_missing)} NET NEW self-attributed variables missing from BOTH S: section AND original compression")
+                self.logger.error(f"   These are new variables not in original CAI3: {sorted(truly_missing)}")
+                for missing_attr in sorted(truly_missing):
+                    violations.append(ConstraintViolation(
+                        violation_type="missing_self_attr_mapping",
+                        description=f"NET NEW self-attributed variable '{missing_attr}' is used in body sections but not defined in S: section OR original CAI3 compression",
+                        location=f"Missing from S: section and original compression: {missing_attr}",
+                        suggested_fix=f"Add '{missing_attr}=original_attribute_name' to the S: section (this is a new variable not in original code)",
+                        severity="critical"
+                    ))
+            
+            if misplaced_in_v:
+                self.logger.warning(f"⚠️ WARNING: {len(misplaced_in_v)} self-attributed variables found in V: section but should be in S: section")
+                self.logger.warning(f"   Misplaced variables (have mappings but in wrong section): {sorted(misplaced_in_v)}")
+                for misplaced_attr in sorted(misplaced_in_v):
+                    violations.append(ConstraintViolation(
+                        violation_type="misplaced_self_attr_in_v_section",
+                        description=f"Self-attributed variable '{misplaced_attr}' is used as s.{misplaced_attr} but defined in V: section instead of S: section",
+                        location=f"Found in V: section but should be in S: section: {misplaced_attr}",
+                        suggested_fix=f"Move '{misplaced_attr}' from V: section to S: section (it's used with self.{misplaced_attr} pattern)",
+                        severity="warning"  # Changed from critical to warning since mapping exists
+                    ))
+        else:
+            if self_attr_refs:
+                existing_count = len(self_attr_refs & existing_attr_compressions)
+                new_count = len(self_attr_refs & s_section_attrs)
+                self.logger.info(f"✅ All {len(self_attr_refs)} self-attributed variables have mappings:")
+                self.logger.info(f"   - {existing_count} from original CAI3 compression")
+                self.logger.info(f"   - {new_count} from S: section (new variables)")
+        
+        # Validate S: section format (should be S:se=self,attr=value,attr2=value2,...)
+        if s_section_match:
+            s_content = s_section_match.group(1).strip()
+            if s_content and not re.match(r'^[a-z]{1,3}=[^,]+(?:,[a-z]{1,3}=[^,]+)*$', s_content):
+                violations.append(ConstraintViolation(
+                    violation_type="invalid_s_section_format",
+                    description=f"S: section format is invalid. Expected format: 'S:se=self,na=name,th=threshold'",
+                    location=f"S: section content: {s_content}",
+                    suggested_fix="Use format S:se=self,na=name,th=threshold (comma-separated, short abbreviations)",
+                    severity="warning"
+                ))
         
         return violations
     
     def _validate_self_attribute_completeness(self, cai3_output: str) -> List[ConstraintViolation]:
         """
-        Validate that self-attribute patterns (s.na, s.th, etc.) have complete mappings in V: section.
+        DEPRECATED: This method is no longer used as self-attributes are now validated via S: section.
+        Self-attributed variables should now be in S: section, not V: section.
         
-        This ensures that patterns like s.na, s.th, s.co are properly mapped to self.name, self.threshold, self.features, etc.
+        Kept for backward compatibility but returns empty violations list.
         """
         violations = []
         
-        # Extract self-attribute patterns from body sections
-        self_attribute_patterns = set()
-        body_sections = re.findall(r'B#[^:]*:(.*?)(?=\nB#|\n[A-Z]:|$)', cai3_output, re.DOTALL)
-        
-        for body_content in body_sections:
-            # Find s.attribute patterns but EXCLUDE method calls (s.method())
-            # Use negative lookahead to exclude patterns followed by opening parenthesis
-            attr_matches = re.findall(r'\bs\.([a-z]{2,})(?!\s*\()', body_content)
-            for attr_name in attr_matches:
-                self_attribute_patterns.add(attr_name)
-        
-        self.logger.info(f"🔍 Found {len(self_attribute_patterns)} self-attribute patterns: {sorted(self_attribute_patterns)}")
-        
-        if not self_attribute_patterns:
-            return violations  # No self-attributes used, no validation needed
-        
-        # Extract V: section mappings
-        v_section_attrs = set()
-        v_section_match = re.search(r'V:([^\n]*)', cai3_output)
-        if v_section_match:
-            v_content = v_section_match.group(1)
-            # Check for s=self mapping
-            has_self_mapping = re.search(r'\bs=self\b', v_content)
-            if not has_self_mapping:
-                violations.append(ConstraintViolation(
-                    violation_type="missing_self_mapping",
-                    description="V: section missing s=self mapping but s.attribute patterns are used",
-                    location="V: section",
-                    suggested_fix="Add 's=self' to V: section",
-                    severity="critical"
-                ))
-            
-            # Find attribute mappings (na=name, th=threshold, etc.)
-            attr_mappings = re.findall(r'\b([a-z][a-z0-9_]*)=([^,\s]+)', v_content)
-            for attr_name, _ in attr_mappings:
-                v_section_attrs.add(attr_name)
-        
-        # Find missing attribute mappings
-        missing_attrs = self_attribute_patterns - v_section_attrs
-        
-        if missing_attrs:
-            self.logger.error(f"❌ CRITICAL: {len(missing_attrs)} self-attribute patterns missing from V: section")
-            for missing_attr in sorted(missing_attrs):
-                violations.append(ConstraintViolation(
-                    violation_type="missing_self_attribute_mapping",
-                    description=f"Self-attribute 's.{missing_attr}' is used but '{missing_attr}' not defined in V: section",
-                    location=f"Missing from V: section: {missing_attr}",
-                    suggested_fix=f"Add '{missing_attr}=original_attribute_name' to V: section",
-                    severity="critical"
-                ))
-        else:
-            self.logger.info(f"✅ All {len(self_attribute_patterns)} self-attribute patterns have mappings in V: section")
+        self.logger.info("ℹ️ Self-attribute validation is now handled by S: section validation")
         
         return violations
     

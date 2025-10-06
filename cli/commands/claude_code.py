@@ -319,7 +319,22 @@ OUTPUT RULE: Generate EXACTLY ONE ```C3L code block with fixes applied. NO ANNOT
                         console.print(f"[dim]🔧 Using constraint-based CAI3 processing[/dim]")
                     # Extract task from the original prompt and pass CAI3 content
                     user_task = prompt  # Original user task
-                    cai3_output, mappings = proxy.process_with_constraints(compressed_prompt, user_task)
+                    
+                    # Get cai3_full and cai3_map from metadata (direct data flow)
+                    cai3_full = metadata.get('cai3_full')
+                    cai3_map = metadata.get('cai3_map')
+                    
+                    if verbose and cai3_full:
+                        console.print(f"[dim]✅ Using cai3_full from compression (direct data flow)[/dim]")
+                    if verbose and cai3_map:
+                        console.print(f"[dim]✅ Using cai3_map from compression (direct data flow)[/dim]")
+                    
+                    cai3_output, mappings = proxy.process_with_constraints(
+                        compressed_prompt, 
+                        user_task,
+                        cai3_full=cai3_full,
+                        cai3_map=cai3_map
+                    )
                     result = cai3_output
                     metadata['constraint_processed'] = True
                     metadata['constraint_mappings'] = mappings

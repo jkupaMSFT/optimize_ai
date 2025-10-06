@@ -1007,7 +1007,7 @@ class FLOWCompiler:
                         return pool_id  # Return pN directly
                     
                     # Generate hash reference for long strings
-                    hash_ref = f"hash_{self._stable_hash(node.value, 10)}"
+                    hash_ref = f"hash_{self._stable_hash(node.value, 4)}"
                     self.hash_to_value[hash_ref] = {
                         'value': node.value,
                         'type': 'string',
@@ -3872,11 +3872,61 @@ class FLOWCompiler:
         
         return ""
 
+    def _get_smart_fallback(self, name: str, locals_map: Dict[str, str]) -> str:
+        """
+        Generate a smart fallback compression that avoids reserved chars and collisions.
+        Priority: first char → second char → first available from pool → hash-based
+        """
+        # Collect already-used compressed names
+        used_names = set(locals_map.values())
+        
+        # Reserved characters that should never be used
+        reserved_chars = {'g', 'p', 's'}
+        
+        # Available character pool (excluding reserved)
+        available_pool = 'abcdefhijklmnoqrtuvwxyz'
+        
+        # Try first character if not reserved and not used
+        first_char = name[0].lower()
+        if first_char not in reserved_chars and first_char not in used_names:
+            return first_char
+        
+        # Try second character if available
+        if len(name) > 1:
+            second_char = name[1].lower()
+            if second_char not in reserved_chars and second_char not in used_names:
+                return second_char
+        
+        # Try first two characters
+        if len(name) > 1:
+            two_char = name[:2].lower()
+            if not two_char.startswith(tuple(reserved_chars)) and two_char not in used_names:
+                return two_char
+        
+        # Find first available character from pool
+        for char in available_pool:
+            if char not in used_names:
+                return char
+        
+        # Find first available two-char combination
+        for c1 in available_pool:
+            for c2 in available_pool:
+                two_char = c1 + c2
+                if two_char not in used_names:
+                    return two_char
+        
+        # Ultimate fallback: use hash-based name
+        hash_suffix = abs(hash(name)) % 1000
+        return f"v{hash_suffix}"
+    
     def _compress_target(self, node: ast.AST, locals_map: Dict[str, str], 
                         attrs_map: Dict[str, str]) -> str:
         """Compress assignment target with local and attribute mappings."""
         if isinstance(node, ast.Name):
-            return locals_map.get(node.id, node.id[:1] if len(node.id) > 2 else node.id)
+            # Use mapping if available, otherwise smart fallback
+            if node.id in locals_map:
+                return locals_map[node.id]
+            return self._get_smart_fallback(node.id, locals_map)
         elif isinstance(node, ast.Attribute):
             if isinstance(node.value, ast.Name) and node.value.id == 'self':
                 # Compress self.attr to s.x where x is compressed attr name
@@ -3919,7 +3969,7 @@ class FLOWCompiler:
                     return f"'{node.value}'"
                 
                 # Generate hash reference but store properly
-                hash_ref = f"hash_{self._stable_hash(node.value, 10)}"  # Use hash_ prefix instead of #
+                hash_ref = f"hash_{self._stable_hash(node.value, 4)}"  # Use hash_ prefix instead of #
                 self.hash_to_value[hash_ref] = {
                     'value': node.value,
                     'type': 'string',
@@ -3938,8 +3988,11 @@ class FLOWCompiler:
             elif name == 'None':
                 return 'N'
             
-            # CRITICAL FIX: Validate compressed names
-            compressed = locals_map.get(name, name[:1] if len(name) > 2 else name)
+            # Use mapping if available, otherwise smart fallback
+            if name in locals_map:
+                compressed = locals_map[name]
+            else:
+                compressed = self._get_smart_fallback(name, locals_map)
             
             # Filter out invalid characters and keywords
             if compressed in self.PYTHON_KEYWORDS:

@@ -1456,7 +1456,9 @@ B#a1:# Optimized validation logic here
         for body_content in body_sections:
             # Find compressed self.attribute patterns (se.attr or s.attr)
             # Match patterns like: s.na, se.th, s.co, etc.
-            attr_matches = re.findall(r'\b(?:s|se)\.([a-z]{1,3})\b', body_content)
+            # IMPORTANT: Exclude method calls like s.an() or s.es() - these are not attributes
+            # Pattern explanation: s.attr but NOT followed by ( to avoid method calls
+            attr_matches = re.findall(r'\b(?:s|se)\.([a-z]{1,3})\b(?!\()', body_content)
             for attr_name in attr_matches:
                 self_attr_refs.add(attr_name)
         

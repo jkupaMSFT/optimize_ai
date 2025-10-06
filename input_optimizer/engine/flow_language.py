@@ -147,6 +147,9 @@ class FLOWCompiler:
         self.constant_pool = {}  # value -> pool_id
         self.pool_counter = 0
         
+        # Track which method abbreviations are actually used during compression
+        self.used_method_abbreviations = set()
+        
         # Initialize logger
         self.logger = logging.getLogger(__name__)
         
@@ -3931,9 +3934,15 @@ class FLOWCompiler:
             if isinstance(node.value, ast.Name) and node.value.id == 'self':
                 # Compress self.attr to s.x where x is compressed attr name
                 compressed_attr = attrs_map.get(node.attr, node.attr[:2])
+                # Track if this is a method abbreviation from METHOD_ABBREVIATIONS
+                if compressed_attr in self.METHOD_ABBREVIATIONS:
+                    self.used_method_abbreviations.add(compressed_attr)
                 return f"s.{compressed_attr}"
             obj = self._compress_value(node.value, locals_map, attrs_map)
             attr = attrs_map.get(node.attr, node.attr[:2])
+            # Track if this is a method abbreviation from METHOD_ABBREVIATIONS
+            if attr in self.METHOD_ABBREVIATIONS:
+                self.used_method_abbreviations.add(attr)
             return f"{obj}.{attr}"
         elif isinstance(node, ast.Subscript):
             obj = self._compress_value(node.value, locals_map, attrs_map)
@@ -4008,6 +4017,11 @@ class FLOWCompiler:
         elif isinstance(node, ast.Attribute):
             obj = self._compress_value(node.value, locals_map, attrs_map)
             attr = attrs_map.get(node.attr, node.attr[:2])
+            
+            # Track if this is a method abbreviation from METHOD_ABBREVIATIONS
+            if attr in self.METHOD_ABBREVIATIONS:
+                self.used_method_abbreviations.add(attr)
+            
             # Check for chain alias
             full_chain = f"{obj}.{attr}"
             alias = self._maybe_alias(full_chain)
@@ -4073,6 +4087,10 @@ class FLOWCompiler:
                     pass  # Fall through to placeholder
         
         return "?"
+    
+    def get_used_method_abbreviations(self) -> Dict[str, str]:
+        """Return dictionary of method abbreviations that were actually used during compression."""
+        return {abbr: self.METHOD_ABBREVIATIONS[abbr] for abbr in self.used_method_abbreviations}
 
     def _expand_name(self, name: str) -> str:
         """Expand compressed names using all available mappings."""
@@ -4104,6 +4122,10 @@ class FLOWCompiler:
         if isinstance(node.func, ast.Attribute):
             obj = self._compress_value(node.func.value, locals_map, attrs_map)
             method = attrs_map.get(node.func.attr, node.func.attr[:2])
+            
+            # Track if this is a method abbreviation from METHOD_ABBREVIATIONS
+            if method in self.METHOD_ABBREVIATIONS:
+                self.used_method_abbreviations.add(method)
             
             # Special compact patterns
             if method == 'append' and len(node.args) == 1:

@@ -250,6 +250,16 @@ class CAI3WaterfallEnhancement:
             
             cai3_lite = self._create_cai3_lite_dense_ultra(cai3_full, cai3_map, edit_scope_cids, cid_index, minified_source, tree)
             
+            # Update cai3_map with method abbreviations that were used during compression
+            if hasattr(self, 'flow_compiler') and hasattr(self.flow_compiler, 'get_used_method_abbreviations'):
+                used_method_abbrs = self.flow_compiler.get_used_method_abbreviations()
+                if used_method_abbrs:
+                    self.logger.info(f"🔧 Updating CAI3 map with {len(used_method_abbrs)} method abbreviations used during compression")
+                    for compressed, original in used_method_abbrs.items():
+                        cai3_map.name_map[compressed] = original
+                        cai3_map.reverse_name_map[original] = compressed
+                        self.logger.debug(f"  Added: {compressed} -> {original}")
+            
             # Store FULL and MAP locally
             if source_path:
                 self.cai3_cache.store_full(source_path, cai3_full)
@@ -1428,10 +1438,36 @@ class CAI3WaterfallEnhancement:
                     children_map[node.parent_cid] = []
                 children_map[node.parent_cid].append(node.cid)
         
+        # Add method abbreviations that were actually used during compression
+        method_abbr_count = 0
+        if hasattr(self, 'flow_compiler') and hasattr(self.flow_compiler, 'get_used_method_abbreviations'):
+            used_method_abbrs = self.flow_compiler.get_used_method_abbreviations()
+            for compressed, original in used_method_abbrs.items():
+                # Store as global method name mappings (no CID prefix)
+                name_map[compressed] = original
+                reverse_name_map[original] = compressed
+                method_abbr_count += 1
+                self.logger.debug(f"  Method abbreviation: {compressed} -> {original}")
+        
+        # Add dynamically compressed self-method names to map
+        # These are method names that were compressed via _compress_name_aggressive
+        # and may appear as s.XX() calls in method bodies
+        self_method_compression_count = 0
+        for node in cai3_full.nodes:
+            if node.type == NodeType.METHOD and node.short_name != node.name:
+                # Add the compression mapping so s.XX() calls can be resolved
+                # Store both as global mapping (for validation) and with self prefix for S: section
+                name_map[node.short_name] = node.name
+                reverse_name_map[node.name] = node.short_name
+                self_method_compression_count += 1
+                self.logger.debug(f"  Self-method compression: {node.short_name} -> {node.name}")
+        
         # Log summary statistics
         self.logger.info(f"📊 CAI3 Map created: {global_name_count} global names, "
                         f"{local_compression_count} local compressions, "
-                        f"{attr_compression_count} attribute compressions")
+                        f"{attr_compression_count} attribute compressions, "
+                        f"{method_abbr_count} method abbreviations, "
+                        f"{self_method_compression_count} self-method compressions")
         self.logger.info(f"📊 Total mappings: {len(name_map)} (name_map), {len(reverse_name_map)} (reverse)")
         
         return CAI3Map(
@@ -1563,7 +1599,7 @@ class CAI3WaterfallEnhancement:
         
         if edit_scope_cids:
             # Create enhanced FLOW compiler with all optimizations
-            flow_compiler = FLOWCompiler(
+            self.flow_compiler = FLOWCompiler(
                 name_map=cai3_map.name_map,
                 dense_mode=True,
                 pool_constants=True,
@@ -1576,9 +1612,9 @@ class CAI3WaterfallEnhancement:
             
             # Set pools and aliases
             if 'pool_map' in cai3_full.compression_stats:
-                flow_compiler.set_pool_map(cai3_full.compression_stats['pool_map'])
+                self.flow_compiler.set_pool_map(cai3_full.compression_stats['pool_map'])
             if 'chain_aliases' in cai3_full.compression_stats:
-                flow_compiler.set_chain_aliases(profitable_aliases if profitable_aliases else {})
+                self.flow_compiler.set_chain_aliases(profitable_aliases if profitable_aliases else {})
             
             nodes_by_cid = {node.cid: node for node in cai3_full.nodes}
             
@@ -1604,7 +1640,7 @@ class CAI3WaterfallEnhancement:
                     # Generate ultra-dense single-line body
                     try:
                         # Use the new ultra-dense body generator
-                        ultra_dense_body = flow_compiler.generate_ultra_dense_body(
+                        ultra_dense_body = self.flow_compiler.generate_ultra_dense_body(
                             target_ast_node, cid, local_compressions, attr_compressions
                         )
                         
@@ -1618,40 +1654,40 @@ class CAI3WaterfallEnhancement:
                         self.logger.warning(f"Failed to create ultra-dense body for {cid}: {e}")
             
             # After processing all methods, transfer accumulated RAW blocks from flow compiler
-            if hasattr(flow_compiler, 'raw_blocks') and flow_compiler.raw_blocks:
+            if hasattr(self.flow_compiler, 'raw_blocks') and self.flow_compiler.raw_blocks:
                 if not hasattr(cai3_full, 'raw_blocks'):
                     cai3_full.raw_blocks = {}
-                cai3_full.raw_blocks.update(flow_compiler.raw_blocks)
-                self.logger.debug(f"Transferred {len(flow_compiler.raw_blocks)} RAW blocks from method compilation")
+                cai3_full.raw_blocks.update(self.flow_compiler.raw_blocks)
+                self.logger.debug(f"Transferred {len(self.flow_compiler.raw_blocks)} RAW blocks from method compilation")
             
-            if hasattr(flow_compiler, 'unsupported_nodes') and flow_compiler.unsupported_nodes:
+            if hasattr(self.flow_compiler, 'unsupported_nodes') and self.flow_compiler.unsupported_nodes:
                 if not hasattr(cai3_full, 'unsupported_nodes'):
                     cai3_full.unsupported_nodes = set()
-                cai3_full.unsupported_nodes.update(flow_compiler.unsupported_nodes)
-                self.logger.debug(f"Tracked {len(flow_compiler.unsupported_nodes)} unsupported node types from method compilation")
+                cai3_full.unsupported_nodes.update(self.flow_compiler.unsupported_nodes)
+                self.logger.debug(f"Tracked {len(self.flow_compiler.unsupported_nodes)} unsupported node types from method compilation")
         
             # Transfer hash mappings from flow compiler to CAI3Full
-            if hasattr(flow_compiler, 'hash_to_value') and flow_compiler.hash_to_value:
+            if hasattr(self.flow_compiler, 'hash_to_value') and self.flow_compiler.hash_to_value:
                 if not hasattr(cai3_full, 'hash_to_value') or cai3_full.hash_to_value is None:
                     cai3_full.hash_to_value = {}
                 
                 # Convert to legacy format for CAI3Full compatibility
-                legacy_mapping = flow_compiler.get_legacy_hash_mapping() if hasattr(flow_compiler, 'get_legacy_hash_mapping') else flow_compiler.hash_to_value
+                legacy_mapping = self.flow_compiler.get_legacy_hash_mapping() if hasattr(self.flow_compiler, 'get_legacy_hash_mapping') else self.flow_compiler.hash_to_value
                 cai3_full.hash_to_value.update(legacy_mapping)
                 self.logger.debug(f"Transferred {len(legacy_mapping)} hash mappings to CAI3Full")
             
             # Transfer RAW blocks and unsupported nodes from flow compiler
-            if hasattr(flow_compiler, 'raw_blocks') and flow_compiler.raw_blocks:
+            if hasattr(self.flow_compiler, 'raw_blocks') and self.flow_compiler.raw_blocks:
                 if not hasattr(cai3_full, 'raw_blocks'):
                     cai3_full.raw_blocks = {}
-                cai3_full.raw_blocks.update(flow_compiler.raw_blocks)
-                self.logger.debug(f"Transferred {len(flow_compiler.raw_blocks)} RAW blocks to CAI3Full")
+                cai3_full.raw_blocks.update(self.flow_compiler.raw_blocks)
+                self.logger.debug(f"Transferred {len(self.flow_compiler.raw_blocks)} RAW blocks to CAI3Full")
             
-            if hasattr(flow_compiler, 'unsupported_nodes') and flow_compiler.unsupported_nodes:
+            if hasattr(self.flow_compiler, 'unsupported_nodes') and self.flow_compiler.unsupported_nodes:
                 if not hasattr(cai3_full, 'unsupported_nodes'):
                     cai3_full.unsupported_nodes = set()
-                cai3_full.unsupported_nodes.update(flow_compiler.unsupported_nodes)
-                self.logger.debug(f"Tracked {len(flow_compiler.unsupported_nodes)} unsupported node types: {flow_compiler.unsupported_nodes}")
+                cai3_full.unsupported_nodes.update(self.flow_compiler.unsupported_nodes)
+                self.logger.debug(f"Tracked {len(self.flow_compiler.unsupported_nodes)} unsupported node types: {self.flow_compiler.unsupported_nodes}")
         
         # Filter pools to only referenced ones
         pool_section = None

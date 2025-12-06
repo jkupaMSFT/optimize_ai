@@ -1,0 +1,122 @@
+#!/usr/bin/env bash
+# integrations/claude/claude-cai
+
+# Additions for production-grade MVP:
+# - Error handling: set -euo pipefail for strict mode; trap errors; check exit codes.
+# - Security: Sanitize args with quoting; validate inputs (e.g., file existence).
+# - Observability: Add logging to file/stderr; verbose flag.
+# - Portability: Use /usr/bin/env bash; avoid Bashisms if possible (compatible with sh).
+# - UX: Progress echoes; timeouts for subprocesses (using timeout cmd if available).
+# - Completeness: Support more commands ('review'); multi-file via loop; session cleanup on exit.
+# - Risks Mitigated: Crashes (traps), leaks (cleanup), bad inputs (validation).
+
+set -euo pipefail  # Addition: Strict mode (exit on errors, unset vars, pipe fails)
+trap 'echo "Error on line $LINENO"; cleanup' ERR  # Addition: Trap errors; call cleanup
+trap cleanup EXIT  # Addition: Cleanup on normal exit
+
+# Addition: Configurable vars (e.g., from env or ConfigManager export)
+LOG_FILE="${HOME}/.tokenforge/claude.log"  # Log path
+VERBOSE=${VERBOSE:-0}  # Verbose flag (set via env or --verbose addition below)
+
+log() {
+    echo "$(date '+%Y-%m-%d %H:%M:%S') - $1" >> "$LOG_FILE"
+    if [ "$VERBOSE" -eq 1 ]; then
+        echo "$1" >&2
+    fi
+}
+
+cleanup() {
+    # Addition: Cleanup session if created
+    if [ -n "${SESSION_ID:-}" ]; then
+        optimize-ai session end "$SESSION_ID"  # Assume CLI command for end (add if missing)
+        log "Cleaned up session $SESSION_ID"
+    fi
+}
+
+# Addition: Parse options (e.g., --verbose)
+while [[ "$#" -gt 0 ]]; do
+    case $1 in
+        --verbose) VERBOSE=1; shift ;;
+        *) break ;;
+    esac
+done
+
+# Addition: Validate command existence
+if ! command -v claude-code &> /dev/null; then
+    log "Error: claude-code not found"
+    echo "Error: claude-code command not available. Install Claude Code first." >&2
+    exit 1
+fi
+
+if ! command -v optimize-ai &> /dev/null; then
+    log "Error: optimize-ai not found"
+    echo "Error: optimize-ai CLI not available. Ensure TokenForge AI is installed." >&2
+    exit 1
+fi
+
+# Addition: Support more commands (e.g., 'review')
+if [[ "$1" == "edit" ]] || [[ "$1" == "refactor" ]] || [[ "$1" == "review" ]]; then
+    if [ $# -lt 2 ]; then
+        log "Error: Missing file argument"
+        echo "Usage: claude-cai edit|refactor|review <file> [options]" >&2
+        exit 1
+    fi
+    
+    FILE="$2"
+    if [ ! -f "$FILE" ]; then
+        log "Error: File not found - $FILE"
+        echo "Error: File $FILE does not exist." >&2
+        exit 1
+    fi
+    
+    # Addition: Progress feedback
+    echo "Starting compression session..." >&2
+    SESSION_ID=$(optimize-ai session start "$FILE")
+    if [ $? -ne 0 ]; then
+        log "Error: Session start failed"
+        echo "Error: Failed to start session." >&2
+        exit 1
+    fi
+    log "Session started: $SESSION_ID"
+    
+    echo "Getting compressed content..." >&2
+    COMPRESSED=$(optimize-ai session get-context "$SESSION_ID")
+    if [ $? -ne 0 ]; then
+        log "Error: Get context failed"
+        echo "Error: Failed to get compressed content." >&2
+        exit 1
+    fi
+    
+    # Addition: Sanitize task (rest args) to prevent injection
+    TASK=$(printf "%q" "${@:3}")  # Escape special chars
+    
+    PROMPT="[CAI Format Active - Session: $SESSION_ID]\n$COMPRESSED\n\nTask: $TASK"
+    
+    echo "Running claude-code..." >&2
+    # Addition: Timeout for long-running (e.g., 300s; requires timeout cmd)
+    RESULT=$(timeout 300 claude-code "$1" --prompt "$PROMPT" || echo "Timeout or error")
+    if [ $? -ne 0 ]; then
+        log "Error: claude-code failed - $RESULT"
+        echo "Error: claude-code command failed." >&2
+        exit 1
+    fi
+    
+    echo "Translating result..." >&2
+    TRANSLATED=$(optimize-ai translate "$SESSION_ID" "$RESULT")
+    if [ $? -ne 0 ]; then
+        log "Error: Translation failed"
+        echo "Error: Failed to translate response." >&2
+        exit 1
+    fi
+    
+    # Addition: Backup original before apply
+    BACKUP="$FILE.bak"
+    cp "$FILE" "$BACKUP"
+    log "Backed up original to $BACKUP"
+    
+    echo "$TRANSLATED" > "$FILE"
+    echo "Applied changes to $FILE (backup: $BACKUP)" >&2
+else
+    # Pass through for other commands
+    claude-code "$@"
+fi

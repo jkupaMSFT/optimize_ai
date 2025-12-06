@@ -5,6 +5,7 @@ import warnings
 import logging
 import time
 from typing import Union, Dict, Set, Any, Tuple, Optional, List, Callable
+from dataclasses import dataclass
 
 # Python version compatibility check
 if sys.version_info < (3, 8):
@@ -37,6 +38,13 @@ class CompressionDepth:
     CONSTANTS = 2   # + Constant folding
     VARIABLES = 3   # + Variable name shortening
     AGGRESSIVE = 4  # + All optimizations
+
+
+@dataclass
+class MinifyResult:
+    """Result of minification with per-CID variable mappings."""
+    code: str
+    per_cid_maps: Dict[str, Dict[str, str]]
 
 
 def minify_code(
@@ -285,6 +293,10 @@ class MinifyTransformer(ast.NodeTransformer):
         self.scope_stack: List[Set[str]] = []  # Track variable names in each scope
         self.module_names: Set[str] = set()  # Track imported module names
         
+        # CID tracking for per-CID variable mappings
+        self.current_cid = None
+        self.per_cid_maps: Dict[str, Dict[str, str]] = {}
+        
         # Get logger instance
         self.logger = get_logger()
         
@@ -316,7 +328,12 @@ class MinifyTransformer(ast.NodeTransformer):
             return original_name
             
         if original_name in self.var_mappings:
-            return self.var_mappings[original_name]
+            short_name = self.var_mappings[original_name]
+            # Record CID mapping if we're in a CID context
+            if self.current_cid:
+                cid_map = self.per_cid_maps[self.current_cid]
+                cid_map.setdefault(original_name, short_name)
+            return short_name
         
         # Check if name exists in any scope
         all_scope_names = set()
@@ -334,6 +351,10 @@ class MinifyTransformer(ast.NodeTransformer):
                     short_name not in all_scope_names):
                     self.var_mappings[original_name] = short_name
                     self.used_names.add(short_name)
+                    # Record CID mapping if we're in a CID context
+                    if self.current_cid:
+                        cid_map = self.per_cid_maps[self.current_cid]
+                        cid_map.setdefault(original_name, short_name)
                     return short_name
             length += 1
     
@@ -416,6 +437,12 @@ class MinifyTransformer(ast.NodeTransformer):
         if self.scope_stack:
             self.scope_stack[-1].add(node.name)
         
+        # Track CID context
+        prev_cid = self.current_cid
+        self.current_cid = getattr(node, "_cai_cid", None)
+        if self.current_cid and self.current_cid not in self.per_cid_maps:
+            self.per_cid_maps[self.current_cid] = {}
+        
         # Enter a new scope
         self.scope_stack.append(set())
         
@@ -443,6 +470,9 @@ class MinifyTransformer(ast.NodeTransformer):
         # Exit scope
         self.scope_stack.pop()
         
+        # Restore previous CID context
+        self.current_cid = prev_cid
+        
         return result
     
     def visit_AsyncFunctionDef(self, node):
@@ -450,6 +480,12 @@ class MinifyTransformer(ast.NodeTransformer):
         # Add function name to parent scope (if any) before entering new scope
         if self.scope_stack:
             self.scope_stack[-1].add(node.name)
+        
+        # Track CID context
+        prev_cid = self.current_cid
+        self.current_cid = getattr(node, "_cai_cid", None)
+        if self.current_cid and self.current_cid not in self.per_cid_maps:
+            self.per_cid_maps[self.current_cid] = {}
         
         # Enter a new scope
         self.scope_stack.append(set())
@@ -477,6 +513,9 @@ class MinifyTransformer(ast.NodeTransformer):
         
         # Exit scope
         self.scope_stack.pop()
+        
+        # Restore previous CID context
+        self.current_cid = prev_cid
         
         return result
     
@@ -847,6 +886,75 @@ class MinifyTransformer(ast.NodeTransformer):
             return None
         
         return node
+
+
+        return marker
+
+
+def minify_with_map(code_str: str, depth: int = CompressionDepth.VARIABLES) -> MinifyResult:
+    """
+    Minify Python code and return both the minified code and per-CID variable mappings.
+    
+    Args:
+        code_str: The Python source code string to minify
+        depth: Control optimization level (1-4):
+               1=BASIC (comments/whitespace only)
+               2=CONSTANTS (+ constant folding)
+               3=VARIABLES (+ variable shortening)
+               4=AGGRESSIVE (+ all optimizations)
+    
+    Returns:
+        MinifyResult containing minified code and per-CID variable mappings
+        
+    Raises:
+        SyntaxError: If the input code is invalid Python
+        ValueError: If the code cannot be unparsed or validation fails
+    """
+    try:
+        # Parse the code into an AST
+        tree = ast.parse(code_str)
+        
+        # Apply AST transformations with CID tracking
+        transformer = MinifyTransformer(compression_depth=depth)
+        tree = transformer.visit(tree)
+        
+        # Fix missing locations for the transformer
+        ast.fix_missing_locations(tree)
+        
+        # Unparse back to code with safety wrapper
+        try:
+            if sys.version_info >= (3, 9):
+                minified = ast.unparse(tree)
+            elif HAS_ASTOR:
+                # Use astor for Python 3.8 compatibility
+                minified = astor.to_source(tree).strip()
+            else:
+                raise ValueError(
+                    "ast.unparse() requires Python 3.9+. For Python 3.8, install 'astor': pip install astor"
+                )
+        except Exception as e:
+            logger = get_logger()
+            logger._safe_log(logger.logger.error, f"Failed to unparse AST: {e}")
+            raise ValueError(f"AST unparsing failed: {e}") from e
+        
+        # Handle empty modules
+        if minified.strip() == "pass":
+            minified = ""
+        
+        # Validation step: verify minified code is still valid Python
+        try:
+            ast.parse(minified)
+        except SyntaxError as e:
+            raise ValueError(f"Invalid minified output: {e}")
+        
+        return MinifyResult(code=minified, per_cid_maps=transformer.per_cid_maps)
+            
+    except SyntaxError as e:
+        # Re-raise with more context
+        raise SyntaxError(f"Invalid Python code: {e}")
+    except Exception as e:
+        # Catch any other errors during processing
+        raise ValueError(f"Failed to minify code: {e}")
 
 
 # Convenience functions for different optimization levels

@@ -1,0 +1,499 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>WebSocket Compression Demo</title>
+    <style>
+      body {
+        font-family: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
+        max-width: 1200px;
+        margin: 0 auto;
+        padding: 20px;
+        background-color: #f5f5f5;
+      }
+
+      .container {
+        background: white;
+        border-radius: 10px;
+        padding: 30px;
+        box-shadow: 0 2px 10px rgba(0, 0, 0, 0.1);
+      }
+
+      h1 {
+        color: #333;
+        text-align: center;
+        margin-bottom: 30px;
+      }
+
+      .input-section {
+        margin-bottom: 30px;
+      }
+
+      label {
+        display: block;
+        margin-bottom: 5px;
+        font-weight: bold;
+        color: #555;
+      }
+
+      textarea {
+        width: 100%;
+        height: 200px;
+        padding: 10px;
+        border: 1px solid #ddd;
+        border-radius: 5px;
+        font-family: "Courier New", monospace;
+        font-size: 14px;
+        resize: vertical;
+      }
+
+      select,
+      input {
+        padding: 10px;
+        border: 1px solid #ddd;
+        border-radius: 5px;
+        margin-right: 10px;
+      }
+
+      button {
+        background-color: #007bff;
+        color: white;
+        padding: 12px 24px;
+        border: none;
+        border-radius: 5px;
+        cursor: pointer;
+        font-size: 16px;
+        margin-right: 10px;
+      }
+
+      button:hover {
+        background-color: #0056b3;
+      }
+
+      button:disabled {
+        background-color: #6c757d;
+        cursor: not-allowed;
+      }
+
+      .progress-section {
+        margin: 20px 0;
+      }
+
+      .progress-bar {
+        width: 100%;
+        height: 20px;
+        background-color: #e9ecef;
+        border-radius: 10px;
+        overflow: hidden;
+      }
+
+      .progress-fill {
+        height: 100%;
+        background-color: #28a745;
+        width: 0%;
+        transition: width 0.3s ease;
+      }
+
+      .progress-text {
+        margin-top: 10px;
+        font-weight: bold;
+        color: #333;
+      }
+
+      .results-section {
+        margin-top: 30px;
+      }
+
+      .result-box {
+        background-color: #f8f9fa;
+        border: 1px solid #dee2e6;
+        border-radius: 5px;
+        padding: 15px;
+        margin-bottom: 15px;
+      }
+
+      .metrics {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+        gap: 10px;
+        margin-bottom: 15px;
+      }
+
+      .metric {
+        background-color: #e9ecef;
+        padding: 10px;
+        border-radius: 5px;
+        text-align: center;
+      }
+
+      .metric-value {
+        font-size: 24px;
+        font-weight: bold;
+        color: #007bff;
+      }
+
+      .metric-label {
+        font-size: 12px;
+        color: #666;
+        text-transform: uppercase;
+      }
+
+      .log {
+        height: 150px;
+        overflow-y: auto;
+        background-color: #212529;
+        color: #fff;
+        padding: 10px;
+        border-radius: 5px;
+        font-family: "Courier New", monospace;
+        font-size: 12px;
+      }
+
+      .status {
+        padding: 10px;
+        border-radius: 5px;
+        margin-bottom: 15px;
+        font-weight: bold;
+      }
+
+      .status.connected {
+        background-color: #d4edda;
+        color: #155724;
+      }
+
+      .status.disconnected {
+        background-color: #f8d7da;
+        color: #721c24;
+      }
+
+      .status.error {
+        background-color: #f8d7da;
+        color: #721c24;
+      }
+
+      .code-output {
+        background-color: #f8f9fa;
+        border: 1px solid #dee2e6;
+        border-radius: 5px;
+        padding: 15px;
+        font-family: "Courier New", monospace;
+        font-size: 12px;
+        white-space: pre-wrap;
+        max-height: 300px;
+        overflow-y: auto;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="container">
+      <h1>🚀 Real-time Code Compression WebSocket Demo</h1>
+
+      <div class="input-section">
+        <label for="codeInput">Python Code to Compress:</label>
+        <textarea id="codeInput" placeholder="Enter your Python code here...">
+def hello_world():
+    """A simple hello world function"""
+    print("Hello, World!")
+    return "Hello, World!"
+
+# Call the function
+result = hello_world()
+print(f"Result: {result}")</textarea
+        >
+      </div>
+
+      <div class="input-section">
+        <label for="compressionType">Compression Type:</label>
+        <select id="compressionType">
+          <option value="semantic">Semantic Compression</option>
+          <option value="standard">Standard Minification</option>
+          <option value="aggressive">Aggressive Minification</option>
+        </select>
+
+        <label for="similarityThreshold"
+          >Similarity Threshold (for semantic):</label
+        >
+        <input
+          type="number"
+          id="similarityThreshold"
+          value="0.85"
+          min="0.1"
+          max="1.0"
+          step="0.05"
+        />
+
+        <button id="connectBtn" onclick="connect()">Connect</button>
+        <button id="compressBtn" onclick="compress()" disabled>
+          Compress Code
+        </button>
+        <button id="disconnectBtn" onclick="disconnect()" disabled>
+          Disconnect
+        </button>
+      </div>
+
+      <div id="statusSection" class="status disconnected">
+        Status: Disconnected
+      </div>
+
+      <div class="progress-section" id="progressSection" style="display: none">
+        <div class="progress-bar">
+          <div class="progress-fill" id="progressFill"></div>
+        </div>
+        <div class="progress-text" id="progressText">Ready to compress...</div>
+      </div>
+
+      <div class="results-section" id="resultsSection" style="display: none">
+        <h3>Compression Results</h3>
+        <div id="metricsSection" class="metrics"></div>
+
+        <h4>Compressed Code:</h4>
+        <div id="compressedCode" class="code-output"></div>
+      </div>
+
+      <div class="input-section">
+        <h3>Connection Log</h3>
+        <div id="log" class="log"></div>
+      </div>
+    </div>
+
+    <script>
+      let ws = null;
+      let isConnected = false;
+
+      function log(message) {
+        const logDiv = document.getElementById("log");
+        const timestamp = new Date().toLocaleTimeString();
+        logDiv.innerHTML += `[${timestamp}] ${message}\n`;
+        logDiv.scrollTop = logDiv.scrollHeight;
+      }
+
+      function updateStatus(status, className) {
+        const statusDiv = document.getElementById("statusSection");
+        statusDiv.textContent = `Status: ${status}`;
+        statusDiv.className = `status ${className}`;
+      }
+
+      function updateProgress(progress, message) {
+        const progressSection = document.getElementById("progressSection");
+        const progressFill = document.getElementById("progressFill");
+        const progressText = document.getElementById("progressText");
+
+        progressSection.style.display = "block";
+        progressFill.style.width = `${progress}%`;
+        progressText.textContent = `${progress}% - ${message}`;
+      }
+
+      function hideProgress() {
+        const progressSection = document.getElementById("progressSection");
+        progressSection.style.display = "none";
+      }
+
+      function displayResults(result) {
+        const resultsSection = document.getElementById("resultsSection");
+        const metricsSection = document.getElementById("metricsSection");
+        const compressedCode = document.getElementById("compressedCode");
+
+        resultsSection.style.display = "block";
+
+        // Display metrics
+        const metrics = result.metrics || {};
+        metricsSection.innerHTML = `
+                <div class="metric">
+                    <div class="metric-value">${
+                      metrics.original_tokens || "N/A"
+                    }</div>
+                    <div class="metric-label">Original Tokens</div>
+                </div>
+                <div class="metric">
+                    <div class="metric-value">${
+                      metrics.compressed_tokens || "N/A"
+                    }</div>
+                    <div class="metric-label">Compressed Tokens</div>
+                </div>
+                <div class="metric">
+                    <div class="metric-value">${
+                      metrics.tokens_saved || "N/A"
+                    }</div>
+                    <div class="metric-label">Tokens Saved</div>
+                </div>
+                <div class="metric">
+                    <div class="metric-value">${(
+                      metrics.compression_percentage || 0
+                    ).toFixed(1)}%</div>
+                    <div class="metric-label">Compression %</div>
+                </div>
+                ${
+                  metrics.similarity_score
+                    ? `
+                <div class="metric">
+                    <div class="metric-value">${metrics.similarity_score.toFixed(
+                      3
+                    )}</div>
+                    <div class="metric-label">Similarity Score</div>
+                </div>`
+                    : ""
+                }
+            `;
+
+        // Display compressed code
+        compressedCode.textContent =
+          result.compressed || "No compressed code available";
+      }
+
+      function connect() {
+        if (isConnected) {
+          log("Already connected");
+          return;
+        }
+
+        const wsUrl = "ws://localhost:8000/ws/compress";
+        log(`Connecting to ${wsUrl}...`);
+
+        ws = new WebSocket(wsUrl);
+
+        ws.onopen = function () {
+          isConnected = true;
+          log("WebSocket connected successfully");
+          updateStatus("Connected", "connected");
+
+          document.getElementById("connectBtn").disabled = true;
+          document.getElementById("compressBtn").disabled = false;
+          document.getElementById("disconnectBtn").disabled = false;
+        };
+
+        ws.onmessage = function (event) {
+          const data = JSON.parse(event.data);
+          log(`Received: ${event.data}`);
+
+          if (data.status === "complete") {
+            updateProgress(100, "Compression complete!");
+            displayResults(data);
+            setTimeout(hideProgress, 2000);
+          } else if (data.status === "error") {
+            updateProgress(0, `Error: ${data.message}`);
+            updateStatus("Error", "error");
+            setTimeout(hideProgress, 3000);
+          } else {
+            updateProgress(data.progress || 0, data.message || data.status);
+          }
+        };
+
+        ws.onclose = function () {
+          isConnected = false;
+          log("WebSocket connection closed");
+          updateStatus("Disconnected", "disconnected");
+          hideProgress();
+
+          document.getElementById("connectBtn").disabled = false;
+          document.getElementById("compressBtn").disabled = true;
+          document.getElementById("disconnectBtn").disabled = true;
+        };
+
+        ws.onerror = function (error) {
+          log(`WebSocket error: ${error}`);
+          updateStatus("Error", "error");
+        };
+      }
+
+      function compress() {
+        if (!isConnected || !ws) {
+          log("Not connected to WebSocket");
+          return;
+        }
+
+        const code = document.getElementById("codeInput").value;
+        const compressionType =
+          document.getElementById("compressionType").value;
+        const similarityThreshold = parseFloat(
+          document.getElementById("similarityThreshold").value
+        );
+
+        if (!code.trim()) {
+          log("Code input is empty");
+          return;
+        }
+
+        const request = {
+          code: code,
+          compression_type: compressionType,
+          similarity_threshold: similarityThreshold,
+        };
+
+        log(`Sending compression request: ${JSON.stringify(request, null, 2)}`);
+        ws.send(JSON.stringify(request));
+
+        // Hide previous results
+        document.getElementById("resultsSection").style.display = "none";
+      }
+
+      function disconnect() {
+        if (ws) {
+          ws.close();
+        }
+      }
+
+      // Sample code examples
+      function loadSampleCode(type) {
+        const codeInput = document.getElementById("codeInput");
+
+        if (type === "simple") {
+          codeInput.value = `def hello_world():
+    """A simple hello world function"""
+    print("Hello, World!")
+    return "Hello, World!"
+
+# Call the function
+result = hello_world()
+print(f"Result: {result}")`;
+        } else if (type === "complex") {
+          codeInput.value = `import asyncio
+from typing import List, Dict, Optional, Any
+from dataclasses import dataclass
+from datetime import datetime
+
+@dataclass
+class UserProfile:
+    """Represents a user profile with comprehensive data"""
+    user_id: int
+    username: str
+    email: str
+    created_at: datetime
+    preferences: Dict[str, Any]
+    is_active: bool = True
+    
+    def validate_email(self) -> bool:
+        """Validate email format using basic regex"""
+        import re
+        pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}$'
+        return bool(re.match(pattern, self.email))
+    
+    async def fetch_user_data(self, user_id: int) -> Optional[Dict[str, Any]]:
+        """Fetch user data from database asynchronously"""
+        try:
+            # Simulate database query
+            await asyncio.sleep(0.1)
+            return {
+                'user_id': user_id,
+                'profile_data': self.__dict__,
+                'last_updated': datetime.now().isoformat()
+            }
+        except Exception as e:
+            print(f"Error fetching user data: {e}")
+            return None`;
+        }
+      }
+
+      // Add sample code buttons
+      document.addEventListener("DOMContentLoaded", function () {
+        const inputSection = document.querySelector(".input-section");
+        const sampleButtons = document.createElement("div");
+        sampleButtons.innerHTML = `
+                <button type="button" onclick="loadSampleCode('simple')" style="background-color: #28a745; margin-top: 10px;">Load Simple Example</button>
+                <button type="button" onclick="loadSampleCode('complex')" style="background-color: #ffc107; color: black; margin-top: 10px;">Load Complex Example</button>
+            `;
+        inputSection.appendChild(sampleButtons);
+      });
+    </script>
+  </body>
+</html>

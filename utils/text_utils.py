@@ -3,10 +3,9 @@ from typing import Dict, Tuple, Union
 
 # Waterfall tier thresholds - making values constant for maintainability
 # These can be easily adjusted without changing the core logic
-# Adjusted to align with new aggressive token thresholds (chars ≈ tokens * 4)
-BASIC_THRESHOLD = 250    # ~250 chars ≈ 62 tokens (SMALL tier boundary)
-STANDARD_THRESHOLD = 1000   # ~1000 chars ≈ 250 tokens (MEDIUM tier boundary)  
-AGGRESSIVE_THRESHOLD = 4000  # ~4000 chars ≈ 1000 tokens (LARGE tier boundary)
+BASIC_THRESHOLD = 1000
+STANDARD_THRESHOLD = 5000
+AGGRESSIVE_THRESHOLD = 10000
 
 
 def select_waterfall_tier(input_length: int) -> CompressionType:
@@ -23,10 +22,10 @@ def select_waterfall_tier(input_length: int) -> CompressionType:
         CompressionType: The appropriate compression tier
         
     Thresholds:
-        - <= 250 chars: BASIC compression
-        - <= 1000 chars: STANDARD compression
-        - <= 4000 chars: AGGRESSIVE compression  
-        - > 4000 chars: SUMMARIZE compression
+        - <= 1000 chars: BASIC compression
+        - <= 5000 chars: STANDARD compression
+        - <= 10000 chars: AGGRESSIVE compression  
+        - > 10000 chars: SUMMARIZE compression
     """
     if input_length <= BASIC_THRESHOLD:
         return CompressionType.BASIC
@@ -67,13 +66,13 @@ def get_enum_thresholds() -> Dict[str, Tuple[int, float]]:
 def run_waterfall_tests():
     """Run test cases for the waterfall tier selection."""
     test_cases = [
-        (100, CompressionType.BASIC),
-        (500, CompressionType.STANDARD),
-        (2000, CompressionType.AGGRESSIVE),
-        (5000, CompressionType.SUMMARIZE),
-        (250, CompressionType.BASIC),  # boundary
-        (1000, CompressionType.STANDARD),  # boundary
-        (4000, CompressionType.AGGRESSIVE),  # boundary
+        (300, CompressionType.BASIC),
+        (1500, CompressionType.STANDARD),
+        (7500, CompressionType.AGGRESSIVE),
+        (15000, CompressionType.SUMMARIZE),
+        (1000, CompressionType.BASIC),  # boundary
+        (5000, CompressionType.STANDARD),  # boundary
+        (10000, CompressionType.AGGRESSIVE),  # boundary
     ]
 
     print("Waterfall Tier Selection Tests:")

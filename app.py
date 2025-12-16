@@ -1,20 +1,11 @@
-from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
-from fastapi.responses import HTMLResponse
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.openapi.utils import get_openapi
 from pydantic import BaseModel, Field, validator
 from typing import Optional, Dict, Any
 import time
 import ast
-import json
-import os
 from datetime import datetime
 import uvicorn
-from pathlib import Path
-from dotenv import load_dotenv
-
-# Load environment variables
-load_dotenv()
 
 # Import our enhanced minifier with logging
 from input_optimizer.engine.minifier import (
@@ -52,19 +43,6 @@ from input_optimizer.engine.semantic_compression_engine import (
 
 # Import adapter for tier-based compression
 from input_optimizer.engine.adapter import adapt_compression
-
-# Import session manager for tracking
-from core.session_manager import SecureSessionManager
-
-# Import production error handler
-from core.error_handler import ProductionErrorHandler, create_error_handler
-
-# Environment Configuration
-ENVIRONMENT = os.getenv("ENVIRONMENT", "development")
-LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
-HOST = os.getenv("HOST", "0.0.0.0")
-PORT = int(os.getenv("PORT", "8000"))
-METRICS_ENABLED = os.getenv("METRICS_ENABLED", "true").lower() == "true"
 
 # Initialize FastAPI app
 app = FastAPI(
@@ -105,31 +83,17 @@ minifier_logger = setup_minifier_logging(
     production_mode=True
 )
 
-# Initialize session manager for tracking compression/translation flows
-session_manager = SecureSessionManager()
-
-# Initialize production error handler
-error_handler = create_error_handler(fastapi_logger.logger)
-
 # Request/Response Models
 class MinifyRequest(BaseModel):
     code: str = Field(..., description="Python source code to minify", min_length=1, max_length=1000000)
     aggressive: Optional[bool] = Field(False, description="Enable aggressive optimizations (variable name shortening)")
     validate_output: Optional[bool] = Field(True, description="Validate minified output by re-parsing")
     compression_depth: Optional[int] = Field(None, description="Compression level (1-4): 1=basic, 2=constants, 3=variables, 4=aggressive")
-    compression_type: Optional[str] = Field("standard", description="Compression type: 'minimal', 'standard', 'aggressive', 'emergency'")
     
     @validator('compression_depth')
     def validate_compression_depth(cls, v):
         if v is not None and (v < 1 or v > 4):
             raise ValueError('compression_depth must be between 1 and 4')
-        return v
-    
-    @validator('compression_type')
-    def validate_compression_type(cls, v):
-        valid_types = ['minimal', 'standard', 'aggressive', 'emergency']
-        if v not in valid_types:
-            raise ValueError(f'compression_type must be one of: {valid_types}')
         return v
     
     @validator('code')
@@ -146,9 +110,6 @@ class MinifyResponse(BaseModel):
     size_reduction_percent: float = Field(..., description="Percentage reduction in size")
     processing_time_ms: float = Field(..., description="Processing time in milliseconds")
     compression_depth_used: int = Field(..., description="Compression depth level used")
-    session_id: Optional[str] = Field(None, description="Session ID for tracking this compression")
-    tokens_saved: Optional[int] = Field(None, description="Number of tokens saved")
-    compression_ratio: Optional[float] = Field(None, description="Compression ratio achieved")
 
 class OTPMMinifyRequest(BaseModel):
     code: str = Field(..., description="Python source code to minify", min_length=1, max_length=1000000)
@@ -366,23 +327,6 @@ async def health_check():
         uptime_seconds=time.time() - app.start_time
     )
 
-@app.get("/dashboard", response_class=HTMLResponse, tags=["Dashboard"])
-async def dashboard():
-    """Interactive web dashboard for demos"""
-    try:
-        dashboard_path = Path(__file__).parent / "static" / "dashboard.html"
-        with open(dashboard_path, 'r', encoding='utf-8') as f:
-            return f.read()
-    except FileNotFoundError:
-        return """
-        <html>
-        <body>
-            <h1>Dashboard Not Found</h1>
-            <p>The dashboard HTML file could not be found. Please check the static directory.</p>
-        </body>
-        </html>
-        """
-
 @app.post("/minify", response_model=MinifyResponse, tags=["Minification"])
 async def minify_python_code(request: MinifyRequest, http_request: Request):
     """
@@ -394,7 +338,6 @@ async def minify_python_code(request: MinifyRequest, http_request: Request):
     - Optional variable name shortening
     - Comprehensive error handling and validation
     - Performance metrics and logging
-    - Session tracking for compression flows
     
     Token estimation uses len(minified)//4 which approximates:
     - 4 characters per token on average for minified Python code
@@ -404,33 +347,14 @@ async def minify_python_code(request: MinifyRequest, http_request: Request):
     start_time = time.time()
     request_id = http_request.headers.get("x-request-id", "unknown")
     
-    # Create session for tracking
-    session_id = None
-    session = None
-    
     try:
-        # Create session for tracking this compression
-        temp_file_path = Path(f"/tmp/minify_{request_id}.py")
-        session_id = session_manager.create_session(
-            file_path=temp_file_path,
-            agent="api",
-            compressed_content="",  # Will be updated after compression
-            metadata={
-                "compression_type": request.compression_type,
-                "request_id": request_id,
-                "start_time": start_time
-            }
-        )
-        
         # Log the minification request
         fastapi_logger.log_token_metrics({
             "event": "minification_request",
             "request_id": request_id,
-            "session_id": session_id,
             "original_code_length": len(request.code),
             "aggressive_mode": request.aggressive,
             "compression_depth": request.compression_depth,
-            "compression_type": request.compression_type,
             "validation_enabled": request.validate_output
         })
         
@@ -453,43 +377,20 @@ async def minify_python_code(request: MinifyRequest, http_request: Request):
             operation_id=request_id
         )
         
-        # Calculate tokens saved and compression ratio
-        original_tokens = estimate_tokens(
-            request.code,
-            method="tiktoken",
-            model_type="gpt-4",
-            operation_id=request_id
-        )
-        tokens_saved = original_tokens - estimated_tokens
-        compression_ratio = estimated_tokens / original_tokens if original_tokens > 0 else 1.0
-        
         # Determine compression depth used
         if request.compression_depth is not None:
             compression_depth_used = request.compression_depth
         else:
             compression_depth_used = CompressionDepth.AGGRESSIVE if request.aggressive else CompressionDepth.CONSTANTS
         
-        # Update session with results
-        if session_id:
-            session_manager.update_session(session_id, {
-                "compressed_content": minified_code,
-                "tokens_saved": tokens_saved,
-                "compression_ratio": compression_ratio,
-                "processing_time_ms": processing_time_ms,
-                "success": True
-            })
-        
         # Log successful minification with enhanced metrics
         fastapi_logger.log_token_metrics({
             "event": "minification_success",
             "request_id": request_id,
-            "session_id": session_id,
             "original_size": original_size,
             "minified_size": minified_size,
             "size_reduction_percent": size_reduction_percent,
             "estimated_tokens": estimated_tokens,
-            "tokens_saved": tokens_saved,
-            "compression_ratio": compression_ratio,
             "processing_time_ms": processing_time_ms,
             "compression_depth_used": compression_depth_used,
             "method": "tiktoken"
@@ -502,21 +403,14 @@ async def minify_python_code(request: MinifyRequest, http_request: Request):
             minified_size=minified_size,
             size_reduction_percent=round(size_reduction_percent, 2),
             processing_time_ms=round(processing_time_ms, 2),
-            compression_depth_used=compression_depth_used,
-            session_id=session_id,
-            tokens_saved=tokens_saved,
-            compression_ratio=round(compression_ratio, 4)
+            compression_depth_used=compression_depth_used
         )
         
     except ValueError as e:
         # Handle validation errors (invalid Python code, etc.)
-        if session_id:
-            session_manager.update_session(session_id, {"error": str(e), "success": False})
-            
         fastapi_logger.log_token_metrics({
             "event": "minification_validation_error",
             "request_id": request_id,
-            "session_id": session_id,
             "error_message": str(e),
             "original_code_length": len(request.code)
         })
@@ -533,13 +427,9 @@ async def minify_python_code(request: MinifyRequest, http_request: Request):
         
     except SyntaxError as e:
         # Handle syntax errors in input code
-        if session_id:
-            session_manager.update_session(session_id, {"error": str(e), "success": False})
-            
         fastapi_logger.log_token_metrics({
             "event": "minification_syntax_error",
             "request_id": request_id,
-            "session_id": session_id,
             "error_message": str(e),
             "original_code_length": len(request.code)
         })
@@ -556,13 +446,9 @@ async def minify_python_code(request: MinifyRequest, http_request: Request):
         
     except Exception as e:
         # Handle unexpected errors
-        if session_id:
-            session_manager.update_session(session_id, {"error": str(e), "success": False})
-            
         fastapi_logger.log_token_metrics({
             "event": "minification_unexpected_error",
             "request_id": request_id,
-            "session_id": session_id,
             "error_type": type(e).__name__,
             "error_message": str(e),
             "original_code_length": len(request.code)
@@ -1636,24 +1522,12 @@ async def compress_semantic(request: SemanticCompressionRequest):
         )
         
     except ValueError as e:
-        # Use error handler for validation errors
-        context = {
-            'code': request.code,
-            'operation_id': request_id,
-            'endpoint': 'semantic_compression',
-            'error_type': 'validation'
-        }
-        
-        recovery_result = await error_handler.handle_compression_error(e, context)
-        
         fastapi_logger.log_token_metrics({
-            "event": "semantic_compression_validation_error_recovered",
+            "event": "semantic_compression_validation_error",
             "request_id": request_id,
             "error_type": "ValueError",
-            "error_message": str(e),
-            "recovery_strategy": recovery_result['error_recovery']['strategy_used']
+            "error_message": str(e)
         })
-        
         raise HTTPException(
             status_code=400,
             detail=ErrorResponse(
@@ -1664,70 +1538,21 @@ async def compress_semantic(request: SemanticCompressionRequest):
             ).dict()
         )
     except Exception as e:
-        # Use error handler for general compression errors
-        context = {
-            'code': request.code,
-            'operation_id': request_id,
-            'endpoint': 'semantic_compression',
-            'error_type': 'compression'
-        }
-        
-        try:
-            recovery_result = await error_handler.handle_compression_error(e, context)
-            
-            # Log successful error recovery
-            fastapi_logger.log_token_metrics({
-                "event": "semantic_compression_error_recovered",
-                "request_id": request_id,
-                "error_type": type(e).__name__,
-                "error_message": str(e),
-                "recovery_strategy": recovery_result['error_recovery']['strategy_used'],
-                "recovery_time_ms": recovery_result['error_recovery']['recovery_time_ms']
-            })
-            
-            # Return recovered result instead of throwing error
-            stage_breakdown = {}
-            for stage_name, stage_data in recovery_result.get('stage_results', {}).items():
-                stage_breakdown[stage_name] = {
-                    'tokens_saved': stage_data.get('tokens_saved', 0),
-                    'compression_ratio': stage_data.get('compression_ratio', 0),
-                    'description': f"Stage: {stage_name.replace('_', ' ').title()}"
-                }
-            
-            processing_time_ms = recovery_result['error_recovery']['recovery_time_ms']
-            
-            return SemanticCompressionResponse(
-                original_code=request.code,
-                compressed_code=recovery_result['compressed_code'],
-                original_tokens=estimate_tokens(request.code),
-                compressed_tokens=estimate_tokens(recovery_result['compressed_code']),
-                tokens_saved=max(0, estimate_tokens(request.code) - estimate_tokens(recovery_result['compressed_code'])),
-                compression_ratio=recovery_result.get('compression_ratio', 0.0),
-                compression_percentage=recovery_result.get('compression_ratio', 0.0) * 100,
-                similarity_score=recovery_result.get('similarity_score', 1.0),
-                meets_threshold=recovery_result.get('similarity_score', 1.0) >= request.similarity_threshold,
-                stage_breakdown=stage_breakdown,
-                processing_time_ms=processing_time_ms
-            )
-            
-        except Exception as recovery_error:
-            # If error recovery also fails, log and raise original error
-            fastapi_logger.log_token_metrics({
-                "event": "semantic_compression_error_recovery_failed",
-                "request_id": request_id,
-                "original_error": str(e),
-                "recovery_error": str(recovery_error)
-            })
-            
-            raise HTTPException(
-                status_code=500,
-                detail=ErrorResponse(
-                    error="CompressionError",
-                    message=f"Failed to perform semantic compression: {str(e)}",
-                    timestamp=datetime.utcnow().isoformat(),
-                    request_id=request_id
-                ).dict()
-            )
+        fastapi_logger.log_token_metrics({
+            "event": "semantic_compression_error",
+            "request_id": request_id,
+            "error_type": type(e).__name__,
+            "error_message": str(e)
+        })
+        raise HTTPException(
+            status_code=500,
+            detail=ErrorResponse(
+                error="CompressionError",
+                message="Failed to perform semantic compression",
+                timestamp=datetime.utcnow().isoformat(),
+                request_id=request_id
+            ).dict()
+        )
 
 @app.post("/compress/compare", response_model=CompressionComparisonResponse, tags=["Semantic Compression"])
 async def compare_compression_methods(request: CompressionComparisonRequest):
@@ -1837,221 +1662,6 @@ async def compare_compression_methods(request: CompressionComparisonRequest):
             ).dict()
         )
 
-# WebSocket Models and Functions
-class CompressionProgressResponse(BaseModel):
-    status: str = Field(..., description="Current status: 'analyzing', 'compressing', 'complete', 'error'")
-    progress: int = Field(..., description="Progress percentage (0-100)")
-    message: Optional[str] = Field(None, description="Status message")
-    compressed: Optional[str] = Field(None, description="Compressed code (only when complete)")
-    metrics: Optional[Dict[str, Any]] = Field(None, description="Compression metrics (only when complete)")
-
-async def compress_with_progress(code: str, websocket: WebSocket, compression_type: str = "semantic") -> Dict[str, Any]:
-    """
-    Perform compression with progress updates via WebSocket.
-    
-    Args:
-        code: Source code to compress
-        websocket: WebSocket connection for progress updates
-        compression_type: Type of compression ('semantic', 'standard', 'aggressive')
-    
-    Returns:
-        Dictionary with compressed code and metrics
-    """
-    request_id = str(int(time.time() * 1000))
-    
-    try:
-        # Phase 1: Code Analysis (25% progress)
-        await websocket.send_json({
-            "status": "analyzing", 
-            "progress": 25,
-            "message": "Analyzing code structure and characteristics..."
-        })
-        
-        analysis = _analyze_code_characteristics(code)
-        original_tokens = estimate_tokens(code)
-        
-        # Phase 2: Preparing Compression (50% progress)
-        await websocket.send_json({
-            "status": "compressing", 
-            "progress": 50,
-            "message": f"Preparing {compression_type} compression..."
-        })
-        
-        # Phase 3: Performing Compression (75% progress)
-        await websocket.send_json({
-            "status": "compressing", 
-            "progress": 75,
-            "message": "Applying compression algorithms..."
-        })
-        
-        # Perform the actual compression based on type
-        if compression_type == "semantic":
-            result = semantic_engine.compress(code)
-            compressed_code = result['compressed_code']
-            compression_metrics = {
-                'compression_ratio': result['compression_ratio'],
-                'compression_percentage': result['compression_percentage'],
-                'similarity_score': result['similarity_score'],
-                'tokens_saved': result['tokens_saved'],
-                'meets_threshold': result['meets_threshold'],
-                'original_tokens': original_tokens,
-                'compressed_tokens': result['compressed_tokens']
-            }
-        else:
-            # Use standard minification for other types
-            if compression_type == "aggressive":
-                minified_result = minify_with_otpm_tracking(
-                    code=code,
-                    compression_type="aggressive",
-                    request_id=request_id
-                )
-            else:
-                minified_result = minify_with_otpm_tracking(
-                    code=code,
-                    compression_type="standard",
-                    request_id=request_id
-                )
-            
-            # Handle the result keys properly
-            compressed_code = minified_result.get('minified') or minified_result.get('compressed_code', code)
-            compressed_tokens = estimate_tokens(compressed_code)
-            compression_metrics = {
-                'compression_ratio': compressed_tokens / original_tokens if original_tokens > 0 else 1.0,
-                'compression_percentage': ((original_tokens - compressed_tokens) / original_tokens * 100) if original_tokens > 0 else 0,
-                'original_tokens': original_tokens,
-                'compressed_tokens': compressed_tokens,
-                'tokens_saved': original_tokens - compressed_tokens,
-                'otpm_status': minified_result.get('otpm_status', 'unknown'),
-                'remaining_pct': minified_result.get('remaining_pct', 100.0)
-            }
-        
-        # Phase 4: Complete (100% progress)
-        final_result = {
-            "status": "complete",
-            "progress": 100,
-            "compressed": compressed_code,
-            "metrics": compression_metrics
-        }
-        
-        return final_result
-        
-    except Exception as e:
-        error_result = {
-            "status": "error",
-            "progress": 0,
-            "message": f"Compression failed: {str(e)}",
-            "error_type": type(e).__name__
-        }
-        await websocket.send_json(error_result)
-        return error_result
-
-@app.websocket("/ws/compress")
-async def websocket_compress(websocket: WebSocket):
-    """
-    WebSocket endpoint for real-time compression with progress updates.
-    
-    Expected input format:
-    {
-        "code": "string",
-        "compression_type": "semantic|standard|aggressive",
-        "similarity_threshold": 0.85 (optional, for semantic compression)
-    }
-    
-    Progress updates will be sent with status and progress percentage.
-    Final result includes compressed code and detailed metrics.
-    """
-    await websocket.accept()
-    
-    try:
-        while True:
-            # Receive data from client
-            data = await websocket.receive_text()
-            
-            try:
-                # Parse the incoming request
-                request_data = json.loads(data)
-                code = request_data.get("code", "")
-                compression_type = request_data.get("compression_type", "semantic")
-                similarity_threshold = request_data.get("similarity_threshold", 0.85)
-                
-                if not code.strip():
-                    await websocket.send_json({
-                        "status": "error",
-                        "progress": 0,
-                        "message": "Code cannot be empty"
-                    })
-                    continue
-                
-                # Set similarity threshold for semantic compression
-                if compression_type == "semantic":
-                    semantic_engine.similarity_threshold = similarity_threshold
-                
-                # Log the request
-                fastapi_logger.info(f"WebSocket compression request: type={compression_type}, length={len(code)}")
-                
-                # Perform compression with progress updates
-                result = await compress_with_progress(code, websocket, compression_type)
-                
-                # Send final result
-                await websocket.send_json(result)
-                
-                # Log completion
-                if result["status"] == "complete":
-                    fastapi_logger.info(f"WebSocket compression completed: type={compression_type}, saved={result['metrics'].get('tokens_saved', 0)} tokens")
-                
-            except json.JSONDecodeError as e:
-                await websocket.send_json({
-                    "status": "error",
-                    "progress": 0,
-                    "message": f"Invalid JSON format: {str(e)}"
-                })
-            except Exception as e:
-                # Use error handler for WebSocket compression errors
-                context = {
-                    'code': code,
-                    'operation_id': f'websocket_{int(time.time() * 1000)}',
-                    'endpoint': 'websocket_compression',
-                    'compression_type': compression_type,
-                    'error_type': 'websocket_compression'
-                }
-                
-                try:
-                    recovery_result = await error_handler.handle_compression_error(e, context)
-                    
-                    # Send recovery result to client
-                    await websocket.send_json({
-                        "status": "complete",
-                        "progress": 100,
-                        "message": "Compression completed with error recovery",
-                        "error_recovery": {
-                            "strategy_used": recovery_result['error_recovery']['strategy_used'],
-                            "original_error": str(e)
-                        },
-                        "metrics": {
-                            "compression_percentage": recovery_result.get('compression_ratio', 0.0) * 100,
-                            "similarity_score": recovery_result.get('similarity_score', 1.0),
-                            "tokens_saved": max(0, estimate_tokens(code) - estimate_tokens(recovery_result['compressed_code'])),
-                            "recovery_time_ms": recovery_result['error_recovery']['recovery_time_ms']
-                        },
-                        "compressed_code": recovery_result['compressed_code']
-                    })
-                    
-                except Exception as recovery_error:
-                    # If recovery also fails, send error message
-                    await websocket.send_json({
-                        "status": "error",
-                        "progress": 0,
-                        "message": f"Processing error: {str(e)}",
-                        "error_type": type(e).__name__,
-                        "recovery_failed": True,
-                        "recovery_error": str(recovery_error)
-                    })
-                
-    except WebSocketDisconnect:
-        fastapi_logger.info("WebSocket client disconnected normally")
-    except Exception as e:
-        fastapi_logger.error(f"WebSocket error: {type(e).__name__}: {str(e)}")
-
 def _analyze_code_characteristics(code: str) -> Dict[str, Any]:
     """Analyze code to determine optimal compression strategy"""
     lines = code.split('\n')
@@ -2121,293 +1731,6 @@ def _get_compression_recommendation(semantic_result: Dict, maximum_result: Optio
         'reason': f"Balanced approach with {semantic_result['similarity_score']:.2f} similarity and {semantic_result['compression_percentage']:.1f}% compression"
     }
 
-
-def get_example_for_endpoint(path: str, method: str) -> str:
-    """
-    Generate code examples for API endpoints.
-    
-    Args:
-        path: API endpoint path  
-        method: HTTP method
-        
-    Returns:
-        Python code example for the endpoint
-    """
-    examples = {
-        ("/minify", "post"): '''
-import requests
-
-response = requests.post(
-    "http://localhost:8000/minify",
-    json={
-        "code": "def hello_world():\\n    print('Hello, World!')",
-        "compress_strings": True,
-        "compress_vars": True
-    }
-)
-print(response.json())
-        '''.strip(),
-        
-        ("/minify/stats", "post"): '''
-import requests
-
-response = requests.post(
-    "http://localhost:8000/minify/stats", 
-    json={
-        "code": "class Calculator:\\n    def add(self, a, b):\\n        return a + b",
-        "compress_strings": True,
-        "compress_vars": True
-    }
-)
-stats = response.json()
-print(f"Compression: {stats['compression_percentage']:.1f}%")
-        '''.strip(),
-        
-        ("/translate/sudolang", "post"): '''
-import requests
-
-response = requests.post(
-    "http://localhost:8000/translate/sudolang",
-    json={
-        "code": "for i in range(10):\\n    if i % 2 == 0:\\n        print(i)"
-    }
-)
-print(response.json()['sudolang_translation'])
-        '''.strip(),
-        
-        ("/translate/synthlang", "post"): '''
-import requests
-
-response = requests.post(
-    "http://localhost:8000/translate/synthlang",
-    json={
-        "code": "def fibonacci(n):\\n    return n if n <= 1 else fibonacci(n-1) + fibonacci(n-2)"
-    }
-)
-print(response.json()['synthlang_translation'])
-        '''.strip(),
-        
-        ("/compress/semantic", "post"): '''
-import requests
-
-response = requests.post(
-    "http://localhost:8000/compress/semantic",
-    json={
-        "code": "def process_data(data):\\n    results = []\\n    for item in data:\\n        if item.is_valid():\\n            results.append(item.transform())\\n    return results",
-        "compression_level": "moderate"
-    }
-)
-compressed = response.json()
-print(f"Original: {compressed['original_tokens']} tokens")
-print(f"Compressed: {compressed['compressed_tokens']} tokens")
-        '''.strip(),
-        
-        ("/health", "get"): '''
-import requests
-
-response = requests.get("http://localhost:8000/health")
-health = response.json()
-print(f"Status: {health['status']}")
-print(f"Uptime: {health['uptime_seconds']:.1f}s")
-        '''.strip(),
-        
-        ("/metrics", "get"): '''
-import requests
-
-response = requests.get("http://localhost:8000/metrics")
-metrics = response.text
-print("Prometheus Metrics:")
-print(metrics[:500] + "..." if len(metrics) > 500 else metrics)
-        '''.strip()
-    }
-    
-    return examples.get((path, method), f'''
-import requests
-
-response = requests.{method}("http://localhost:8000{path}")
-print(response.json())
-    '''.strip())
-
-
-def custom_openapi():
-    """
-    Generate comprehensive OpenAPI documentation with examples.
-    
-    Returns:
-        Custom OpenAPI schema with enhanced documentation
-    """
-    if app.openapi_schema:
-        return app.openapi_schema
-        
-    # Log documentation generation
-    fastapi_logger.info("Generating comprehensive OpenAPI documentation")
-    
-    openapi_schema = get_openapi(
-        title="OptimizeAI API",
-        version="1.0.0",
-        description="""
-        ## Overview
-        OptimizeAI provides intelligent code compression and translation for AI workflows.
-        
-        ## Key Features
-        - **40-87% token reduction** across different compression tiers
-        - **Semantic preservation** maintaining code functionality
-        - **Multi-tier compression** (basic, moderate, aggressive, maximum)
-        - **Real-time processing** with comprehensive monitoring
-        - **Translation support** for SudoLang and SynthLang
-        - **Chained transformations** for complex workflows
-        - **Production monitoring** with Prometheus metrics
-        
-        ## Quick Start
-        ```python
-        import requests
-        
-        # Basic minification
-        response = requests.post(
-            "http://localhost:8000/minify",
-            json={"code": "def hello(): print('world')"}
-        )
-        result = response.json()
-        print(f"Compressed: {result['minified_code']}")
-        print(f"Reduction: {result['compression_percentage']:.1f}%")
-        ```
-        
-        ## Compression Tiers
-        - **Basic**: Safe compression with variable/string optimization
-        - **Moderate**: Balanced approach with semantic analysis  
-        - **Aggressive**: High compression with advanced techniques
-        - **Maximum**: Extreme compression for maximum token reduction
-        
-        ## Translation Languages
-        - **SudoLang**: Natural language pseudocode representation
-        - **SynthLang**: Synthetic compact language for AI processing
-        
-        ## Monitoring & Analytics
-        - Real-time performance metrics via `/health` and `/metrics`
-        - Comprehensive compression analytics and reporting
-        - Error tracking with detailed logging
-        - WebSocket support for live monitoring
-        
-        ## Rate Limits
-        - Standard: 1000 requests/hour
-        - Premium: 10000 requests/hour
-        - Enterprise: Unlimited
-        
-        ## Support
-        - Documentation: `/docs` (this page)
-        - Health Check: `/health`
-        - Metrics: `/metrics`
-        - Dashboard: `/dashboard`
-        """,
-        routes=app.routes,
-    )
-    
-    # Add code examples to each endpoint
-    try:
-        for path in openapi_schema["paths"]:
-            for method in openapi_schema["paths"][path]:
-                if "x-code-samples" not in openapi_schema["paths"][path][method]:
-                    openapi_schema["paths"][path][method]["x-code-samples"] = [
-                        {
-                            "lang": "Python",
-                            "source": get_example_for_endpoint(path, method),
-                            "label": "Python Requests"
-                        },
-                        {
-                            "lang": "curl", 
-                            "source": f'curl -X {method.upper()} "http://localhost:8000{path}" \\' +
-                                    ('\n  -H "Content-Type: application/json" \\' if method.lower() != 'get' else '') +
-                                    ('\n  -d \'{"code": "def example(): pass"}\'' if method.lower() != 'get' else ''),
-                            "label": "cURL"
-                        }
-                    ]
-                    
-                # Add detailed response examples
-                if "responses" in openapi_schema["paths"][path][method]:
-                    for status_code in openapi_schema["paths"][path][method]["responses"]:
-                        if status_code == "200" and "content" in openapi_schema["paths"][path][method]["responses"][status_code]:
-                            response_content = openapi_schema["paths"][path][method]["responses"][status_code]["content"]
-                            if "application/json" in response_content:
-                                if "examples" not in response_content["application/json"]:
-                                    response_content["application/json"]["examples"] = {
-                                        "success_example": {
-                                            "summary": "Successful Response",
-                                            "value": _get_example_response(path, method)
-                                        }
-                                    }
-        
-        # Add comprehensive tags descriptions
-        openapi_schema["tags"] = [
-            {
-                "name": "Health",
-                "description": "System health monitoring and status checks"
-            },
-            {
-                "name": "Dashboard", 
-                "description": "Web-based monitoring dashboard interface"
-            },
-            {
-                "name": "Minification",
-                "description": "Code compression and minification services"
-            },
-            {
-                "name": "Translation",
-                "description": "Code translation to specialized languages"
-            },
-            {
-                "name": "Chained Transformations",
-                "description": "Complex multi-step code transformations"
-            },
-            {
-                "name": "Semantic Compression", 
-                "description": "Advanced semantic-aware compression techniques"
-            },
-            {
-                "name": "Monitoring",
-                "description": "System metrics and performance monitoring"
-            }
-        ]
-        
-        fastapi_logger.info("OpenAPI documentation generated successfully with examples")
-        
-    except Exception as e:
-        fastapi_logger.error(f"Error enhancing OpenAPI documentation: {e}")
-    
-    app.openapi_schema = openapi_schema
-    return app.openapi_schema
-
-
-def _get_example_response(path: str, method: str) -> Dict[str, Any]:
-    """Generate example responses for endpoints"""
-    examples = {
-        ("/minify", "post"): {
-            "minified_code": "def hello():print('world')",
-            "original_length": 24,
-            "minified_length": 21,
-            "compression_percentage": 12.5,
-            "status": "success"
-        },
-        ("/health", "get"): {
-            "status": "healthy",
-            "uptime_seconds": 3600.5,
-            "compressions_per_minute": 45.2,
-            "error_rate": 0.001,
-            "last_updated": "2025-08-03T10:30:00Z"
-        },
-        ("/translate/sudolang", "post"): {
-            "sudolang_translation": "FOR each number from 0 to 9:\n  IF number is even:\n    PRINT number",
-            "original_code": "for i in range(10):\n    if i % 2 == 0:\n        print(i)",
-            "translation_time": 0.045,
-            "status": "success"
-        }
-    }
-    
-    return examples.get((path, method), {"status": "success", "message": "Operation completed"})
-
-
-# Set custom OpenAPI
-app.openapi = custom_openapi
-
 # Startup event
 @app.on_event("startup")
 async def startup_event():
@@ -2429,9 +1752,9 @@ async def shutdown_event():
 if __name__ == "__main__":
     uvicorn.run(
         "app:app",
-        host=HOST,
-        port=PORT,
-        reload=ENVIRONMENT == "development",
-        log_level=LOG_LEVEL.lower(),
+        host="0.0.0.0",
+        port=8000,
+        reload=True,
+        log_level="info",
         access_log=True
     )

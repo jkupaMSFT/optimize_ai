@@ -1,8 +1,0 @@
-# CAI Format - Standard Compression (Minifier-based)
-# Source: examples/demo_project/main.py
-# Source-Hash: ee04c9a3
-# Method: cai_deduplication
-# CAI_STRUCTURE:
-F[calculate(x, y) -> """Simple calculation function for demo purposes."""]
-F[process_list(items) -> """Process a list of items."""]
-F[__init__(self, multiplier=1) -> self.multiplier = multiplier]

@@ -1,13 +1,18 @@
 import ast
 import time
 from typing import Dict, Any, Union, List, Callable
-from pathlib import Path
 from utils.logger import MinifierLogger
 
 # Initialize logger for SynthLang translator
 translator_logger = MinifierLogger(
-    log_path=Path("logs/translator.log"),
-    log_level="INFO"
+    name="synth_lang_translator",
+    level="INFO",
+    log_file="logs/translator.log",
+    enable_console=True,
+    enable_file=True,
+    enable_metrics=True,
+    enable_performance=True,
+    enable_ast_details=True
 )
 
 # Extended mappings for modern Python features
@@ -2052,11 +2057,13 @@ def python_to_synthlang_node_map(code: str, indent_size: int = 2) -> str:
 python_to_synthlang = enhanced_python_to_synthlang
 
 # Log translator initialization
-translator_logger.info(
+translator_logger._safe_log(
+    translator_logger.logger.info,
     "SynthLang translator module initialized successfully",
     {
         "node_map_entries": len(NODE_MAP),
-        "enhanced_features": list(ENHANCED_AST_TO_SYNTHLANG.keys())
+        "enhanced_features": list(ENHANCED_AST_TO_SYNTHLANG.keys()),
+        "session_id": translator_logger.session_id
     }
 )
 

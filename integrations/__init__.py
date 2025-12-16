@@ -1,3 +1,0 @@
-"""
-OptimizeAI Integrations Package
-"""

@@ -1,9 +1,0 @@
-# CAI Format - Standard Compression (Minifier-based)
-# Source: examples/large_module.py
-# Source-Hash: bcaa3c81
-# Method: cai_deduplication
-# CAI_STRUCTURE:
-F[__post_init__(self) -> """Validate the data record after initialization."""]
-F[__init__(self, config_path: Optional[Path] = None) -> """Initialize the data processor with optional configuration."""]
-F[create_sample_data(count: int = 50) -> """Create sample data records for testing."""]
-F[main() -> """Main execution function."""]

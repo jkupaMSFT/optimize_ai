@@ -114,7 +114,7 @@ class WaterfallCompressor:
         
         return result
         
-    def compress_string(self, content: str, source_path: Optional[Path] = None) -> CompressionResult:
+    def compress_string(self, content: str, source_path: Optional[Path] = None) -> Tuple[str, str]:
         """
         Compress a string using waterfall method.
         
@@ -123,8 +123,11 @@ class WaterfallCompressor:
             source_path: Optional source file path for metadata
             
         Returns:
-            CompressionResult with compressed content and metrics
+            Tuple of (content_hash, compressed_content_string)
         """
+        # Hash the input content
+        content_hash = hashlib.md5(content.encode()).hexdigest()
+        
         # Count tokens
         original_tokens = count_tokens(content, self.llm_model)
         
@@ -202,7 +205,8 @@ class WaterfallCompressor:
             f"(confidence: {confidence_score:.2f})"
         )
         
-        return result
+        # Return tuple of (hash, compressed_string)
+        return (content_hash, result.content)
         
     def _handle_syntax_error(self, content: str, original_tokens: int, error: SyntaxError, source_path: Optional[Path] = None) -> CompressionResult:
         """

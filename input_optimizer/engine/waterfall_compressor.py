@@ -80,24 +80,35 @@ class WaterfallCompressor:
         # Add CAI compressor for test compatibility
         self.cai_compressor = self._create_cai_compressor()
         
-    def compress(self, content: str, source_path: Optional[Path] = None) -> CompressionResult:
-        """Main compression method - delegates to compress_string."""
-        return self.compress_string(content, source_path)
+    def compress(self, content: str, compression_strategy: str, source_path: Optional[Path] = None) -> tuple:
+        """Main compression method - delegates to compress_string.
+        
+        BREAKING CHANGE: Now requires compression_strategy parameter and returns tuple.
+        """
+        return self.compress_string(content, compression_strategy, source_path)
     
-    def compress_file(self, file_path: Path) -> CompressionResult:
+    def compress_file(self, file_path: Path, compression_strategy: str = "auto") -> tuple:
         """
         Compress a file using waterfall method.
         
+        BREAKING CHANGE: Now requires compression_strategy parameter and returns tuple.
+        
         Args:
             file_path: Path to Python file
+            compression_strategy: Strategy to use ('auto', 'aggressive', 'conservative')
             
         Returns:
-            CompressionResult with compressed content and metrics
+            Tuple of (compressed_content, metadata_dict, metrics_dict)
         """
         # Check cache first
         cached_result = self._check_cache(file_path)
         if cached_result:
-            return cached_result
+            # Convert cached CompressionResult to tuple format
+            return (cached_result.content, cached_result.metadata, {
+                'original_tokens': cached_result.original_tokens,
+                'compressed_tokens': cached_result.compressed_tokens,
+                'compression_ratio': cached_result.compression_ratio
+            })
             
         # Read file content
         try:
@@ -107,24 +118,40 @@ class WaterfallCompressor:
             raise
             
         # Compress using waterfall method
-        result = self.compress_string(content, source_path=file_path)
+        result_tuple = self.compress_string(content, compression_strategy, source_path=file_path)
         
-        # Cache the result
-        self._cache_result(file_path, result)
+        # Convert tuple back to CompressionResult for caching
+        temp_result = CompressionResult(
+            original_tokens=result_tuple[2]['original_tokens'],
+            compressed_tokens=result_tuple[2]['compressed_tokens'],
+            compression_ratio=result_tuple[2]['compression_ratio'],
+            tier_used=result_tuple[1].get('tier_used', CompressionTier.MEDIUM),
+            method_used=result_tuple[1].get('method_used', 'unknown'),
+            content=result_tuple[0],
+            metadata=result_tuple[1]
+        )
+        self._cache_result(file_path, temp_result)
         
-        return result
+        return result_tuple
         
-    def compress_string(self, content: str, source_path: Optional[Path] = None) -> CompressionResult:
+    def compress_string(self, content: str, compression_strategy: str, source_path: Optional[Path] = None) -> tuple:
         """
         Compress a string using waterfall method.
         
+        BREAKING CHANGE: Now requires compression_strategy parameter and returns tuple.
+        
         Args:
             content: Python code content
+            compression_strategy: Strategy to use ('auto', 'aggressive', 'conservative')
             source_path: Optional source file path for metadata
             
         Returns:
-            CompressionResult with compressed content and metrics
+            Tuple of (compressed_content: str, metadata: dict, metrics: dict)
         """
+        # Validate compression strategy
+        valid_strategies = ['auto', 'aggressive', 'conservative']
+        if compression_strategy not in valid_strategies:
+            raise ValueError(f"Invalid compression_strategy: {compression_strategy}. Must be one of {valid_strategies}")
         # Count tokens
         original_tokens = count_tokens(content, self.llm_model)
         
@@ -199,10 +226,21 @@ class WaterfallCompressor:
         self.logger.info(
             f"Compressed {original_tokens} tokens to {result.compressed_tokens} "
             f"({result.compression_ratio:.1f}% reduction) using {result.method_used} "
-            f"(confidence: {confidence_score:.2f})"
+            f"(confidence: {confidence_score:.2f}, strategy: {compression_strategy})"
         )
         
-        return result
+        # BREAKING CHANGE: Return tuple instead of CompressionResult
+        metrics = {
+            'original_tokens': result.original_tokens,
+            'compressed_tokens': result.compressed_tokens,
+            'compression_ratio': result.compression_ratio
+        }
+        metadata = result.metadata
+        metadata['tier_used'] = result.tier_used
+        metadata['method_used'] = result.method_used
+        metadata['compression_strategy'] = compression_strategy
+        
+        return (result.content, metadata, metrics)
         
     def _handle_syntax_error(self, content: str, original_tokens: int, error: SyntaxError, source_path: Optional[Path] = None) -> CompressionResult:
         """
